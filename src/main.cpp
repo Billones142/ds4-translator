@@ -432,21 +432,23 @@ int main(int argc, char* argv[]) {
                         
                         if (target_type == TYPE_DS4) {
                             strncpy((char*)ev.u.create2.name, "Sony Interactive Entertainment Wireless Controller", sizeof(ev.u.create2.name));
+                            strncpy((char*)ev.u.create2.uniq, "74:e7:d6:3a:47:e8", sizeof(ev.u.create2.uniq));
                             ev.u.create2.rd_size = sizeof(ds4_usb_rdesc);
                             memcpy(ev.u.create2.rd_data, ds4_usb_rdesc, sizeof(ds4_usb_rdesc));
                             ev.u.create2.bus = BUS_USB;
                             ev.u.create2.vendor = 0x054c;
                             ev.u.create2.product = 0x09cc;
-                            ev.u.create2.version = 0;
+                            ev.u.create2.version = 0x8111;
                             ev.u.create2.country = 0;
                         } else {
                             strncpy((char*)ev.u.create2.name, "Sony Interactive Entertainment DualSense Wireless Controller", sizeof(ev.u.create2.name));
+                            strncpy((char*)ev.u.create2.uniq, "74:e7:d6:3a:47:e8", sizeof(ev.u.create2.uniq));
                             ev.u.create2.rd_size = sizeof(dualsense_usb_rdesc);
                             memcpy(ev.u.create2.rd_data, dualsense_usb_rdesc, sizeof(dualsense_usb_rdesc));
                             ev.u.create2.bus = BUS_USB;
                             ev.u.create2.vendor = 0x054c;
                             ev.u.create2.product = 0x0ce6;
-                            ev.u.create2.version = 0;
+                            ev.u.create2.version = 0x8111;
                             ev.u.create2.country = 0;
                         }
 
@@ -572,21 +574,23 @@ int main(int argc, char* argv[]) {
                     
                     if (target_type == TYPE_DS4) {
                         strncpy((char*)ev.u.create2.name, "Sony Interactive Entertainment Wireless Controller", sizeof(ev.u.create2.name));
+                        strncpy((char*)ev.u.create2.uniq, "74:e7:d6:3a:47:e8", sizeof(ev.u.create2.uniq));
                         ev.u.create2.rd_size = sizeof(ds4_usb_rdesc);
                         memcpy(ev.u.create2.rd_data, ds4_usb_rdesc, sizeof(ds4_usb_rdesc));
                         ev.u.create2.bus = BUS_USB;
                         ev.u.create2.vendor = 0x054c;
                         ev.u.create2.product = 0x09cc;
-                        ev.u.create2.version = 0;
+                        ev.u.create2.version = 0x8111;
                         ev.u.create2.country = 0;
                     } else {
                         strncpy((char*)ev.u.create2.name, "Sony Interactive Entertainment DualSense Wireless Controller", sizeof(ev.u.create2.name));
+                        strncpy((char*)ev.u.create2.uniq, "74:e7:d6:3a:47:e8", sizeof(ev.u.create2.uniq));
                         ev.u.create2.rd_size = sizeof(dualsense_usb_rdesc);
                         memcpy(ev.u.create2.rd_data, dualsense_usb_rdesc, sizeof(dualsense_usb_rdesc));
                         ev.u.create2.bus = BUS_USB;
                         ev.u.create2.vendor = 0x054c;
                         ev.u.create2.product = 0x0ce6;
-                        ev.u.create2.version = 0;
+                        ev.u.create2.version = 0x8111;
                         ev.u.create2.country = 0;
                     }
 
@@ -802,47 +806,48 @@ int main(int argc, char* argv[]) {
                                 } else if (rnum == 0x12) {
                                     reply_ev.u.get_report_reply.size = 16;
                                     reply_ev.u.get_report_reply.data[0] = 0x12;
-                                    reply_ev.u.get_report_reply.data[1] = 0x00;
-                                    reply_ev.u.get_report_reply.data[2] = 0x11;
-                                    reply_ev.u.get_report_reply.data[3] = 0x22;
-                                    reply_ev.u.get_report_reply.data[4] = 0x33;
-                                    reply_ev.u.get_report_reply.data[5] = 0x44;
-                                    reply_ev.u.get_report_reply.data[6] = 0x55;
+                                    reply_ev.u.get_report_reply.data[1] = 0xe8;
+                                    reply_ev.u.get_report_reply.data[2] = 0x47;
+                                    reply_ev.u.get_report_reply.data[3] = 0x3a;
+                                    reply_ev.u.get_report_reply.data[4] = 0xd6;
+                                    reply_ev.u.get_report_reply.data[5] = 0xe7;
+                                    reply_ev.u.get_report_reply.data[6] = 0x74;
                                 }
                             } else { // DualSense
                                 if (rnum == 0x05) {
                                     reply_ev.u.get_report_reply.size = 41;
-                                    reply_ev.u.get_report_reply.data[0] = 0x05;
-                                    // Mock calibration
-                                    reply_ev.u.get_report_reply.data[7] = 0x00; reply_ev.u.get_report_reply.data[8] = 0x04;
-                                    reply_ev.u.get_report_reply.data[9] = 0x00; reply_ev.u.get_report_reply.data[10] = 0xFC;
-                                    reply_ev.u.get_report_reply.data[11] = 0x00; reply_ev.u.get_report_reply.data[12] = 0x04;
-                                    reply_ev.u.get_report_reply.data[13] = 0x00; reply_ev.u.get_report_reply.data[14] = 0xFC;
-                                    reply_ev.u.get_report_reply.data[15] = 0x00; reply_ev.u.get_report_reply.data[16] = 0x04;
-                                    reply_ev.u.get_report_reply.data[17] = 0x00; reply_ev.u.get_report_reply.data[18] = 0xFC;
-                                    reply_ev.u.get_report_reply.data[19] = 0x00; reply_ev.u.get_report_reply.data[20] = 0x04;
-                                    reply_ev.u.get_report_reply.data[21] = 0x00; reply_ev.u.get_report_reply.data[22] = 0x04;
-                                    reply_ev.u.get_report_reply.data[23] = 0x00; reply_ev.u.get_report_reply.data[24] = 0x20;
-                                    reply_ev.u.get_report_reply.data[25] = 0x00; reply_ev.u.get_report_reply.data[26] = 0xE0;
-                                    reply_ev.u.get_report_reply.data[27] = 0x00; reply_ev.u.get_report_reply.data[28] = 0x20;
-                                    reply_ev.u.get_report_reply.data[29] = 0x00; reply_ev.u.get_report_reply.data[30] = 0xE0;
-                                    reply_ev.u.get_report_reply.data[31] = 0x00; reply_ev.u.get_report_reply.data[32] = 0x20;
-                                    reply_ev.u.get_report_reply.data[33] = 0x00; reply_ev.u.get_report_reply.data[34] = 0xE0;
+                                    uint8_t cal_data[41] = {
+                                        0x05,
+                                        0xff, 0xfc, 0xff, 0xfe, 0xff, 0x83, 0x22, 0x78,
+                                        0xdd, 0x92, 0x22, 0x5f, 0xdd, 0x95, 0x22, 0x6d,
+                                        0xdd, 0x1c, 0x02, 0x1c, 0x02, 0xf2, 0x1f, 0xed,
+                                        0xdf, 0xe3, 0x20, 0xda, 0xe0, 0xee, 0x1f, 0xdf,
+                                        0xdf, 0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+                                    };
+                                    memcpy(reply_ev.u.get_report_reply.data, cal_data, 41);
                                 } else if (rnum == 0x20) {
                                     reply_ev.u.get_report_reply.size = 64;
-                                    reply_ev.u.get_report_reply.data[0] = 0x20;
-                                    reply_ev.u.get_report_reply.data[24] = 0x01;
-                                    reply_ev.u.get_report_reply.data[28] = 0x01;
-                                    reply_ev.u.get_report_reply.data[44] = 0x01;
+                                    uint8_t fw_data[64] = {
+                                        0x20,
+                                        0x4a, 0x75, 0x6e, 0x20, 0x31, 0x39, 0x20, 0x32, 0x30, 0x32, 0x33,
+                                        0x31, 0x34, 0x3a, 0x34, 0x37, 0x3a, 0x33, 0x34,
+                                        0x03, 0x00, 0x44, 0x00, 0x08, 0x02, 0x00, 0x01,
+                                        0x36, 0x00, 0x00, 0x01, 0xc1, 0xc8, 0x00, 0x00,
+                                        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                        0x00, 0x00, 0x54, 0x01, 0x00, 0x00, 0x14, 0x00,
+                                        0x00, 0x00, 0x0b, 0x00, 0x01, 0x00, 0x06, 0x00,
+                                        0x00, 0x00, 0x00, 0x00
+                                    };
+                                    memcpy(reply_ev.u.get_report_reply.data, fw_data, 64);
                                 } else if (rnum == 0x09) {
                                     reply_ev.u.get_report_reply.size = 20;
-                                    reply_ev.u.get_report_reply.data[0] = 0x09;
-                                    reply_ev.u.get_report_reply.data[1] = 0x00;
-                                    reply_ev.u.get_report_reply.data[2] = 0x11;
-                                    reply_ev.u.get_report_reply.data[3] = 0x22;
-                                    reply_ev.u.get_report_reply.data[4] = 0x33;
-                                    reply_ev.u.get_report_reply.data[5] = 0x44;
-                                    reply_ev.u.get_report_reply.data[6] = 0x55;
+                                    uint8_t pairing_data[20] = {
+                                        0x09,
+                                        0xe8, 0x47, 0x3a, 0xd6, 0xe7, 0x74,
+                                        0x08, 0x25, 0x00, 0x1e, 0x00, 0xee, 0x74, 0xd0, 0xbc,
+                                        0x00, 0x00, 0x00, 0x00
+                                    };
+                                    memcpy(reply_ev.u.get_report_reply.data, pairing_data, 20);
                                 }
                             }
                         }
