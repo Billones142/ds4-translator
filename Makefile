@@ -33,6 +33,9 @@ install: all
 	install -D -m 755 $(TARGET_DAEMON) $(DESTDIR)$(BINDIR)/$(TARGET_DAEMON)
 	install -D -m 755 $(TARGET_CTL) $(DESTDIR)$(BINDIR)/$(TARGET_CTL)
 	install -D -m 644 ds4-translator.service $(DESTDIR)$(SYSTEMDDIR)/ds4-translator.service
+	install -D -m 644 72-ds4-translator-hide.rules $(DESTDIR)/etc/udev/rules.d/72-ds4-translator-hide.rules
+	udevadm control --reload-rules
+	udevadm trigger
 	systemctl daemon-reload
 	systemctl enable ds4-translator.service
 	systemctl restart ds4-translator.service
@@ -42,6 +45,9 @@ uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/$(TARGET_DAEMON)
 	rm -f $(DESTDIR)$(BINDIR)/$(TARGET_CTL)
 	rm -f $(DESTDIR)$(SYSTEMDDIR)/ds4-translator.service
+	rm -f $(DESTDIR)/etc/udev/rules.d/72-ds4-translator-hide.rules
+	udevadm control --reload-rules
+	udevadm trigger
 	systemctl daemon-reload
 
 .PHONY: all clean install uninstall
