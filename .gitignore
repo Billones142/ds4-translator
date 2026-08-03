@@ -2,6 +2,7 @@
 ds4-translator
 ds4-ctl
 src/*.o
+*.so
 
 # Local context / operational files
 .sober/
