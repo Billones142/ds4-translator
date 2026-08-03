@@ -440,7 +440,7 @@ int main(int argc, char* argv[]) {
                             ev.u.create2.version = 0;
                             ev.u.create2.country = 0;
                         } else {
-                            strncpy((char*)ev.u.create2.name, "Sony Interactive Entertainment Wireless Controller", sizeof(ev.u.create2.name));
+                            strncpy((char*)ev.u.create2.name, "Sony Interactive Entertainment DualSense Wireless Controller", sizeof(ev.u.create2.name));
                             ev.u.create2.rd_size = sizeof(dualsense_usb_rdesc);
                             memcpy(ev.u.create2.rd_data, dualsense_usb_rdesc, sizeof(dualsense_usb_rdesc));
                             ev.u.create2.bus = BUS_USB;
@@ -580,7 +580,7 @@ int main(int argc, char* argv[]) {
                         ev.u.create2.version = 0;
                         ev.u.create2.country = 0;
                     } else {
-                        strncpy((char*)ev.u.create2.name, "Sony Interactive Entertainment Wireless Controller", sizeof(ev.u.create2.name));
+                        strncpy((char*)ev.u.create2.name, "Sony Interactive Entertainment DualSense Wireless Controller", sizeof(ev.u.create2.name));
                         ev.u.create2.rd_size = sizeof(dualsense_usb_rdesc);
                         memcpy(ev.u.create2.rd_data, dualsense_usb_rdesc, sizeof(dualsense_usb_rdesc));
                         ev.u.create2.bus = BUS_USB;
