@@ -1,0 +1,8 @@
+# Compiled binaries
+ds4-translator
+ds4-ctl
+src/*.o
+
+# Local context / operational files
+.sober/
+.agents/

@@ -1,0 +1,15 @@
+[Unit]
+Description=DualShock 4 to Virtual Controller Translator Daemon
+After=bluetooth.target
+Wants=bluetooth.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ds4-translator
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
