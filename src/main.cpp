@@ -25,7 +25,15 @@ namespace fs = std::filesystem;
 
 enum ControllerType {
     TYPE_DS4,
-    TYPE_DUALSENSE
+    TYPE_DUALSENSE,
+    TYPE_NONE
+};
+
+struct PhysicalNode {
+    std::string path;
+    int fd;
+    mode_t orig_mode;
+    bool is_grabbed;
 };
 
 std::atomic<bool> running(true);
@@ -168,7 +176,7 @@ std::vector<std::string> get_event_nodes(const std::string& hidraw_name) {
             if (entry.is_directory()) {
                 for (const auto& subentry : fs::directory_iterator(entry.path())) {
                     std::string name = subentry.path().filename().string();
-                    if (name.rfind("event", 0) == 0) {
+                    if (name.rfind("event", 0) == 0 || name.rfind("js", 0) == 0) {
                         event_nodes.push_back("/dev/input/" + name);
                     }
                 }
@@ -285,6 +293,8 @@ ControllerType read_config(ControllerType default_type) {
                 return TYPE_DUALSENSE;
             } else if (val == "ds4") {
                 return TYPE_DS4;
+            } else if (val == "none") {
+                return TYPE_NONE;
             }
         }
     }
@@ -294,7 +304,7 @@ ControllerType read_config(ControllerType default_type) {
 void write_config(ControllerType type) {
     std::ofstream f("/etc/ds4-translator.conf");
     if (f.is_open()) {
-        f << "type=" << (type == TYPE_DS4 ? "ds4" : "dualsense") << "\n";
+        f << "type=" << (type == TYPE_DS4 ? "ds4" : (type == TYPE_NONE ? "none" : "dualsense")) << "\n";
     } else {
         std::cerr << "Failed to write config file: /etc/ds4-translator.conf: " << strerror(errno) << std::endl;
     }
@@ -316,8 +326,11 @@ int main(int argc, char* argv[]) {
                 } else if (val == "ds4") {
                     target_type = TYPE_DS4;
                     type_explicitly_set = true;
+                } else if (val == "none") {
+                    target_type = TYPE_NONE;
+                    type_explicitly_set = true;
                 } else {
-                    std::cerr << "Unknown type: " << val << ". Supported: ds4, dualsense" << std::endl;
+                    std::cerr << "Unknown type: " << val << ". Supported: ds4, dualsense, none" << std::endl;
                     return 1;
                 }
             } else {
@@ -341,7 +354,7 @@ int main(int argc, char* argv[]) {
     std::signal(SIGTERM, signal_handler);
 
     std::cout << "Starting DS4 Translator daemon..." << std::endl;
-    std::cout << "Initial Target Emulation: " << (target_type == TYPE_DS4 ? "DualShock 4" : "DualSense") << std::endl;
+    std::cout << "Initial Target Emulation: " << (target_type == TYPE_DS4 ? "DualShock 4" : (target_type == TYPE_NONE ? "None" : "DualSense")) << std::endl;
 
     int server_fd = setup_ipc_socket();
     if (server_fd < 0) {
@@ -350,11 +363,19 @@ int main(int argc, char* argv[]) {
         std::cout << "IPC Unix socket created at /run/ds4-translator.sock" << std::endl;
     }
 
+    if (target_type == TYPE_NONE) {
+        std::ofstream f("/run/ds4-translator.none");
+        f.close();
+        system("udevadm trigger");
+    } else {
+        unlink("/run/ds4-translator.none");
+    }
+
     int phy_fd = -1;
     int uhid_fd = -1;
     std::string phy_name = "";
     bool is_bluetooth = false;
-    std::vector<int> event_fds;
+    std::vector<PhysicalNode> hidden_nodes;
     std::string phy_path = "";
     mode_t orig_mode = 0660;
 
@@ -368,7 +389,7 @@ int main(int argc, char* argv[]) {
 
     while (running) {
         // If physical controller disconnected, scan & setup
-        if (phy_fd < 0) {
+        if (phy_fd < 0 && target_type != TYPE_NONE) {
             bool bt = false;
             std::string name = find_physical_ds4(bt);
             if (!name.empty()) {
@@ -388,6 +409,7 @@ int main(int argc, char* argv[]) {
                 if (chmod(phy_path.c_str(), 000) < 0) {
                     std::cerr << "Warning: Failed to hide physical controller permissions: " << strerror(errno) << std::endl;
                 }
+                system(("setfacl -b " + phy_path + " 2>/dev/null").c_str());
 
                 phy_fd = open(phy_path.c_str(), O_RDWR | O_NONBLOCK);
                 if (phy_fd < 0) {
@@ -396,30 +418,56 @@ int main(int argc, char* argv[]) {
                     phy_fd = -1;
                     phy_name = "";
                 } else {
-                    // Grab input events
+                    // Grab and hide input events (event and js nodes)
                     std::vector<std::string> event_paths = get_event_nodes(phy_name);
                     for (const auto& ev_path : event_paths) {
-                        int ev_fd = open(ev_path.c_str(), O_RDONLY | O_NONBLOCK);
-                        if (ev_fd >= 0) {
-                            if (ioctl(ev_fd, EVIOCGRAB, 1) >= 0) {
-                                std::cout << "Successfully grabbed event node: " << ev_path << std::endl;
-                                event_fds.push_back(ev_fd);
-                            } else {
-                                std::cerr << "Warning: Failed to grab event node " << ev_path << ": " << strerror(errno) << std::endl;
-                                close(ev_fd);
-                            }
+                        PhysicalNode node;
+                        node.path = ev_path;
+                        node.fd = -1;
+                        node.orig_mode = 0660;
+                        node.is_grabbed = false;
+
+                        struct stat node_st;
+                        if (stat(ev_path.c_str(), &node_st) == 0) {
+                            node.orig_mode = node_st.st_mode & 0777;
                         }
+
+                        if (chmod(ev_path.c_str(), 000) < 0) {
+                            std::cerr << "Warning: Failed to hide input node " << ev_path << ": " << strerror(errno) << std::endl;
+                        }
+                        system(("setfacl -b " + ev_path + " 2>/dev/null").c_str());
+
+                        // We only grab event nodes, not js nodes (EVIOCGRAB is only for evdev)
+                        if (ev_path.find("event") != std::string::npos) {
+                            int ev_fd = open(ev_path.c_str(), O_RDONLY | O_NONBLOCK);
+                            if (ev_fd >= 0) {
+                                if (ioctl(ev_fd, EVIOCGRAB, 1) >= 0) {
+                                    node.fd = ev_fd;
+                                    node.is_grabbed = true;
+                                    std::cout << "Successfully grabbed and hid event node: " << ev_path << std::endl;
+                                } else {
+                                    std::cerr << "Warning: Failed to grab event node " << ev_path << ": " << strerror(errno) << std::endl;
+                                    close(ev_fd);
+                                }
+                            }
+                        } else {
+                            std::cout << "Successfully hid joystick node: " << ev_path << std::endl;
+                        }
+                        hidden_nodes.push_back(node);
                     }
 
                     // Open UHID
                     uhid_fd = open("/dev/uhid", O_RDWR | O_CLOEXEC | O_NONBLOCK);
                     if (uhid_fd < 0) {
                         std::cerr << "Failed to open /dev/uhid: " << strerror(errno) << std::endl;
-                        for (int ev_fd : event_fds) {
-                            ioctl(ev_fd, EVIOCGRAB, 0);
-                            close(ev_fd);
+                        for (auto& node : hidden_nodes) {
+                            if (node.is_grabbed && node.fd >= 0) {
+                                ioctl(node.fd, EVIOCGRAB, 0);
+                                close(node.fd);
+                            }
+                            chmod(node.path.c_str(), node.orig_mode);
                         }
-                        event_fds.clear();
+                        hidden_nodes.clear();
                         close(phy_fd);
                         phy_fd = -1;
                         chmod(phy_path.c_str(), orig_mode);
@@ -431,13 +479,13 @@ int main(int argc, char* argv[]) {
                         ev.type = UHID_CREATE2;
                         
                         if (target_type == TYPE_DS4) {
-                            strncpy((char*)ev.u.create2.name, "Sony Interactive Entertainment Wireless Controller", sizeof(ev.u.create2.name));
+                            strncpy((char*)ev.u.create2.name, "Sony Computer Entertainment Wireless Controller", sizeof(ev.u.create2.name));
                             strncpy((char*)ev.u.create2.uniq, "74:e7:d6:3a:47:e8", sizeof(ev.u.create2.uniq));
                             ev.u.create2.rd_size = sizeof(ds4_usb_rdesc);
                             memcpy(ev.u.create2.rd_data, ds4_usb_rdesc, sizeof(ds4_usb_rdesc));
                             ev.u.create2.bus = BUS_USB;
                             ev.u.create2.vendor = 0x054c;
-                            ev.u.create2.product = 0x09cc;
+                            ev.u.create2.product = 0x05c4;
                             ev.u.create2.version = 0x8111;
                             ev.u.create2.country = 0;
                         } else {
@@ -455,11 +503,14 @@ int main(int argc, char* argv[]) {
                         if (uhid_write(uhid_fd, ev) < 0) {
                             close(uhid_fd);
                             uhid_fd = -1;
-                            for (int ev_fd : event_fds) {
-                                ioctl(ev_fd, EVIOCGRAB, 0);
-                                close(ev_fd);
+                            for (auto& node : hidden_nodes) {
+                                if (node.is_grabbed && node.fd >= 0) {
+                                    ioctl(node.fd, EVIOCGRAB, 0);
+                                    close(node.fd);
+                                }
+                                chmod(node.path.c_str(), node.orig_mode);
                             }
-                            event_fds.clear();
+                            hidden_nodes.clear();
                             close(phy_fd);
                             phy_fd = -1;
                             chmod(phy_path.c_str(), orig_mode);
@@ -526,7 +577,7 @@ int main(int argc, char* argv[]) {
                     if (cmd == "status") {
                         response = "Physical Controller: " + (phy_name.empty() ? "None" : "/dev/" + phy_name) + "\n";
                         response += "Connection Type: " + std::string(phy_fd >= 0 ? (is_bluetooth ? "Bluetooth" : "USB") : "N/A") + "\n";
-                        response += "Virtual Emulation: " + std::string(target_type == TYPE_DS4 ? "DualShock 4" : "DualSense") + "\n";
+                        response += "Virtual Emulation: " + std::string(target_type == TYPE_DS4 ? "DualShock 4" : (target_type == TYPE_NONE ? "None" : "DualSense")) + "\n";
                         response += "Device Open by Host: " + std::string(device_open ? "Yes" : "No") + "\n";
                     } else if (cmd == "set-type ds4") {
                         if (target_type != TYPE_DS4) {
@@ -546,6 +597,15 @@ int main(int argc, char* argv[]) {
                         } else {
                             response = "Already set to DualSense";
                         }
+                    } else if (cmd == "set-type none") {
+                        if (target_type != TYPE_NONE) {
+                            pending_type_change = TYPE_NONE;
+                            type_change_requested = true;
+                            write_config(TYPE_NONE);
+                            response = "OK: Changing emulation type to None (translation disabled)...";
+                        } else {
+                            response = "Already set to None";
+                        }
                     }
                     write(client_fd, response.c_str(), response.size());
                 }
@@ -559,13 +619,41 @@ int main(int argc, char* argv[]) {
             type_change_requested = false;
             
             if (uhid_fd >= 0) {
-                std::cout << "Recreating virtual controller as " << (target_type == TYPE_DS4 ? "DualShock 4" : "DualSense") << std::endl;
                 struct uhid_event destroy_ev;
                 memset(&destroy_ev, 0, sizeof(destroy_ev));
                 destroy_ev.type = UHID_DESTROY;
                 uhid_write(uhid_fd, destroy_ev);
                 close(uhid_fd);
+                uhid_fd = -1;
+            }
 
+            // Release physical controller grab and permissions
+            if (phy_fd >= 0) {
+                std::cout << "Releasing physical controller grab..." << std::endl;
+                for (auto& node : hidden_nodes) {
+                    if (node.is_grabbed && node.fd >= 0) {
+                        ioctl(node.fd, EVIOCGRAB, 0);
+                        close(node.fd);
+                    }
+                    chmod(node.path.c_str(), node.orig_mode);
+                }
+                hidden_nodes.clear();
+                close(phy_fd);
+                phy_fd = -1;
+                chmod(phy_path.c_str(), orig_mode);
+                phy_name = "";
+            }
+
+            if (target_type == TYPE_NONE) {
+                std::cout << "Emulation type set to None. Disabling translation." << std::endl;
+                std::ofstream f("/run/ds4-translator.none");
+                f.close();
+                system("udevadm trigger");
+            } else {
+                unlink("/run/ds4-translator.none");
+                system("udevadm trigger");
+
+                std::cout << "Recreating virtual controller as " << (target_type == TYPE_DS4 ? "DualShock 4" : "DualSense") << std::endl;
                 uhid_fd = open("/dev/uhid", O_RDWR | O_CLOEXEC | O_NONBLOCK);
                 if (uhid_fd >= 0) {
                     struct uhid_event ev;
@@ -573,13 +661,13 @@ int main(int argc, char* argv[]) {
                     ev.type = UHID_CREATE2;
                     
                     if (target_type == TYPE_DS4) {
-                        strncpy((char*)ev.u.create2.name, "Sony Interactive Entertainment Wireless Controller", sizeof(ev.u.create2.name));
+                        strncpy((char*)ev.u.create2.name, "Sony Computer Entertainment Wireless Controller", sizeof(ev.u.create2.name));
                         strncpy((char*)ev.u.create2.uniq, "74:e7:d6:3a:47:e8", sizeof(ev.u.create2.uniq));
                         ev.u.create2.rd_size = sizeof(ds4_usb_rdesc);
                         memcpy(ev.u.create2.rd_data, ds4_usb_rdesc, sizeof(ds4_usb_rdesc));
                         ev.u.create2.bus = BUS_USB;
                         ev.u.create2.vendor = 0x054c;
-                        ev.u.create2.product = 0x09cc;
+                        ev.u.create2.product = 0x05c4;
                         ev.u.create2.version = 0x8111;
                         ev.u.create2.country = 0;
                     } else {
@@ -609,11 +697,14 @@ int main(int argc, char* argv[]) {
         // Handle physical controller connection dropped
         if (phy_poll_idx >= 0 && (pfds[phy_poll_idx].revents & (POLLERR | POLLHUP))) {
             std::cout << "Physical controller connection dropped." << std::endl;
-            for (int ev_fd : event_fds) {
-                ioctl(ev_fd, EVIOCGRAB, 0);
-                close(ev_fd);
+            for (auto& node : hidden_nodes) {
+                if (node.is_grabbed && node.fd >= 0) {
+                    ioctl(node.fd, EVIOCGRAB, 0);
+                    close(node.fd);
+                }
+                chmod(node.path.c_str(), node.orig_mode);
             }
-            event_fds.clear();
+            hidden_nodes.clear();
             close(phy_fd);
             phy_fd = -1;
             chmod(phy_path.c_str(), orig_mode);
@@ -801,8 +892,11 @@ int main(int argc, char* argv[]) {
                                 } else if (rnum == 0xa3) {
                                     reply_ev.u.get_report_reply.size = 49;
                                     reply_ev.u.get_report_reply.data[0] = 0xa3;
-                                    reply_ev.u.get_report_reply.data[35] = 0x01;
-                                    reply_ev.u.get_report_reply.data[41] = 0x01;
+                                    // Real DS4 hw_version = 0x5438, fw_version = 0x2033
+                                    reply_ev.u.get_report_reply.data[35] = 0x38;
+                                    reply_ev.u.get_report_reply.data[36] = 0x54;
+                                    reply_ev.u.get_report_reply.data[41] = 0x33;
+                                    reply_ev.u.get_report_reply.data[42] = 0x20;
                                 } else if (rnum == 0x12) {
                                     reply_ev.u.get_report_reply.size = 16;
                                     reply_ev.u.get_report_reply.data[0] = 0x12;
@@ -894,6 +988,12 @@ int main(int argc, char* argv[]) {
                                 if (vf0 & 0x01) {
                                     motor_right = data[3];
                                     motor_left = data[4];
+                                    // If haptics/sound-select (vf0 & 0x02) is active,
+                                    // don't run both motors at the same time to prevent
+                                    // the big motor from drowning out the light motor.
+                                    if ((vf0 & 0x02) && motor_right > 0 && motor_left > 0) {
+                                        motor_left = 0;
+                                    }
                                     update = true;
                                 }
                                 if (vf1 & 0x04) {
@@ -933,9 +1033,12 @@ int main(int argc, char* argv[]) {
     // Clean up physical controller if active
     if (phy_fd >= 0) {
         std::cout << "Releasing physical controller grab..." << std::endl;
-        for (int ev_fd : event_fds) {
-            ioctl(ev_fd, EVIOCGRAB, 0);
-            close(ev_fd);
+        for (auto& node : hidden_nodes) {
+            if (node.is_grabbed && node.fd >= 0) {
+                ioctl(node.fd, EVIOCGRAB, 0);
+                close(node.fd);
+            }
+            chmod(node.path.c_str(), node.orig_mode);
         }
         close(phy_fd);
         chmod(phy_path.c_str(), orig_mode);

@@ -9,7 +9,7 @@ void print_usage() {
     std::cout << "Usage: ds4-ctl <command> [args]" << std::endl;
     std::cout << "Commands:" << std::endl;
     std::cout << "  status                   Get current status of the translation daemon" << std::endl;
-    std::cout << "  set-type <ds4|dualsense> Change the virtual controller emulation type at runtime" << std::endl;
+    std::cout << "  set-type <ds4|dualsense|none> Change the virtual controller emulation type at runtime" << std::endl;
 }
 
 int main(int argc, char* argv[]) {
@@ -22,12 +22,12 @@ int main(int argc, char* argv[]) {
     std::string full_cmd = cmd;
     if (cmd == "set-type") {
         if (argc < 3) {
-            std::cerr << "Error: set-type requires a target type (ds4 or dualsense)" << std::endl;
+            std::cerr << "Error: set-type requires a target type (ds4, dualsense, or none)" << std::endl;
             return 1;
         }
         std::string type = argv[2];
-        if (type != "ds4" && type != "dualsense") {
-            std::cerr << "Error: Invalid type. Supported: ds4, dualsense" << std::endl;
+        if (type != "ds4" && type != "dualsense" && type != "none") {
+            std::cerr << "Error: Invalid type. Supported: ds4, dualsense, none" << std::endl;
             return 1;
         }
         full_cmd += " " + type;
