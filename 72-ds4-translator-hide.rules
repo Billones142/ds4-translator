@@ -18,13 +18,9 @@ TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="
 # Match virtual DualShock 4 controller
 SUBSYSTEM=="input", DEVPATH=="/devices/virtual/misc/uhid/*", KERNELS=="0003:054C:05C4.*", ENV{ID_BUS}="usb", ENV{ID_VENDOR_ID}="054c", ENV{ID_MODEL_ID}="05c4", ENV{ID_MODEL}="Wireless_Controller", ENV{ID_VENDOR}="Sony_Computer_Entertainment", ENV{ID_USB_INTERFACE_NUM}="00", SYMLINK+="input/by-id/usb-Sony_Computer_Entertainment_Wireless_Controller-event-joystick"
 KERNEL=="js*", DEVPATH=="/devices/virtual/misc/uhid/*", KERNELS=="0003:054C:05C4.*", ENV{ID_BUS}="usb", ENV{ID_VENDOR_ID}="054c", ENV{ID_MODEL_ID}="05c4", ENV{ID_MODEL}="Wireless_Controller", ENV{ID_VENDOR}="Sony_Computer_Entertainment", ENV{ID_USB_INTERFACE_NUM}="00", SYMLINK+="input/by-id/usb-Sony_Computer_Entertainment_Wireless_Controller-joystick"
-
-# Hide the virtual DualShock 4 hidraw node to force Winebus/Proton to fall back to the event-based (XInput/SDL) backend, preventing it from getting stuck on the empty manufacturer name
-SUBSYSTEM=="hidraw", DEVPATH=="/devices/virtual/misc/uhid/*", KERNELS=="0003:054C:05C4.*", MODE="0600", OWNER="root", GROUP="root", TAG-="uaccess", TAG-="seat"
+SUBSYSTEM=="hidraw", DEVPATH=="/devices/virtual/misc/uhid/*", KERNELS=="0003:054C:05C4.*", MODE="0666", TAG+="uaccess", TAG+="seat", ENV{ID_BUS}="usb", ENV{ID_VENDOR_ID}="054c", ENV{ID_MODEL_ID}="05c4", ENV{ID_MODEL}="Wireless_Controller", ENV{ID_VENDOR}="Sony_Computer_Entertainment", ENV{ID_USB_INTERFACE_NUM}="00"
 
 # Match virtual DualSense controller
 SUBSYSTEM=="input", DEVPATH=="/devices/virtual/misc/uhid/*", KERNELS=="0003:054C:0CE6.*", ENV{ID_BUS}="usb", ENV{ID_VENDOR_ID}="054c", ENV{ID_MODEL_ID}="0ce6", ENV{ID_MODEL}="Wireless_Controller", ENV{ID_VENDOR}="Sony_Interactive_Entertainment", ENV{ID_USB_INTERFACE_NUM}="00", SYMLINK+="input/by-id/usb-Sony_Interactive_Entertainment_DualSense_Wireless_Controller-event-joystick"
 KERNEL=="js*", DEVPATH=="/devices/virtual/misc/uhid/*", KERNELS=="0003:054C:0CE6.*", ENV{ID_BUS}="usb", ENV{ID_VENDOR_ID}="054c", ENV{ID_MODEL_ID}="0ce6", ENV{ID_MODEL}="Wireless_Controller", ENV{ID_VENDOR}="Sony_Interactive_Entertainment", ENV{ID_USB_INTERFACE_NUM}="00", SYMLINK+="input/by-id/usb-Sony_Interactive_Entertainment_DualSense_Wireless_Controller-joystick"
-
-# Hide the virtual DualSense hidraw node as well for consistency
-SUBSYSTEM=="hidraw", DEVPATH=="/devices/virtual/misc/uhid/*", KERNELS=="0003:054C:0CE6.*", MODE="0600", OWNER="root", GROUP="root", TAG-="uaccess", TAG-="seat"
+SUBSYSTEM=="hidraw", DEVPATH=="/devices/virtual/misc/uhid/*", KERNELS=="0003:054C:0CE6.*", MODE="0666", TAG+="uaccess", TAG+="seat", ENV{ID_BUS}="usb", ENV{ID_VENDOR_ID}="054c", ENV{ID_MODEL_ID}="0ce6", ENV{ID_MODEL}="Wireless_Controller", ENV{ID_VENDOR}="Sony_Interactive_Entertainment", ENV{ID_USB_INTERFACE_NUM}="00"
