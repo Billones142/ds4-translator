@@ -519,6 +519,13 @@ int main(int argc, char* argv[]) {
                     phy_fd = -1;
                     phy_name = "";
                 } else {
+                    // Restrict physical hidraw node to 0600 so unprivileged games ignore it
+                    struct stat phy_st;
+                    if (fstat(phy_fd, &phy_st) == 0) {
+                        orig_mode = phy_st.st_mode & 0777;
+                    }
+                    chmod(phy_path.c_str(), 0600);
+
                     // Grab and hide input events (event and js nodes)
                     std::vector<std::string> event_paths = get_event_nodes(phy_name);
                     for (const auto& ev_path : event_paths) {
