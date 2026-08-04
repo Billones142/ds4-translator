@@ -516,8 +516,10 @@ int main(int argc, char* argv[]) {
                             chmod(phy_path.c_str(), orig_mode);
                             phy_name = "";
                         } else {
-                            std::cout << "Virtual USB Controller created." << std::endl;
-                            send_physical_output_report(phy_fd, is_bluetooth, 0, 0, cur_r, cur_g, cur_b);
+                            if (target_type != TYPE_NONE) {
+                                usleep(100000); // 100ms settling delay for udev properties
+                                send_physical_output_report(phy_fd, is_bluetooth, 0, 0, cur_r, cur_g, cur_b);
+                            }
                             device_open = false;
                         }
                     }
@@ -685,6 +687,7 @@ int main(int argc, char* argv[]) {
                     if (uhid_write(uhid_fd, ev) >= 0) {
                         std::cout << "Virtual USB Controller created (reloaded)." << std::endl;
                         device_open = false;
+                        usleep(100000); // 100ms settling delay for udev properties
                         send_physical_output_report(phy_fd, is_bluetooth, 0, 0, cur_r, cur_g, cur_b);
                     } else {
                         close(uhid_fd);
