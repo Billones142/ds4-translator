@@ -983,6 +983,19 @@ int main(int argc, char* argv[]) {
                                     b = data[8];
                                     update = true;
                                 }
+                            } else if (data[0] == 0x11 && size >= 11) { // BT format output report
+                                uint8_t flags = data[3];
+                                if (flags & 0x01) {
+                                    motor_right = data[6];
+                                    motor_left = data[7];
+                                    update = true;
+                                }
+                                if (flags & 0x02) {
+                                    r = data[8];
+                                    g = data[9];
+                                    b = data[10];
+                                    update = true;
+                                }
                             }
                         } else { // DualSense
                             if (data[0] == 0x02 && size >= 48) {
