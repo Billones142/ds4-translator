@@ -382,6 +382,7 @@ bool create_virtual_device(ControllerType type) {
             return false;
         }
         std::cout << "Virtual USB Controller created via UHID." << std::endl;
+        system("udevadm trigger");
         return true;
     }
     return false;
