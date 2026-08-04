@@ -382,6 +382,7 @@ bool create_virtual_device(ControllerType type) {
             return false;
         }
         std::cout << "Virtual USB Controller created via UHID." << std::endl;
+        usleep(250000); // Allow kernel to complete sysfs node creation before triggering udev
         system("udevadm trigger");
         return true;
     }
