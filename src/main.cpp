@@ -400,21 +400,9 @@ int main(int argc, char* argv[]) {
                 is_bluetooth = bt;
                 phy_path = "/dev/" + phy_name;
 
-                // Save permissions and mask it (chmod 000)
-                struct stat phy_st;
-                orig_mode = 0660;
-                if (stat(phy_path.c_str(), &phy_st) == 0) {
-                    orig_mode = phy_st.st_mode & 0777;
-                }
-                if (chmod(phy_path.c_str(), 000) < 0) {
-                    std::cerr << "Warning: Failed to hide physical controller permissions: " << strerror(errno) << std::endl;
-                }
-                system(("setfacl -b " + phy_path + " 2>/dev/null").c_str());
-
                 phy_fd = open(phy_path.c_str(), O_RDWR | O_NONBLOCK);
                 if (phy_fd < 0) {
                     std::cerr << "Failed to open physical controller: " << strerror(errno) << std::endl;
-                    chmod(phy_path.c_str(), orig_mode);
                     phy_fd = -1;
                     phy_name = "";
                 } else {
@@ -431,11 +419,6 @@ int main(int argc, char* argv[]) {
                         if (stat(ev_path.c_str(), &node_st) == 0) {
                             node.orig_mode = node_st.st_mode & 0777;
                         }
-
-                        if (chmod(ev_path.c_str(), 000) < 0) {
-                            std::cerr << "Warning: Failed to hide input node " << ev_path << ": " << strerror(errno) << std::endl;
-                        }
-                        system(("setfacl -b " + ev_path + " 2>/dev/null").c_str());
 
                         // We only grab event nodes, not js nodes (EVIOCGRAB is only for evdev)
                         if (ev_path.find("event") != std::string::npos) {
