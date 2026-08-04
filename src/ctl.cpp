@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/time.h>
 
 void print_usage() {
     std::cout << "Usage: ds4-ctl <command> [args]" << std::endl;
@@ -46,6 +47,13 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // Set 3 seconds timeout for send/receive to prevent hanging
+    struct timeval tv;
+    tv.tv_sec = 3;
+    tv.tv_usec = 0;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
@@ -54,6 +62,13 @@ int main(int argc, char* argv[]) {
     if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         std::cerr << "Failed to connect to translation daemon (is the ds4-translator service running?): " 
                   << strerror(errno) << std::endl;
+        std::cerr << "\nTroubleshooting Commands:" << std::endl;
+        std::cerr << "  1. Check translator service status:" << std::endl;
+        std::cerr << "     systemctl status ds4-translator.service" << std::endl;
+        std::cerr << "  2. View recent logs from the daemon:" << std::endl;
+        std::cerr << "     journalctl -u ds4-translator.service -n 20" << std::endl;
+        std::cerr << "  3. Verify kernel modules are loaded:" << std::endl;
+        std::cerr << "     lsmod | grep -E \"raw_gadget|dummy_hcd\"" << std::endl;
         close(fd);
         return 1;
     }
@@ -72,7 +87,12 @@ int main(int argc, char* argv[]) {
     if (bytes_read > 0) {
         std::cout << rx_buf << std::endl;
     } else {
-        std::cerr << "No response from daemon" << std::endl;
+        std::cerr << "Error: No response from daemon (connection timed out or closed)." << std::endl;
+        std::cerr << "\nTroubleshooting Commands:" << std::endl;
+        std::cerr << "  1. Check if the daemon is active or stuck:" << std::endl;
+        std::cerr << "     systemctl status ds4-translator.service" << std::endl;
+        std::cerr << "  2. Inspect the latest kernel logs for resets:" << std::endl;
+        std::cerr << "     journalctl -k -n 30" << std::endl;
     }
 
     close(fd);

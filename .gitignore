@@ -1,4 +1,5 @@
 # Compiled binaries
+build/
 ds4-translator
 ds4-ctl
 src/*.o

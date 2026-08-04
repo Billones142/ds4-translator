@@ -20,6 +20,7 @@
 #include <sys/un.h>
 
 #include "descriptors.h"
+#include "raw-gadget-backend.h"
 
 namespace fs = std::filesystem;
 
@@ -187,7 +188,7 @@ std::vector<std::string> get_event_nodes(const std::string& hidraw_name) {
 }
 
 // Send output report to physical controller
-void send_physical_output_report(int fd, bool is_bluetooth, uint8_t motor_left, uint8_t motor_right, uint8_t r, uint8_t g, uint8_t b) {
+extern "C" void send_physical_output_report(int fd, bool is_bluetooth, uint8_t motor_left, uint8_t motor_right, uint8_t r, uint8_t g, uint8_t b) {
     if (is_bluetooth) {
         uint8_t buf[78];
         memset(buf, 0, sizeof(buf));
@@ -301,12 +302,104 @@ ControllerType read_config(ControllerType default_type) {
     return default_type;
 }
 
+enum BackendType {
+    BACKEND_UHID,
+    BACKEND_GADGET
+};
+
+BackendType backend_type = BACKEND_UHID;
+bool backend_explicitly_set = false;
+RawGadgetDevice virtual_gadget = { .fd = -1, .ep_in = -1, .ep_out = -1, .device_open = false, .target_type = 0, .eps_enabled = false, .ep_out_thread_spawned = false, .configured = false };
+
+extern "C" {
+int phy_fd = -1;
+int uhid_fd = -1;
+bool is_bluetooth = false;
+uint8_t cur_motor_left = 0, cur_motor_right = 0;
+uint8_t cur_r = 0, cur_g = 0, cur_b = 255;
+}
+
 void write_config(ControllerType type) {
     std::ofstream f("/etc/ds4-translator.conf");
     if (f.is_open()) {
         f << "type=" << (type == TYPE_DS4 ? "ds4" : (type == TYPE_NONE ? "none" : "dualsense")) << "\n";
     } else {
         std::cerr << "Failed to write config file: /etc/ds4-translator.conf: " << strerror(errno) << std::endl;
+    }
+}
+
+bool create_virtual_device(ControllerType type) {
+    if (!backend_explicitly_set) {
+        backend_type = BACKEND_UHID;
+    }
+
+    if (backend_type == BACKEND_GADGET) {
+        if (raw_gadget_init(&virtual_gadget, type == TYPE_DS4 ? 1 : 2)) {
+            std::cout << "Virtual USB Controller created via Gadget." << std::endl;
+            return true;
+        } else {
+            std::cerr << "Failed to initialize Gadget backend. Falling back to UHID backend..." << std::endl;
+            backend_type = BACKEND_UHID;
+        }
+    }
+
+    if (backend_type == BACKEND_UHID) {
+        int fd = open("/dev/uhid", O_RDWR | O_CLOEXEC | O_NONBLOCK);
+        if (fd < 0) {
+            std::cerr << "Failed to open /dev/uhid: " << strerror(errno) << std::endl;
+            return false;
+        }
+        uhid_fd = fd;
+        struct uhid_event ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.type = UHID_CREATE2;
+        
+        if (type == TYPE_DS4) {
+            strncpy((char*)ev.u.create2.name, "Sony Computer Entertainment Wireless Controller", sizeof(ev.u.create2.name));
+            strncpy((char*)ev.u.create2.uniq, "74:e7:d6:3a:47:e8", sizeof(ev.u.create2.uniq));
+            ev.u.create2.rd_size = sizeof(ds4_usb_rdesc);
+            memcpy(ev.u.create2.rd_data, ds4_usb_rdesc, sizeof(ds4_usb_rdesc));
+            ev.u.create2.bus = BUS_USB;
+            ev.u.create2.vendor = 0x054c;
+            ev.u.create2.product = 0x05c4;
+            ev.u.create2.version = 0x8111;
+            ev.u.create2.country = 0;
+        } else {
+            strncpy((char*)ev.u.create2.name, "Sony Interactive Entertainment DualSense Wireless Controller", sizeof(ev.u.create2.name));
+            strncpy((char*)ev.u.create2.uniq, "74:e7:d6:3a:47:e8", sizeof(ev.u.create2.uniq));
+            ev.u.create2.rd_size = sizeof(dualsense_usb_rdesc);
+            memcpy(ev.u.create2.rd_data, dualsense_usb_rdesc, sizeof(dualsense_usb_rdesc));
+            ev.u.create2.bus = BUS_USB;
+            ev.u.create2.vendor = 0x054c;
+            ev.u.create2.product = 0x0ce6;
+            ev.u.create2.version = 0x8111;
+            ev.u.create2.country = 0;
+        }
+
+        if (uhid_write(uhid_fd, ev) < 0) {
+            close(uhid_fd);
+            uhid_fd = -1;
+            return false;
+        }
+        std::cout << "Virtual USB Controller created via UHID." << std::endl;
+        return true;
+    }
+    return false;
+}
+
+void destroy_virtual_device() {
+    if (backend_type == BACKEND_GADGET) {
+        raw_gadget_close(&virtual_gadget);
+        usleep(200000); // Give kernel time to unbind dummy_udc.0
+    } else {
+        if (uhid_fd >= 0) {
+            struct uhid_event destroy_ev;
+            memset(&destroy_ev, 0, sizeof(destroy_ev));
+            destroy_ev.type = UHID_DESTROY;
+            uhid_write(uhid_fd, destroy_ev);
+            close(uhid_fd);
+            uhid_fd = -1;
+        }
     }
 }
 
@@ -337,10 +430,28 @@ int main(int argc, char* argv[]) {
                 std::cerr << "Missing value for type option." << std::endl;
                 return 1;
             }
+        } else if (arg == "--backend" || arg == "-b") {
+            if (i + 1 < argc) {
+                std::string val = argv[++i];
+                if (val == "gadget") {
+                    backend_type = BACKEND_GADGET;
+                    backend_explicitly_set = true;
+                } else if (val == "uhid") {
+                    backend_type = BACKEND_UHID;
+                    backend_explicitly_set = true;
+                } else {
+                    std::cerr << "Unknown backend: " << val << ". Supported: uhid, gadget" << std::endl;
+                    return 1;
+                }
+            } else {
+                std::cerr << "Missing value for backend option." << std::endl;
+                return 1;
+            }
         } else if (arg == "--help" || arg == "-h") {
             std::cout << "Usage: ds4-translator [options]" << std::endl;
             std::cout << "Options:" << std::endl;
             std::cout << "  -t, --type <ds4|dualsense>   Target virtual controller type (default: ds4)" << std::endl;
+            std::cout << "  -b, --backend <uhid|gadget>   Target backend type (default: auto-detect)" << std::endl;
             std::cout << "  -h, --help                  Show this help message" << std::endl;
             return 0;
         }
@@ -348,6 +459,11 @@ int main(int argc, char* argv[]) {
 
     if (!type_explicitly_set) {
         target_type = read_config(target_type);
+    }
+
+    if (!backend_explicitly_set) {
+        backend_type = BACKEND_UHID;
+        std::cout << "Using stable UHID backend by default." << std::endl;
     }
 
     std::signal(SIGINT, signal_handler);
@@ -371,17 +487,12 @@ int main(int argc, char* argv[]) {
         unlink("/run/ds4-translator.none");
     }
 
-    int phy_fd = -1;
-    int uhid_fd = -1;
     std::string phy_name = "";
-    bool is_bluetooth = false;
     std::vector<PhysicalNode> hidden_nodes;
     std::string phy_path = "";
     mode_t orig_mode = 0660;
 
     bool device_open = false;
-    uint8_t cur_motor_left = 0, cur_motor_right = 0;
-    uint8_t cur_r = 0, cur_g = 0, cur_b = 255;
     uint8_t sequence_number = 0;
 
     bool type_change_requested = false;
@@ -389,7 +500,7 @@ int main(int argc, char* argv[]) {
 
     while (running) {
         // If physical controller disconnected, scan & setup
-        if (phy_fd < 0 && target_type != TYPE_NONE) {
+        if (phy_fd < 0) {
             bool bt = false;
             std::string name = find_physical_ds4(bt);
             if (!name.empty()) {
@@ -439,10 +550,14 @@ int main(int argc, char* argv[]) {
                         hidden_nodes.push_back(node);
                     }
 
-                    // Open UHID
-                    uhid_fd = open("/dev/uhid", O_RDWR | O_CLOEXEC | O_NONBLOCK);
-                    if (uhid_fd < 0) {
-                        std::cerr << "Failed to open /dev/uhid: " << strerror(errno) << std::endl;
+                    bool created = true;
+                    if (target_type == TYPE_NONE) {
+                        std::cout << "Emulation disabled. Hiding physical controller only." << std::endl;
+                    } else {
+                        created = create_virtual_device(target_type);
+                    }
+
+                    if (!created) {
                         for (auto& node : hidden_nodes) {
                             if (node.is_grabbed && node.fd >= 0) {
                                 ioctl(node.fd, EVIOCGRAB, 0);
@@ -455,56 +570,13 @@ int main(int argc, char* argv[]) {
                         phy_fd = -1;
                         chmod(phy_path.c_str(), orig_mode);
                         phy_name = "";
+                        usleep(500000); // Sleep 500ms before retrying
                     } else {
-                        // Create virtual controller
-                        struct uhid_event ev;
-                        memset(&ev, 0, sizeof(ev));
-                        ev.type = UHID_CREATE2;
-                        
-                        if (target_type == TYPE_DS4) {
-                            strncpy((char*)ev.u.create2.name, "Sony Computer Entertainment Wireless Controller", sizeof(ev.u.create2.name));
-                            strncpy((char*)ev.u.create2.uniq, "74:e7:d6:3a:47:e8", sizeof(ev.u.create2.uniq));
-                            ev.u.create2.rd_size = sizeof(ds4_usb_rdesc);
-                            memcpy(ev.u.create2.rd_data, ds4_usb_rdesc, sizeof(ds4_usb_rdesc));
-                            ev.u.create2.bus = BUS_USB;
-                            ev.u.create2.vendor = 0x054c;
-                            ev.u.create2.product = 0x05c4;
-                            ev.u.create2.version = 0x8111;
-                            ev.u.create2.country = 0;
-                        } else {
-                            strncpy((char*)ev.u.create2.name, "Sony Interactive Entertainment DualSense Wireless Controller", sizeof(ev.u.create2.name));
-                            strncpy((char*)ev.u.create2.uniq, "74:e7:d6:3a:47:e8", sizeof(ev.u.create2.uniq));
-                            ev.u.create2.rd_size = sizeof(dualsense_usb_rdesc);
-                            memcpy(ev.u.create2.rd_data, dualsense_usb_rdesc, sizeof(dualsense_usb_rdesc));
-                            ev.u.create2.bus = BUS_USB;
-                            ev.u.create2.vendor = 0x054c;
-                            ev.u.create2.product = 0x0ce6;
-                            ev.u.create2.version = 0x8111;
-                            ev.u.create2.country = 0;
+                        if (target_type != TYPE_NONE) {
+                            usleep(100000); // 100ms settling delay for udev properties
+                            send_physical_output_report(phy_fd, is_bluetooth, 0, 0, cur_r, cur_g, cur_b);
                         }
-
-                        if (uhid_write(uhid_fd, ev) < 0) {
-                            close(uhid_fd);
-                            uhid_fd = -1;
-                            for (auto& node : hidden_nodes) {
-                                if (node.is_grabbed && node.fd >= 0) {
-                                    ioctl(node.fd, EVIOCGRAB, 0);
-                                    close(node.fd);
-                                }
-                                chmod(node.path.c_str(), node.orig_mode);
-                            }
-                            hidden_nodes.clear();
-                            close(phy_fd);
-                            phy_fd = -1;
-                            chmod(phy_path.c_str(), orig_mode);
-                            phy_name = "";
-                        } else {
-                            if (target_type != TYPE_NONE) {
-                                usleep(100000); // 100ms settling delay for udev properties
-                                send_physical_output_report(phy_fd, is_bluetooth, 0, 0, cur_r, cur_g, cur_b);
-                            }
-                            device_open = false;
-                        }
+                        device_open = false;
                     }
                 }
             }
@@ -523,12 +595,16 @@ int main(int argc, char* argv[]) {
             pfds.push_back(p);
             phy_poll_idx = pfds.size() - 1;
         }
-        if (uhid_fd >= 0) {
-            struct pollfd p;
-            p.fd = uhid_fd;
-            p.events = POLLIN;
-            pfds.push_back(p);
-            uhid_poll_idx = pfds.size() - 1;
+        if (backend_type == BACKEND_GADGET) {
+            // EP0 events handled by ep0_loop thread — no fd polling needed
+        } else {
+            if (uhid_fd >= 0) {
+                struct pollfd p;
+                p.fd = uhid_fd;
+                p.events = POLLIN;
+                pfds.push_back(p);
+                uhid_poll_idx = pfds.size() - 1;
+            }
         }
         if (server_fd >= 0) {
             struct pollfd p;
@@ -563,7 +639,7 @@ int main(int argc, char* argv[]) {
                         response = "Physical Controller: " + (phy_name.empty() ? "None" : "/dev/" + phy_name) + "\n";
                         response += "Connection Type: " + std::string(phy_fd >= 0 ? (is_bluetooth ? "Bluetooth" : "USB") : "N/A") + "\n";
                         response += "Virtual Emulation: " + std::string(target_type == TYPE_DS4 ? "DualShock 4" : (target_type == TYPE_NONE ? "None" : "DualSense")) + "\n";
-                        response += "Device Open by Host: " + std::string(device_open ? "Yes" : "No") + "\n";
+                        response += "Device Open by Host: " + std::string(((backend_type == BACKEND_GADGET) ? virtual_gadget.configured : device_open) ? "Yes" : "No") + "\n";
                     } else if (cmd == "set-type ds4") {
                         if (target_type != TYPE_DS4) {
                             pending_type_change = TYPE_DS4;
@@ -598,19 +674,12 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Recreate UHID device on dynamic emulation type reload
+        // Recreate virtual device on dynamic emulation type reload
         if (type_change_requested) {
             target_type = pending_type_change;
             type_change_requested = false;
             
-            if (uhid_fd >= 0) {
-                struct uhid_event destroy_ev;
-                memset(&destroy_ev, 0, sizeof(destroy_ev));
-                destroy_ev.type = UHID_DESTROY;
-                uhid_write(uhid_fd, destroy_ev);
-                close(uhid_fd);
-                uhid_fd = -1;
-            }
+            destroy_virtual_device();
 
             // Release physical controller grab and permissions
             if (phy_fd >= 0) {
@@ -638,44 +707,10 @@ int main(int argc, char* argv[]) {
                 unlink("/run/ds4-translator.none");
                 system("udevadm trigger");
 
-                std::cout << "Recreating virtual controller as " << (target_type == TYPE_DS4 ? "DualShock 4" : "DualSense") << std::endl;
-                uhid_fd = open("/dev/uhid", O_RDWR | O_CLOEXEC | O_NONBLOCK);
-                if (uhid_fd >= 0) {
-                    struct uhid_event ev;
-                    memset(&ev, 0, sizeof(ev));
-                    ev.type = UHID_CREATE2;
-                    
-                    if (target_type == TYPE_DS4) {
-                        strncpy((char*)ev.u.create2.name, "Sony Computer Entertainment Wireless Controller", sizeof(ev.u.create2.name));
-                        strncpy((char*)ev.u.create2.uniq, "74:e7:d6:3a:47:e8", sizeof(ev.u.create2.uniq));
-                        ev.u.create2.rd_size = sizeof(ds4_usb_rdesc);
-                        memcpy(ev.u.create2.rd_data, ds4_usb_rdesc, sizeof(ds4_usb_rdesc));
-                        ev.u.create2.bus = BUS_USB;
-                        ev.u.create2.vendor = 0x054c;
-                        ev.u.create2.product = 0x05c4;
-                        ev.u.create2.version = 0x8111;
-                        ev.u.create2.country = 0;
-                    } else {
-                        strncpy((char*)ev.u.create2.name, "Sony Interactive Entertainment DualSense Wireless Controller", sizeof(ev.u.create2.name));
-                        strncpy((char*)ev.u.create2.uniq, "74:e7:d6:3a:47:e8", sizeof(ev.u.create2.uniq));
-                        ev.u.create2.rd_size = sizeof(dualsense_usb_rdesc);
-                        memcpy(ev.u.create2.rd_data, dualsense_usb_rdesc, sizeof(dualsense_usb_rdesc));
-                        ev.u.create2.bus = BUS_USB;
-                        ev.u.create2.vendor = 0x054c;
-                        ev.u.create2.product = 0x0ce6;
-                        ev.u.create2.version = 0x8111;
-                        ev.u.create2.country = 0;
-                    }
-
-                    if (uhid_write(uhid_fd, ev) >= 0) {
-                        std::cout << "Virtual USB Controller created (reloaded)." << std::endl;
-                        device_open = false;
-                        usleep(100000); // 100ms settling delay for udev properties
-                        send_physical_output_report(phy_fd, is_bluetooth, 0, 0, cur_r, cur_g, cur_b);
-                    } else {
-                        close(uhid_fd);
-                        uhid_fd = -1;
-                    }
+                if (create_virtual_device(target_type)) {
+                    device_open = false;
+                    usleep(100000); // 100ms settling delay for udev properties
+                    send_physical_output_report(phy_fd, is_bluetooth, 0, 0, cur_r, cur_g, cur_b);
                 }
             }
         }
@@ -696,14 +731,7 @@ int main(int argc, char* argv[]) {
             chmod(phy_path.c_str(), orig_mode);
             phy_name = "";
 
-            if (uhid_fd >= 0) {
-                struct uhid_event destroy_ev;
-                memset(&destroy_ev, 0, sizeof(destroy_ev));
-                destroy_ev.type = UHID_DESTROY;
-                uhid_write(uhid_fd, destroy_ev);
-                close(uhid_fd);
-                uhid_fd = -1;
-            }
+            destroy_virtual_device();
             continue;
         }
 
@@ -719,7 +747,8 @@ int main(int argc, char* argv[]) {
                     // Trigger disconnect manually
                     pfds[phy_poll_idx].revents |= POLLHUP;
                 }
-            } else if (device_open && uhid_fd >= 0) {
+            } else if (((backend_type == BACKEND_GADGET) ? virtual_gadget.configured : device_open) && 
+                       ((backend_type == BACKEND_GADGET) || uhid_fd >= 0)) {
                 struct dualshock4_input_report_common common;
                 bool got_report = false;
                 uint8_t num_touch = 0;
@@ -755,6 +784,11 @@ int main(int argc, char* argv[]) {
                         struct dualshock4_input_report_usb* out_ds = (struct dualshock4_input_report_usb*)out_ev.u.input2.data;
                         out_ds->report_id = 0x01;
                         out_ds->common = common;
+                        // Override battery status: report as USB-wired, fully charged.
+                        // status[0] bit4 = cable state (1=USB), bits 3:0 = battery level (0-10, 0x0B=full)
+                        // This prevents the kernel from exposing a battery power_supply device.
+                        out_ds->common.status[0] = 0x1B; // cable=1, battery=0x0B (full)
+                        out_ds->common.status[1] = 0x00;
                         out_ds->num_touch_reports = (num_touch > 3) ? 3 : num_touch;
                         for (int i = 0; i < out_ds->num_touch_reports; ++i) {
                             out_ds->touch_reports[i] = touch_reps[i];
@@ -806,30 +840,41 @@ int main(int argc, char* argv[]) {
                         out_ds5->status[2] = 0x00;
                     }
 
-                    uhid_write(uhid_fd, out_ev);
+                    if (backend_type == BACKEND_GADGET) {
+                        raw_gadget_send_input_report(&virtual_gadget, out_ev.u.input2.data, out_ev.u.input2.size);
+                    } else {
+                        uhid_write(uhid_fd, out_ev);
+                    }
                 }
             }
         }
 
         // Handle virtual controller state/queries from Kernel
         if (uhid_poll_idx >= 0 && (pfds[uhid_poll_idx].revents & (POLLERR | POLLHUP))) {
-            std::cerr << "UHID device dropped." << std::endl;
-            // Trigger recreate of virtual device
-            close(uhid_fd);
-            uhid_fd = -1;
+            if (backend_type == BACKEND_GADGET) {
+                std::cerr << "Gadget device dropped." << std::endl;
+                raw_gadget_close(&virtual_gadget);
+            } else {
+                std::cerr << "UHID device dropped." << std::endl;
+                close(uhid_fd);
+                uhid_fd = -1;
+            }
             continue;
         }
 
         if (uhid_poll_idx >= 0 && (pfds[uhid_poll_idx].revents & POLLIN)) {
-            struct uhid_event kernel_ev;
-            ssize_t bytes_read = read(uhid_fd, &kernel_ev, sizeof(kernel_ev));
-            if (bytes_read < 0) {
-                if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                    std::cerr << "Error reading from uhid: " << strerror(errno) << std::endl;
-                    close(uhid_fd);
-                    uhid_fd = -1;
-                }
-            } else if (bytes_read > 0) {
+            if (backend_type == BACKEND_GADGET) {
+                // EP0 events are handled by ep0_loop thread — nothing to do here
+            } else {
+                struct uhid_event kernel_ev;
+                ssize_t bytes_read = read(uhid_fd, &kernel_ev, sizeof(kernel_ev));
+                if (bytes_read < 0) {
+                    if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                        std::cerr << "Error reading from uhid: " << strerror(errno) << std::endl;
+                        close(uhid_fd);
+                        uhid_fd = -1;
+                    }
+                } else if (bytes_read > 0) {
                 switch (kernel_ev.type) {
                     case UHID_START:
                         std::cout << "UHID Device Started by kernel" << std::endl;
@@ -1022,6 +1067,7 @@ int main(int argc, char* argv[]) {
             }
         }
     }
+    }
 
     // Clean up Unix socket
     if (server_fd >= 0) {
@@ -1044,14 +1090,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Destroy virtual controller
-    if (uhid_fd >= 0) {
-        std::cout << "Destroying virtual device..." << std::endl;
-        struct uhid_event destroy_ev;
-        memset(&destroy_ev, 0, sizeof(destroy_ev));
-        destroy_ev.type = UHID_DESTROY;
-        uhid_write(uhid_fd, destroy_ev);
-        close(uhid_fd);
-    }
+    destroy_virtual_device();
 
     std::cout << "DS4 Translator daemon stopped." << std::endl;
     return 0;

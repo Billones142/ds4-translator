@@ -2,12 +2,16 @@
 Description=DualShock 4 to Virtual Controller Translator Daemon
 After=bluetooth.target
 Wants=bluetooth.target
+StartLimitIntervalSec=120
+StartLimitBurst=3
 
 [Service]
 Type=simple
+ExecStartPre=-/usr/bin/modprobe raw_gadget
+ExecStartPre=-/usr/bin/modprobe dummy_hcd
 ExecStart=/usr/local/bin/ds4-translator
-Restart=always
-RestartSec=2
+Restart=on-failure
+RestartSec=10
 StandardOutput=journal
 StandardError=journal
 

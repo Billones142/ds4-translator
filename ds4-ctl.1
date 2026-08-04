@@ -1,0 +1,40 @@
+.TH DS4-CTL 1 "August 2026" "ds4-ctl 1.0" "User Commands"
+.SH NAME
+ds4-ctl \- Control utility for the ds4-translator daemon
+.SH SYNOPSIS
+.B ds4-ctl
+[\fIcommand\fR]
+.SH DESCRIPTION
+.B ds4-ctl
+is the control interface for the \fBds4-translator\fR daemon. It communicates with the daemon via a Unix domain socket located at \fI/run/ds4-translator.sock\fR.
+.SH COMMANDS
+.TP
+.B status
+Displays the current status of the daemon, including the physical controller event node, connection interface type, virtual emulation target type, and host client connection state.
+.TP
+.B set-type ds4
+Changes the target virtual controller emulation type to a Sony DualShock 4.
+.TP
+.B set-type dualsense
+Changes the target virtual controller emulation type to a Sony DualSense.
+.TP
+.B set-type none
+Disables virtual controller emulation.
+.TP
+.B set-backend uhid
+Changes the backend interface to `/dev/uhid` (requires daemon restart).
+.TP
+.B set-backend gadget
+Changes the backend interface to `/dev/raw-gadget` (requires daemon restart).
+.TP
+.B help
+Shows basic usage and command synopsis.
+.SH FILES
+.TP
+.I /run/ds4-translator.sock
+The Unix domain socket used to communicate with the daemon.
+.TP
+.I /etc/ds4-translator.conf
+The translator configuration file.
+.SH SEE ALSO
+.BR ds4-translator (1)
