@@ -902,41 +902,36 @@ int main(int argc, char* argv[]) {
                         
                         if (rtype == UHID_FEATURE_REPORT) {
                             if (target_type == TYPE_DS4) {
-                                if (rnum == 0x02) {
+                                if (rnum == 0x02 || rnum == 0x25) {
                                     reply_ev.u.get_report_reply.size = 37;
-                                    reply_ev.u.get_report_reply.data[0] = 0x02;
-                                    // Mock calibration
-                                    reply_ev.u.get_report_reply.data[7] = 0x00; reply_ev.u.get_report_reply.data[8] = 0x04;
-                                    reply_ev.u.get_report_reply.data[9] = 0x00; reply_ev.u.get_report_reply.data[10] = 0xFC;
-                                    reply_ev.u.get_report_reply.data[11] = 0x00; reply_ev.u.get_report_reply.data[12] = 0x04;
-                                    reply_ev.u.get_report_reply.data[13] = 0x00; reply_ev.u.get_report_reply.data[14] = 0xFC;
-                                    reply_ev.u.get_report_reply.data[15] = 0x00; reply_ev.u.get_report_reply.data[16] = 0x04;
-                                    reply_ev.u.get_report_reply.data[17] = 0x00; reply_ev.u.get_report_reply.data[18] = 0xFC;
-                                    reply_ev.u.get_report_reply.data[19] = 0x00; reply_ev.u.get_report_reply.data[20] = 0x04;
-                                    reply_ev.u.get_report_reply.data[21] = 0x00; reply_ev.u.get_report_reply.data[22] = 0x04;
-                                    reply_ev.u.get_report_reply.data[23] = 0x00; reply_ev.u.get_report_reply.data[24] = 0x20;
-                                    reply_ev.u.get_report_reply.data[25] = 0x00; reply_ev.u.get_report_reply.data[26] = 0xE0;
-                                    reply_ev.u.get_report_reply.data[27] = 0x00; reply_ev.u.get_report_reply.data[28] = 0x20;
-                                    reply_ev.u.get_report_reply.data[29] = 0x00; reply_ev.u.get_report_reply.data[30] = 0xE0;
-                                    reply_ev.u.get_report_reply.data[31] = 0x00; reply_ev.u.get_report_reply.data[32] = 0x20;
-                                    reply_ev.u.get_report_reply.data[33] = 0x00; reply_ev.u.get_report_reply.data[34] = 0xE0;
-                                } else if (rnum == 0xa3) {
+                                    reply_ev.u.get_report_reply.data[0] = rnum;
+                                    // Full DS4 IMU calibration data structure (Gyro biases, Accel biases and scale factors)
+                                    static const uint8_t ds4_cal[36] = {
+                                        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                        0x00, 0x04, 0x00, 0xfc, 0x00, 0x04,
+                                        0x00, 0xfc, 0x00, 0x04, 0x00, 0xfc,
+                                        0x00, 0x04, 0x00, 0x04, 0x00, 0x20,
+                                        0x00, 0xe0, 0x00, 0x20, 0x00, 0xe0,
+                                        0x00, 0x20, 0x00, 0xe0, 0x00, 0x00
+                                    };
+                                    memcpy(&reply_ev.u.get_report_reply.data[1], ds4_cal, 36);
+                                } else if (rnum == 0x10 || rnum == 0x12) {
+                                    reply_ev.u.get_report_reply.size = 16;
+                                    reply_ev.u.get_report_reply.data[0] = rnum;
+                                    // MAC Address (e8:47:3a:d6:e7:74) & Bluetooth identity info
+                                    static const uint8_t mac_info[15] = {
+                                        0xe8, 0x47, 0x3a, 0xd6, 0xe7, 0x74,
+                                        0x08, 0x25, 0x00, 0x1e, 0x00, 0xee, 0x74, 0xd0, 0xbc
+                                    };
+                                    memcpy(&reply_ev.u.get_report_reply.data[1], mac_info, 15);
+                                } else if (rnum == 0x31 || rnum == 0xa3) {
                                     reply_ev.u.get_report_reply.size = 49;
-                                    reply_ev.u.get_report_reply.data[0] = 0xa3;
-                                    // Real DS4 hw_version = 0x5438, fw_version = 0x2033
+                                    reply_ev.u.get_report_reply.data[0] = rnum;
+                                    // DS4 HW/FW version & extended capabilities
                                     reply_ev.u.get_report_reply.data[35] = 0x38;
                                     reply_ev.u.get_report_reply.data[36] = 0x54;
                                     reply_ev.u.get_report_reply.data[41] = 0x33;
                                     reply_ev.u.get_report_reply.data[42] = 0x20;
-                                } else if (rnum == 0x12) {
-                                    reply_ev.u.get_report_reply.size = 16;
-                                    reply_ev.u.get_report_reply.data[0] = 0x12;
-                                    reply_ev.u.get_report_reply.data[1] = 0xe8;
-                                    reply_ev.u.get_report_reply.data[2] = 0x47;
-                                    reply_ev.u.get_report_reply.data[3] = 0x3a;
-                                    reply_ev.u.get_report_reply.data[4] = 0xd6;
-                                    reply_ev.u.get_report_reply.data[5] = 0xe7;
-                                    reply_ev.u.get_report_reply.data[6] = 0x74;
                                 }
                             } else { // DualSense
                                 if (rnum == 0x05) {
