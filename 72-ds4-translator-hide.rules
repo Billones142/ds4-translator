@@ -1,16 +1,34 @@
 # Match physical DualShock 4 controllers only if the translator service is active and not disabled ("none" emulation)
 
 # Bluetooth physical controllers (always bus 0005)
-TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="hidraw", KERNELS=="0005:054C:05C4.*", MODE="0600", OWNER="root", GROUP="root", TAG-="uaccess", TAG-="seat"
-TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="hidraw", KERNELS=="0005:054C:09CC.*", MODE="0600", OWNER="root", GROUP="root", TAG-="uaccess", TAG-="seat"
-TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="input", KERNELS=="0005:054C:05C4.*", MODE="0600", OWNER="root", GROUP="root", TAG-="uaccess", TAG-="seat"
-TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="input", KERNELS=="0005:054C:09CC.*", MODE="0600", OWNER="root", GROUP="root", TAG-="uaccess", TAG-="seat"
+TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="hidraw", KERNELS=="0005:054C:05C4.*", \
+  MODE="0666", TAG-="uaccess", TAG-="seat", ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_INPUT}="", \
+  ENV{ID_BUS}="", ENV{ID_VENDOR_ID}="", ENV{ID_MODEL_ID}="", ENV{ID_MODEL}="", ENV{ID_VENDOR}=""
+
+TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="hidraw", KERNELS=="0005:054C:09CC.*", \
+  MODE="0666", TAG-="uaccess", TAG-="seat", ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_INPUT}="", \
+  ENV{ID_BUS}="", ENV{ID_VENDOR_ID}="", ENV{ID_MODEL_ID}="", ENV{ID_MODEL}="", ENV{ID_VENDOR}=""
+
+TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="input", KERNELS=="0005:054C:05C4.*", \
+  MODE="0660", TAG-="uaccess", TAG-="seat", ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_INPUT}=""
+
+TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="input", KERNELS=="0005:054C:09CC.*", \
+  MODE="0660", TAG-="uaccess", TAG-="seat", ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_INPUT}=""
 
 # USB physical controllers (bus 0003, but has a parent in the usb subsystem to avoid matching virtual uhid)
-TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="hidraw", KERNELS=="0003:054C:05C4.*", DRIVERS=="usb", MODE="0600", OWNER="root", GROUP="root", TAG-="uaccess", TAG-="seat"
-TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="hidraw", KERNELS=="0003:054C:09CC.*", DRIVERS=="usb", MODE="0600", OWNER="root", GROUP="root", TAG-="uaccess", TAG-="seat"
-TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="input", KERNELS=="0003:054C:05C4.*", DRIVERS=="usb", MODE="0600", OWNER="root", GROUP="root", TAG-="uaccess", TAG-="seat"
-TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="input", KERNELS=="0003:054C:09CC.*", DRIVERS=="usb", MODE="0600", OWNER="root", GROUP="root", TAG-="uaccess", TAG-="seat"
+TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="hidraw", KERNELS=="0003:054C:05C4.*", DRIVERS=="usb", \
+  MODE="0666", TAG-="uaccess", TAG-="seat", ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_INPUT}="", \
+  ENV{ID_BUS}="", ENV{ID_VENDOR_ID}="", ENV{ID_MODEL_ID}="", ENV{ID_MODEL}="", ENV{ID_VENDOR}=""
+
+TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="hidraw", KERNELS=="0003:054C:09CC.*", DRIVERS=="usb", \
+  MODE="0666", TAG-="uaccess", TAG-="seat", ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_INPUT}="", \
+  ENV{ID_BUS}="", ENV{ID_VENDOR_ID}="", ENV{ID_MODEL_ID}="", ENV{ID_MODEL}="", ENV{ID_VENDOR}=""
+
+TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="input", KERNELS=="0003:054C:05C4.*", DRIVERS=="usb", \
+  MODE="0660", TAG-="uaccess", TAG-="seat", ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_INPUT}=""
+
+TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="input", KERNELS=="0003:054C:09CC.*", DRIVERS=="usb", \
+  MODE="0660", TAG-="uaccess", TAG-="seat", ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_INPUT}=""
 
 # -----------------------------------------------------------------------------
 # Virtual controller USB emulation properties injection (so Steam/Proton/Wine recognize it as a real USB gamepad)
