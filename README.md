@@ -25,17 +25,24 @@ Ensure that the User-space HID (`uhid`) kernel module is loaded:
 sudo modprobe uhid
 ```
 
-## Building
+## Installation
 
-To build the executable and the control utility:
+### Option 1: Download a release
+
+Grabs the latest prebuilt release tarball (no compiler needed) and installs it:
 ```bash
-make
+curl -s https://api.github.com/repos/Billones142/ds4-translator/releases/latest \
+  | grep browser_download_url | cut -d '"' -f4 | xargs curl -LO
+tar xzf ds4-translator-*.tar.gz
+cd ds4-translator-*/
+sudo make install
 ```
 
-## Installing
-
-To install the daemon and CLI control utility, and enable the systemd service:
+### Option 2: Clone and build from source
 ```bash
+git clone https://github.com/Billones142/ds4-translator.git
+cd ds4-translator
+make
 sudo make install
 ```
 

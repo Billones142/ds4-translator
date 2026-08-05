@@ -1,0 +1,49 @@
+name: Release
+
+# Builds ds4-translator/ds4-ctl and publishes a downloadable tarball whenever
+# a version tag (v*) is pushed to main, so users can install without needing
+# a compiler (see README's "Download a release" instructions).
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          # gcc/g++-multilib provide -m32 support, needed to build the
+          # 32-bit libudev-sony-spoof32.so target alongside the 64-bit one.
+          sudo apt-get install -y build-essential gcc-multilib g++-multilib
+
+      - name: Build
+        run: make all
+
+      - name: Package release archive
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          DIST_NAME="ds4-translator-${VERSION}"
+          mkdir -p "dist/${DIST_NAME}"
+          # Clean, tracked-files-only source tree (no .git, no build output,
+          # no local dev artifacts) plus the binaries just built above, so
+          # extracting the tarball and running `sudo make install` works
+          # immediately without needing a compiler.
+          git archive HEAD | tar -x -C "dist/${DIST_NAME}"
+          cp ds4-translator ds4-ctl libudev-sony-spoof.so libudev-sony-spoof32.so "dist/${DIST_NAME}/"
+          tar -czf "${DIST_NAME}.tar.gz" -C dist "${DIST_NAME}"
+          echo "ASSET_PATH=${DIST_NAME}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET_PATH }}
+          generate_release_notes: true
