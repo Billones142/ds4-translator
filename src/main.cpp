@@ -139,6 +139,45 @@ struct __attribute__((packed)) dualsense_input_report {
     uint8_t reserved4[8];
 };
 
+// ---------- Standalone virtual controller (no physical hardware required) ----------
+// Lets `ds4-ctl virtual` create and drive the UHID device directly over the
+// IPC socket, so detection/compatibility can be tested without an actual
+// DualShock 4/DualSense plugged in.
+bool standalone_virtual = false;
+
+// Set by the `release-physical` IPC command so the auto-scan loop stops
+// reclaiming a physical controller that's still plugged in, letting a
+// standalone virtual device be created/driven in its place for testing
+// (e.g. the wine-controller-probe harness comparing real vs. emulated
+// input delivery without needing the cable unplugged). Cleared by
+// `resume-physical`.
+bool ignore_physical = false;
+
+enum {
+    SYN_BTN_SQUARE   = 1 << 0,
+    SYN_BTN_CROSS    = 1 << 1,
+    SYN_BTN_CIRCLE   = 1 << 2,
+    SYN_BTN_TRIANGLE = 1 << 3,
+    SYN_BTN_L1       = 1 << 4,
+    SYN_BTN_R1       = 1 << 5,
+    SYN_BTN_L2       = 1 << 6,
+    SYN_BTN_R2       = 1 << 7,
+    SYN_BTN_SHARE    = 1 << 8,
+    SYN_BTN_OPTIONS  = 1 << 9,
+    SYN_BTN_L3       = 1 << 10,
+    SYN_BTN_R3       = 1 << 11,
+    SYN_BTN_PS       = 1 << 12,
+    SYN_BTN_TOUCHPAD = 1 << 13,
+};
+
+struct SyntheticState {
+    uint16_t buttons = 0;
+    uint8_t dpad = 8; // HID hat switch: 0=up..7=up-left clockwise, 8=neutral
+    uint8_t lx = 128, ly = 128, rx = 128, ry = 128;
+    uint8_t l2_analog = 0, r2_analog = 0;
+};
+SyntheticState synth_state;
+
 // Scan /dev/ for physical DualShock 4
 std::string find_physical_ds4(bool& out_is_bluetooth) {
     std::string found_name = "";
@@ -318,6 +357,7 @@ bool is_bluetooth = false;
 uint8_t cur_motor_left = 0, cur_motor_right = 0;
 uint8_t cur_r = 0, cur_g = 0, cur_b = 255;
 }
+uint8_t sequence_number = 0;
 
 void write_config(ControllerType type) {
     std::ofstream f("/etc/ds4-translator.conf");
@@ -382,8 +422,14 @@ bool create_virtual_device(ControllerType type) {
             return false;
         }
         std::cout << "Virtual USB Controller created via UHID." << std::endl;
-        usleep(250000); // Allow kernel to complete sysfs node creation before triggering udev
-        system("udevadm trigger");
+        // Backgrounded: hid-playstation's probe() issues synchronous GET_REPORT
+        // requests (calibration/pairing info) to this uhid device right after
+        // creation. Blocking the main poll loop here (as a synchronous usleep +
+        // system() previously did) starves those requests until they hit the
+        // kernel's raw_request timeout (-EIO), which fails DS4 probe entirely
+        // ("Failed to retrieve DualShock4 pairing info", "probe ... failed with
+        // error -5") and leaves the device with no hidraw/input nodes at all.
+        system("(sleep 0.25 && udevadm trigger) >/dev/null 2>&1 &");
         return true;
     }
     return false;
@@ -401,8 +447,151 @@ void destroy_virtual_device() {
             uhid_write(uhid_fd, destroy_ev);
             close(uhid_fd);
             uhid_fd = -1;
+            // Give hid-playstation time to unbind and the kernel to free the
+            // old device's hidraw/event/js minor numbers before a
+            // subsequent create_virtual_device() call. Without this, a fast
+            // destroy-then-recreate cycle (e.g. unplug/replug, or type
+            // change) can race the unbind: the kernel still considers the
+            // old minors in use when the new device registers, so it hands
+            // out the next free index (e.g. js1) instead of reusing the
+            // one that just freed up (js0) — visible as the controller's
+            // device index creeping upward across reconnects instead of
+            // staying at the lowest available slot. Mirrors the same wait
+            // already used for the gadget backend below.
+            usleep(200000);
         }
     }
+}
+
+// Build and send a UHID_INPUT2 report for `type` from a DS4-format "common"
+// struct. Shared by the physical-passthrough path and the standalone
+// synthetic-input path (`ds4-ctl virtual`), which differ only in how
+// `common` gets populated (real hardware report vs. synthesized from
+// keyboard-driven button state).
+void emit_input_report(ControllerType type, const struct dualshock4_input_report_common& common,
+                        uint8_t num_touch, const struct dualshock4_touch_report touch_reps[4]) {
+    struct uhid_event out_ev;
+    memset(&out_ev, 0, sizeof(out_ev));
+    out_ev.type = UHID_INPUT2;
+
+    if (type == TYPE_DS4) {
+        out_ev.u.input2.size = sizeof(struct dualshock4_input_report_usb);
+        struct dualshock4_input_report_usb* out_ds = (struct dualshock4_input_report_usb*)out_ev.u.input2.data;
+        out_ds->report_id = 0x01;
+        out_ds->common = common;
+        // Override battery status: report as USB-wired, fully charged.
+        // status[0] bit4 = cable state (1=USB), bits 3:0 = battery level (0-10, 0x0B=full)
+        // This prevents the kernel from exposing a battery power_supply device.
+        out_ds->common.status[0] = 0x1B; // cable=1, battery=0x0B (full)
+        out_ds->common.status[1] = 0x00;
+        out_ds->num_touch_reports = (num_touch > 3) ? 3 : num_touch;
+        for (int i = 0; i < out_ds->num_touch_reports; ++i) {
+            out_ds->touch_reports[i] = touch_reps[i];
+        }
+    } else { // DualSense
+        out_ev.u.input2.size = 64;
+        out_ev.u.input2.data[0] = 0x01;
+        struct dualsense_input_report* out_ds5 = (struct dualsense_input_report*)&out_ev.u.input2.data[1];
+
+        out_ds5->x = common.x;
+        out_ds5->y = common.y;
+        out_ds5->rx = common.rx;
+        out_ds5->ry = common.ry;
+
+        out_ds5->z = common.z;
+        out_ds5->rz = common.rz;
+
+        out_ds5->buttons[0] = common.buttons[0];
+        out_ds5->buttons[1] = common.buttons[1];
+        out_ds5->buttons[2] = common.buttons[2] & 0x03;
+        out_ds5->buttons[3] = 0;
+
+        out_ds5->seq_number = sequence_number++;
+        memcpy(out_ds5->gyro, common.gyro, sizeof(out_ds5->gyro));
+        memcpy(out_ds5->accel, common.accel, sizeof(out_ds5->accel));
+        out_ds5->sensor_timestamp = (uint32_t)common.sensor_timestamp;
+
+        if (num_touch > 0) {
+            int latest = num_touch - 1;
+            if (latest > 3) latest = 3;
+            out_ds5->points[0].contact = touch_reps[latest].points[0].contact;
+            out_ds5->points[0].x_lo = touch_reps[latest].points[0].x_lo;
+            out_ds5->points[0].x_hi = touch_reps[latest].points[0].x_hi;
+            out_ds5->points[0].y_lo = touch_reps[latest].points[0].y_lo;
+            out_ds5->points[0].y_hi = touch_reps[latest].points[0].y_hi;
+
+            out_ds5->points[1].contact = touch_reps[latest].points[1].contact;
+            out_ds5->points[1].x_lo = touch_reps[latest].points[1].x_lo;
+            out_ds5->points[1].x_hi = touch_reps[latest].points[1].x_hi;
+            out_ds5->points[1].y_lo = touch_reps[latest].points[1].y_lo;
+            out_ds5->points[1].y_hi = touch_reps[latest].points[1].y_hi;
+        } else {
+            out_ds5->points[0].contact = 0x80;
+            out_ds5->points[1].contact = 0x80;
+        }
+
+        out_ds5->status[0] = 0x2B; // Fully charged, complete
+        out_ds5->status[1] = 0x00;
+        out_ds5->status[2] = 0x00;
+    }
+
+    if (backend_type == BACKEND_GADGET) {
+        raw_gadget_send_input_report(&virtual_gadget, out_ev.u.input2.data, out_ev.u.input2.size);
+    } else {
+        uhid_write(uhid_fd, out_ev);
+    }
+}
+
+// Translate keyboard-driven synthetic button/axis state (`ds4-ctl virtual`)
+// into the same DS4-format "common" struct the physical-passthrough path
+// uses, so it can go through the identical emit_input_report() translation
+// for either target type.
+struct dualshock4_input_report_common build_synthetic_common(const SyntheticState& s) {
+    struct dualshock4_input_report_common common;
+    memset(&common, 0, sizeof(common));
+    common.x = s.lx;  common.y = s.ly;
+    common.rx = s.rx; common.ry = s.ry;
+    common.z = s.l2_analog; common.rz = s.r2_analog;
+
+    uint8_t b0 = (s.dpad & 0x0F);
+    if (s.buttons & SYN_BTN_SQUARE)   b0 |= 0x10;
+    if (s.buttons & SYN_BTN_CROSS)    b0 |= 0x20;
+    if (s.buttons & SYN_BTN_CIRCLE)   b0 |= 0x40;
+    if (s.buttons & SYN_BTN_TRIANGLE) b0 |= 0x80;
+
+    uint8_t b1 = 0;
+    if (s.buttons & SYN_BTN_L1)      b1 |= 0x01;
+    if (s.buttons & SYN_BTN_R1)      b1 |= 0x02;
+    if (s.buttons & SYN_BTN_L2)      b1 |= 0x04;
+    if (s.buttons & SYN_BTN_R2)      b1 |= 0x08;
+    if (s.buttons & SYN_BTN_SHARE)   b1 |= 0x10;
+    if (s.buttons & SYN_BTN_OPTIONS) b1 |= 0x20;
+    if (s.buttons & SYN_BTN_L3)      b1 |= 0x40;
+    if (s.buttons & SYN_BTN_R3)      b1 |= 0x80;
+
+    static uint8_t counter = 0;
+    uint8_t b2 = (uint8_t)((counter++ & 0x3F) << 2);
+    if (s.buttons & SYN_BTN_PS)       b2 |= 0x01;
+    if (s.buttons & SYN_BTN_TOUCHPAD) b2 |= 0x02;
+
+    common.buttons[0] = b0;
+    common.buttons[1] = b1;
+    common.buttons[2] = b2;
+    return common;
+}
+
+// Sends one all-neutral report (no buttons held, sticks/triggers centered)
+// before the virtual device goes away. Without this, whatever was last
+// pressed at the moment of a disconnect (real controller unplugged, type
+// switched, standalone virtual destroyed, daemon stopped) stays as the last
+// report a game/Wine ever saw for that device — visible as a button
+// appearing stuck "held" until the device is recreated and starts sending
+// fresh reports again.
+void emit_neutral_report(ControllerType type) {
+    struct dualshock4_input_report_common neutral = build_synthetic_common(SyntheticState());
+    struct dualshock4_touch_report empty_touch[4];
+    memset(empty_touch, 0, sizeof(empty_touch));
+    emit_input_report(type, neutral, 0, empty_touch);
 }
 
 int main(int argc, char* argv[]) {
@@ -495,14 +684,47 @@ int main(int argc, char* argv[]) {
     mode_t orig_mode = 0660;
 
     bool device_open = false;
-    uint8_t sequence_number = 0;
+
+    // Real USB DS4 hardware streams input reports continuously (~250Hz)
+    // even at rest, so physical-passthrough mode inherits that heartbeat
+    // for free by forwarding whatever the real controller sends. The
+    // standalone virtual controller has no physical device behind it, so
+    // without this it stays completely silent between `ds4-ctl tap`/
+    // `input` IPC commands — unlike anything a real gamepad would ever
+    // do. That silence (easily multiple seconds between manually-typed
+    // commands) let a real game's own device-liveness tracking give up
+    // on it between button presses, even though each individual report
+    // was delivered correctly. Re-emitting the last known synthetic
+    // state on a fixed timer keeps the report stream continuous, mirror
+    // real hardware's idle behavior.
+    auto last_synth_heartbeat = std::chrono::steady_clock::now();
+    constexpr auto SYNTH_HEARTBEAT_INTERVAL = std::chrono::milliseconds(8);
+
+    // A dropped physical connection (Bluetooth hiccup, brief unplug) used to
+    // tear the virtual device down immediately, which is what actually made
+    // "emulation stops" intermittent: any game/Wine process that had the
+    // device open lost it outright and would only see a *new* device object
+    // if/when the controller came back, which some games never notice
+    // without a restart. Instead, keep the virtual device alive for a grace
+    // window after a drop — the physical side gets fully torn down/restored
+    // as before, but the virtual device (and its last-set LED/rumble state
+    // in cur_r/cur_g/cur_b) just sits idle. If the controller reconnects
+    // within the window, the existing virtual device is reused as-is
+    // (LED color included) instead of recreated. Only destroyed for real
+    // once the window elapses with no reconnect.
+    bool phy_disconnect_pending_destroy = false;
+    std::chrono::steady_clock::time_point phy_disconnect_time;
+    constexpr auto PHYSICAL_DISCONNECT_GRACE = std::chrono::seconds(300);
 
     bool type_change_requested = false;
     ControllerType pending_type_change = target_type;
 
     while (running) {
-        // If physical controller disconnected, scan & setup
-        if (phy_fd < 0) {
+        // If physical controller disconnected, scan & setup. Skipped while a
+        // standalone virtual controller (created via `ds4-ctl virtual`, no
+        // physical hardware involved) is active, so plugging in real
+        // hardware later doesn't fight over the same virtual device.
+        if (phy_fd < 0 && !standalone_virtual && !ignore_physical) {
             bool bt = false;
             std::string name = find_physical_ds4(bt);
             if (!name.empty()) {
@@ -525,6 +747,12 @@ int main(int argc, char* argv[]) {
                         orig_mode = phy_st.st_mode & 0777;
                     }
                     chmod(phy_path.c_str(), 0600);
+                    // A stale ACL from systemd-logind's "uaccess" tag (granted before this
+                    // daemon's udev rule could strip it, e.g. if the controller connected
+                    // before /run/ds4-translator.sock existed) grants the active user rw
+                    // access regardless of the 0600 mode bits above, so it must be cleared
+                    // explicitly or unprivileged games can still open the node directly.
+                    system(("setfacl -b '" + phy_path + "' 2>/dev/null").c_str());
 
                     // Grab and hide input events (event and js nodes)
                     std::vector<std::string> event_paths = get_event_nodes(phy_name);
@@ -539,6 +767,14 @@ int main(int argc, char* argv[]) {
                         if (stat(ev_path.c_str(), &node_st) == 0) {
                             node.orig_mode = node_st.st_mode & 0777;
                         }
+
+                        // EVIOCGRAB only blocks input *delivery* to other readers; it does
+                        // NOT stop them from opening the node and querying its name/caps
+                        // via EVIOCGNAME/EVIOCGBIT. That alone is enough for the browser
+                        // Gamepad API / SDL to list the physical pad as a second, dead
+                        // controller. Root-only 0600 (mirroring the hidraw fix) actually
+                        // keeps other processes from opening it at all.
+                        chmod(ev_path.c_str(), 0600);
 
                         // We only grab event nodes, not js nodes (EVIOCGRAB is only for evdev)
                         if (ev_path.find("event") != std::string::npos) {
@@ -560,8 +796,18 @@ int main(int argc, char* argv[]) {
                     }
 
                     bool created = true;
+                    bool reused_existing = false;
                     if (target_type == TYPE_NONE) {
                         std::cout << "Emulation disabled. Hiding physical controller only." << std::endl;
+                    } else if (phy_disconnect_pending_destroy) {
+                        // Reconnected within the grace window: the virtual
+                        // device was never destroyed, so reuse it as-is —
+                        // the game/Wine never saw it disappear, and cur_r/
+                        // cur_g/cur_b (pushed back to the physical pad
+                        // below) still hold whatever LED color was last set.
+                        std::cout << "Physical controller reconnected within grace period; reusing existing virtual device." << std::endl;
+                        phy_disconnect_pending_destroy = false;
+                        reused_existing = true;
                     } else {
                         created = create_virtual_device(target_type);
                     }
@@ -582,10 +828,30 @@ int main(int argc, char* argv[]) {
                         usleep(500000); // Sleep 500ms before retrying
                     } else {
                         if (target_type != TYPE_NONE) {
-                            usleep(100000); // 100ms settling delay for udev properties
-                            send_physical_output_report(phy_fd, is_bluetooth, 0, 0, cur_r, cur_g, cur_b);
+                            if (!reused_existing) {
+                                usleep(100000); // 100ms settling delay for udev properties
+                            }
+                            // Detached: on some kernels a Bluetooth hidraw write() can
+                            // block for several seconds regardless of O_NONBLOCK (the
+                            // hidp/L2CAP output path doesn't honor it). Doing this inline
+                            // used to stall the main poll loop for that whole window,
+                            // starving hid-playstation's probe() of the GET_REPORT
+                            // replies it needs and failing DS4 registration outright.
+                            // Also re-applies the last known LED color to the physical
+                            // pad after a reconnect, since a real DS4 resets its LED
+                            // when the connection drops even though our virtual device
+                            // (and cur_r/cur_g/cur_b) didn't change.
+                            int dup_fd = dup(phy_fd);
+                            if (dup_fd >= 0) {
+                                std::thread([fd = dup_fd, bt = is_bluetooth, r = cur_r, g = cur_g, b = cur_b]() {
+                                    send_physical_output_report(fd, bt, 0, 0, r, g, b);
+                                    close(fd);
+                                }).detach();
+                            }
                         }
-                        device_open = false;
+                        if (!reused_existing) {
+                            device_open = false;
+                        }
                     }
                 }
             }
@@ -623,11 +889,23 @@ int main(int argc, char* argv[]) {
             server_poll_idx = pfds.size() - 1;
         }
 
-        int poll_ret = poll(pfds.data(), pfds.size(), 1000);
+        int poll_timeout = standalone_virtual ? 8 : 1000;
+        int poll_ret = poll(pfds.data(), pfds.size(), poll_timeout);
         if (poll_ret < 0) {
             if (errno == EINTR) continue;
             std::cerr << "Poll failed: " << strerror(errno) << std::endl;
             break;
+        }
+
+        if (standalone_virtual) {
+            auto now = std::chrono::steady_clock::now();
+            if (now - last_synth_heartbeat >= SYNTH_HEARTBEAT_INTERVAL) {
+                last_synth_heartbeat = now;
+                struct dualshock4_input_report_common common = build_synthetic_common(synth_state);
+                struct dualshock4_touch_report empty_touch[4];
+                memset(empty_touch, 0, sizeof(empty_touch));
+                emit_input_report(target_type, common, 0, empty_touch);
+            }
         }
 
         // Handle Unix Domain Socket configuration clients
@@ -649,6 +927,101 @@ int main(int argc, char* argv[]) {
                         response += "Connection Type: " + std::string(phy_fd >= 0 ? (is_bluetooth ? "Bluetooth" : "USB") : "N/A") + "\n";
                         response += "Virtual Emulation: " + std::string(target_type == TYPE_DS4 ? "DualShock 4" : (target_type == TYPE_NONE ? "None" : "DualSense")) + "\n";
                         response += "Device Open by Host: " + std::string(((backend_type == BACKEND_GADGET) ? virtual_gadget.configured : device_open) ? "Yes" : "No") + "\n";
+                        response += "Standalone Virtual (no hardware): " + std::string(standalone_virtual ? "Yes" : "No") + "\n";
+                        response += "Physical Auto-Scan Disabled (release-physical): " + std::string(ignore_physical ? "Yes" : "No") + "\n";
+                        if (phy_disconnect_pending_destroy) {
+                            auto remaining = std::chrono::duration_cast<std::chrono::seconds>(
+                                PHYSICAL_DISCONNECT_GRACE - (std::chrono::steady_clock::now() - phy_disconnect_time));
+                            response += "Physical Disconnected, Grace Period: " + std::to_string(remaining.count()) + "s remaining\n";
+                        }
+                    } else if (cmd == "create-virtual ds4" || cmd == "create-virtual dualsense") {
+                        ControllerType want = (cmd == "create-virtual ds4") ? TYPE_DS4 : TYPE_DUALSENSE;
+                        if (phy_fd >= 0) {
+                            response = "Error: A physical controller is connected and already driving the virtual device.";
+                        } else if (standalone_virtual) {
+                            response = "Virtual controller already active.";
+                        } else if (uhid_fd >= 0 || virtual_gadget.configured) {
+                            response = "Error: A virtual device is already active.";
+                        } else if (create_virtual_device(want)) {
+                            standalone_virtual = true;
+                            target_type = want;
+                            synth_state = SyntheticState();
+                            device_open = false;
+                            response = "OK: Standalone virtual controller created.";
+                        } else {
+                            response = "Error: Failed to create virtual controller (see daemon log).";
+                        }
+                    } else if (cmd == "destroy-virtual") {
+                        if (!standalone_virtual) {
+                            response = "Error: No standalone virtual controller is active.";
+                        } else {
+                            if ((backend_type == BACKEND_GADGET) ? virtual_gadget.configured : device_open) {
+                                emit_neutral_report(target_type);
+                            }
+                            destroy_virtual_device();
+                            phy_disconnect_pending_destroy = false;
+                            standalone_virtual = false;
+                            device_open = false;
+                            response = "OK: Standalone virtual controller destroyed.";
+                        }
+                    } else if (cmd == "release-physical") {
+                        if (phy_fd < 0) {
+                            ignore_physical = true;
+                            response = "OK: No physical controller was connected; auto-scan disabled.";
+                        } else {
+                            std::cout << "Releasing physical controller by IPC request..." << std::endl;
+                            for (auto& node : hidden_nodes) {
+                                if (node.is_grabbed && node.fd >= 0) {
+                                    ioctl(node.fd, EVIOCGRAB, 0);
+                                    close(node.fd);
+                                }
+                                chmod(node.path.c_str(), node.orig_mode);
+                            }
+                            hidden_nodes.clear();
+                            close(phy_fd);
+                            phy_fd = -1;
+                            chmod(phy_path.c_str(), orig_mode);
+                            phy_name = "";
+
+                            if ((backend_type == BACKEND_GADGET) ? virtual_gadget.configured : device_open) {
+                                emit_neutral_report(target_type);
+                            }
+                            destroy_virtual_device();
+                            phy_disconnect_pending_destroy = false;
+                            device_open = false;
+                            ignore_physical = true;
+                            response = "OK: Physical controller released and auto-scan disabled. Use create-virtual, then resume-physical when done.";
+                        }
+                    } else if (cmd == "resume-physical") {
+                        ignore_physical = false;
+                        response = "OK: Physical controller auto-scan resumed.";
+                    } else if (cmd.rfind("input ", 0) == 0) {
+                        if (!standalone_virtual) {
+                            response = "Error: No standalone virtual controller is active. Use create-virtual (or ds4-ctl virtual) first.";
+                        } else {
+                            unsigned int buttons_val, dpad_val, lx_val, ly_val, rx_val, ry_val, l2_val, r2_val;
+                            int n = sscanf(cmd.c_str(), "input %x %u %u %u %u %u %u %u",
+                                           &buttons_val, &dpad_val, &lx_val, &ly_val, &rx_val, &ry_val, &l2_val, &r2_val);
+                            if (n != 8) {
+                                response = "Error: malformed input command";
+                            } else {
+                                synth_state.buttons = (uint16_t)buttons_val;
+                                synth_state.dpad = (uint8_t)dpad_val;
+                                synth_state.lx = (uint8_t)lx_val;
+                                synth_state.ly = (uint8_t)ly_val;
+                                synth_state.rx = (uint8_t)rx_val;
+                                synth_state.ry = (uint8_t)ry_val;
+                                synth_state.l2_analog = (uint8_t)l2_val;
+                                synth_state.r2_analog = (uint8_t)r2_val;
+
+                                struct dualshock4_input_report_common common = build_synthetic_common(synth_state);
+                                struct dualshock4_touch_report empty_touch[4];
+                                memset(empty_touch, 0, sizeof(empty_touch));
+                                emit_input_report(target_type, common, 0, empty_touch);
+                                last_synth_heartbeat = std::chrono::steady_clock::now();
+                                response = "OK";
+                            }
+                        }
                     } else if (cmd == "set-type ds4") {
                         if (target_type != TYPE_DS4) {
                             pending_type_change = TYPE_DS4;
@@ -685,10 +1058,14 @@ int main(int argc, char* argv[]) {
 
         // Recreate virtual device on dynamic emulation type reload
         if (type_change_requested) {
+            if ((backend_type == BACKEND_GADGET) ? virtual_gadget.configured : device_open) {
+                emit_neutral_report(target_type); // old type, before it's overwritten below
+            }
             target_type = pending_type_change;
             type_change_requested = false;
-            
+
             destroy_virtual_device();
+            phy_disconnect_pending_destroy = false;
 
             // Release physical controller grab and permissions
             if (phy_fd >= 0) {
@@ -709,17 +1086,32 @@ int main(int argc, char* argv[]) {
 
             if (target_type == TYPE_NONE) {
                 std::cout << "Emulation type set to None. Disabling translation." << std::endl;
+                standalone_virtual = false;
                 std::ofstream f("/run/ds4-translator.none");
                 f.close();
                 system("udevadm trigger");
             } else {
                 unlink("/run/ds4-translator.none");
                 system("udevadm trigger");
+                if (phy_fd >= 0 && !phy_path.empty()) {
+                    chmod(phy_path.c_str(), 0600);
+                    system(("setfacl -b '" + phy_path + "' 2>/dev/null").c_str());
+                }
 
                 if (create_virtual_device(target_type)) {
                     device_open = false;
                     usleep(100000); // 100ms settling delay for udev properties
-                    send_physical_output_report(phy_fd, is_bluetooth, 0, 0, cur_r, cur_g, cur_b);
+                    if (phy_fd >= 0) {
+                        int dup_fd = dup(phy_fd);
+                        if (dup_fd >= 0) {
+                            bool bt = is_bluetooth;
+                            uint8_t r = cur_r, g = cur_g, b = cur_b;
+                            std::thread([dup_fd, bt, r, g, b]() {
+                                send_physical_output_report(dup_fd, bt, 0, 0, r, g, b);
+                                close(dup_fd);
+                            }).detach();
+                        }
+                    }
                 }
             }
         }
@@ -740,8 +1132,29 @@ int main(int argc, char* argv[]) {
             chmod(phy_path.c_str(), orig_mode);
             phy_name = "";
 
-            destroy_virtual_device();
+            // Don't tear the virtual device down yet — clear its input state
+            // so nothing looks stuck "held" during the grace window, but
+            // leave the device itself (and its LED/rumble state) alive in
+            // case the controller comes back. See PHYSICAL_DISCONNECT_GRACE.
+            if (target_type != TYPE_NONE &&
+                ((backend_type == BACKEND_GADGET) ? virtual_gadget.configured : device_open)) {
+                emit_neutral_report(target_type);
+                phy_disconnect_pending_destroy = true;
+                phy_disconnect_time = std::chrono::steady_clock::now();
+            }
             continue;
+        }
+
+        // Grace window for a dropped physical controller expired with no
+        // reconnect — actually destroy the virtual device now.
+        if (phy_disconnect_pending_destroy &&
+            std::chrono::steady_clock::now() - phy_disconnect_time >= PHYSICAL_DISCONNECT_GRACE) {
+            std::cout << "Physical controller did not reconnect within "
+                      << std::chrono::duration_cast<std::chrono::seconds>(PHYSICAL_DISCONNECT_GRACE).count()
+                      << "s; destroying virtual device." << std::endl;
+            destroy_virtual_device();
+            device_open = false;
+            phy_disconnect_pending_destroy = false;
         }
 
         // Forward physical controller inputs to virtual controller
@@ -774,86 +1187,28 @@ int main(int argc, char* argv[]) {
                     }
                     got_report = true;
                 } else if (in_buf[0] == 0x11 && bytes_read >= 78) {
-                    struct dualshock4_input_report_bt* bt_in = (struct dualshock4_input_report_bt*)in_buf;
-                    common = bt_in->common;
-                    num_touch = bt_in->num_touch_reports;
-                    for (int i = 0; i < 4 && i < num_touch; ++i) {
-                        touch_reps[i] = bt_in->touch_reports[i];
+                    // Bluetooth input reports carry a CRC32 (seed 0xA1) over the first 74
+                    // bytes. hid-playstation validates this in the kernel and drops the
+                    // report on mismatch ("DualShock4 input CRC's check failed" in dmesg);
+                    // we must do the same, otherwise a corrupted-but-right-length packet
+                    // (RF interference, momentary disconnect) gets its garbage bytes
+                    // decoded as real stick/button state and forwarded to the game.
+                    uint32_t received_crc = (uint32_t)in_buf[74] | ((uint32_t)in_buf[75] << 8) |
+                                             ((uint32_t)in_buf[76] << 16) | ((uint32_t)in_buf[77] << 24);
+                    uint32_t computed_crc = calculate_crc32(0xA1, in_buf, 74);
+                    if (received_crc == computed_crc) {
+                        struct dualshock4_input_report_bt* bt_in = (struct dualshock4_input_report_bt*)in_buf;
+                        common = bt_in->common;
+                        num_touch = bt_in->num_touch_reports;
+                        for (int i = 0; i < 4 && i < num_touch; ++i) {
+                            touch_reps[i] = bt_in->touch_reports[i];
+                        }
+                        got_report = true;
                     }
-                    got_report = true;
                 }
 
                 if (got_report) {
-                    struct uhid_event out_ev;
-                    memset(&out_ev, 0, sizeof(out_ev));
-                    out_ev.type = UHID_INPUT2;
-
-                    if (target_type == TYPE_DS4) {
-                        out_ev.u.input2.size = sizeof(struct dualshock4_input_report_usb);
-                        struct dualshock4_input_report_usb* out_ds = (struct dualshock4_input_report_usb*)out_ev.u.input2.data;
-                        out_ds->report_id = 0x01;
-                        out_ds->common = common;
-                        // Override battery status: report as USB-wired, fully charged.
-                        // status[0] bit4 = cable state (1=USB), bits 3:0 = battery level (0-10, 0x0B=full)
-                        // This prevents the kernel from exposing a battery power_supply device.
-                        out_ds->common.status[0] = 0x1B; // cable=1, battery=0x0B (full)
-                        out_ds->common.status[1] = 0x00;
-                        out_ds->num_touch_reports = (num_touch > 3) ? 3 : num_touch;
-                        for (int i = 0; i < out_ds->num_touch_reports; ++i) {
-                            out_ds->touch_reports[i] = touch_reps[i];
-                        }
-                    } else { // DualSense
-                        out_ev.u.input2.size = 64;
-                        out_ev.u.input2.data[0] = 0x01;
-                        struct dualsense_input_report* out_ds5 = (struct dualsense_input_report*)&out_ev.u.input2.data[1];
-                        
-                        out_ds5->x = common.x;
-                        out_ds5->y = common.y;
-                        out_ds5->rx = common.rx;
-                        out_ds5->ry = common.ry;
-                        
-                        out_ds5->z = common.z;
-                        out_ds5->rz = common.rz;
-                        
-                        out_ds5->buttons[0] = common.buttons[0];
-                        out_ds5->buttons[1] = common.buttons[1];
-                        out_ds5->buttons[2] = common.buttons[2] & 0x03;
-                        out_ds5->buttons[3] = 0;
-                        
-                        out_ds5->seq_number = sequence_number++;
-                        memcpy(out_ds5->gyro, common.gyro, sizeof(out_ds5->gyro));
-                        memcpy(out_ds5->accel, common.accel, sizeof(out_ds5->accel));
-                        out_ds5->sensor_timestamp = (uint32_t)common.sensor_timestamp;
-                        
-                        if (num_touch > 0) {
-                            int latest = num_touch - 1;
-                            if (latest > 3) latest = 3;
-                            out_ds5->points[0].contact = touch_reps[latest].points[0].contact;
-                            out_ds5->points[0].x_lo = touch_reps[latest].points[0].x_lo;
-                            out_ds5->points[0].x_hi = touch_reps[latest].points[0].x_hi;
-                            out_ds5->points[0].y_lo = touch_reps[latest].points[0].y_lo;
-                            out_ds5->points[0].y_hi = touch_reps[latest].points[0].y_hi;
-
-                            out_ds5->points[1].contact = touch_reps[latest].points[1].contact;
-                            out_ds5->points[1].x_lo = touch_reps[latest].points[1].x_lo;
-                            out_ds5->points[1].x_hi = touch_reps[latest].points[1].x_hi;
-                            out_ds5->points[1].y_lo = touch_reps[latest].points[1].y_lo;
-                            out_ds5->points[1].y_hi = touch_reps[latest].points[1].y_hi;
-                        } else {
-                            out_ds5->points[0].contact = 0x80;
-                            out_ds5->points[1].contact = 0x80;
-                        }
-                        
-                        out_ds5->status[0] = 0x2B; // Fully charged, complete
-                        out_ds5->status[1] = 0x00;
-                        out_ds5->status[2] = 0x00;
-                    }
-
-                    if (backend_type == BACKEND_GADGET) {
-                        raw_gadget_send_input_report(&virtual_gadget, out_ev.u.input2.data, out_ev.u.input2.size);
-                    } else {
-                        uhid_write(uhid_fd, out_ev);
-                    }
+                    emit_input_report(target_type, common, num_touch, touch_reps);
                 }
             }
         }
@@ -868,6 +1223,7 @@ int main(int argc, char* argv[]) {
                 close(uhid_fd);
                 uhid_fd = -1;
             }
+            standalone_virtual = false;
             continue;
         }
 
@@ -1094,6 +1450,9 @@ int main(int argc, char* argv[]) {
     }
 
     // Destroy virtual controller
+    if ((backend_type == BACKEND_GADGET) ? virtual_gadget.configured : device_open) {
+        emit_neutral_report(target_type);
+    }
     destroy_virtual_device();
 
     std::cout << "DS4 Translator daemon stopped." << std::endl;
