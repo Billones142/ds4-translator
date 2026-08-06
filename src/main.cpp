@@ -302,6 +302,19 @@ void hide_physical_battery(const std::string& hidraw_name) {
 // what makes hotplug-aware apps rescan and see it. This only touches the
 // HID driver binding, not the underlying USB/Bluetooth connection, so it
 // doesn't unpair or disconnect Bluetooth controllers.
+//
+// The `bind` write returning only means the kernel-side device object
+// exists — it does NOT mean udevd has finished reacting to the resulting
+// "add" uevent yet (running our rules, writing the real vendor/serial
+// properties into the udev database). That happens asynchronously in
+// userspace, so there's a real window right after bind where the device
+// is already open-able but doesn't have its final properties applied.
+// Steam has been observed racing exactly that window on the none->hidden
+// direction, briefly reading a not-yet-fully-restored identity from it and
+// caching a garbled/generic name until manually restarted. `udevadm
+// settle` blocks until udev's event queue is empty, closing (not
+// necessarily eliminating, since it can't stop a listener from reacting
+// to the raw kernel uevent before udevd does) that window.
 bool rebind_physical_hid_driver(const std::string& hidraw_name) {
     std::error_code ec;
     fs::path hid_dev = fs::canonical("/sys/class/hidraw/" + hidraw_name + "/device", ec);
@@ -322,6 +335,8 @@ bool rebind_physical_hid_driver(const std::string& hidraw_name) {
     if (!bind_f.is_open()) return false;
     bind_f << hid_id;
     bind_f.close();
+
+    system("udevadm settle --timeout=2");
 
     return true;
 }
