@@ -1123,13 +1123,23 @@ int main(int argc, char* argv[]) {
             if ((backend_type == BACKEND_GADGET) ? virtual_gadget.configured : device_open) {
                 emit_neutral_report(target_type); // old type, before it's overwritten below
             }
+            bool had_physical = (phy_fd >= 0);
             target_type = pending_type_change;
             type_change_requested = false;
 
             destroy_virtual_device();
             phy_disconnect_pending_destroy = false;
 
-            // Release physical controller grab and permissions
+            // Release physical controller grab and permissions. If a
+            // physical controller was connected, deliberately don't
+            // recreate the virtual device further down — releasing phy_fd
+            // here makes the auto-scan block (top of the loop) rediscover
+            // and re-open the same controller on the very next iteration,
+            // creating the device bound to the new type through the exact
+            // same path a fresh connection uses. Creating it here too
+            // (the previous behavior) just leaked a duplicate,
+            // immediately-orphaned UHID device once the scan block created
+            // its own moments later.
             if (phy_fd >= 0) {
                 std::cout << "Releasing physical controller grab..." << std::endl;
                 for (auto& node : hidden_nodes) {
@@ -1155,26 +1165,21 @@ int main(int argc, char* argv[]) {
             } else {
                 unlink("/run/ds4-translator.none");
                 system("udevadm trigger");
-                if (phy_fd >= 0 && !phy_path.empty()) {
-                    chmod(phy_path.c_str(), 0600);
-                    system(("setfacl -b '" + phy_path + "' 2>/dev/null").c_str());
-                }
 
-                if (create_virtual_device(target_type)) {
-                    device_open = false;
-                    usleep(100000); // 100ms settling delay for udev properties
-                    if (phy_fd >= 0) {
-                        int dup_fd = dup(phy_fd);
-                        if (dup_fd >= 0) {
-                            bool bt = is_bluetooth;
-                            uint8_t r = cur_r, g = cur_g, b = cur_b;
-                            std::thread([dup_fd, bt, r, g, b]() {
-                                send_physical_output_report(dup_fd, bt, 0, 0, r, g, b);
-                                close(dup_fd);
-                            }).detach();
-                        }
+                if (!had_physical && standalone_virtual) {
+                    // A standalone virtual controller (no hardware) was
+                    // already active — recreate it under the new type so
+                    // it doesn't just vanish; nothing else will create it
+                    // for us since there's no physical device to trigger
+                    // the auto-scan path.
+                    if (create_virtual_device(target_type)) {
+                        device_open = false;
                     }
                 }
+                // else: either had_physical (the auto-scan block creates
+                // the device once it rediscovers the controller) or
+                // nothing was actively emulated before this type change —
+                // don't eagerly create a device with nothing to drive it.
             }
         }
 
