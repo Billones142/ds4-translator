@@ -3,7 +3,6 @@
 #include <vector>
 #include <deque>
 #include <thread>
-#include <mutex>
 #include <chrono>
 #include <atomic>
 #include <csignal>
@@ -320,47 +319,6 @@ bool rebind_physical_hid_driver(const std::string& hidraw_name) {
     system("udevadm settle --timeout=2");
 
     return true;
-}
-
-// Cache for the physical controller's real MAC/pairing-info feature report,
-// filled in the background by prefetch_physical_identity() and read by the
-// UHID_GET_REPORT handler below. See that function's comment for why this
-// has to be a non-blocking cache read rather than a live query, however
-// tightly bounded.
-std::mutex phy_identity_mutex;
-uint8_t cached_phy_identity[64];
-int cached_phy_identity_len = 0;
-
-// Kicks off a background fetch of the physical controller's real MAC/
-// pairing-info feature report (HIDIOCGFEATURE) into the cache above.
-// Deliberately fire-and-forget: HIDIOCGFEATURE doesn't honor O_NONBLOCK and
-// can take a while to complete if the physical device isn't fully settled
-// yet (e.g. right when it's just been opened), and even a *bounded* wait
-// inside the UHID_GET_REPORT reply path was enough to intermittently make
-// hid-playstation's kernel-side probe on the virtual device give up and
-// fail registration outright — that path has to reply immediately, always.
-// Called right after the physical controller is opened, so the fetch has a
-// head start on hid-playstation's own probe sequence, but the reply path
-// falls back to the static placeholder if this hasn't finished yet.
-void prefetch_physical_identity(int fd, uint8_t report_id) {
-    {
-        std::lock_guard<std::mutex> lock(phy_identity_mutex);
-        cached_phy_identity_len = 0; // invalidate any previous physical device's cached identity
-    }
-    int dup_fd = dup(fd);
-    if (dup_fd < 0) return;
-    std::thread([dup_fd, report_id]() {
-        uint8_t buf[64];
-        memset(buf, 0, sizeof(buf));
-        buf[0] = report_id;
-        int len = ioctl(dup_fd, HIDIOCGFEATURE(sizeof(buf)), buf);
-        close(dup_fd);
-        if (len > 0) {
-            std::lock_guard<std::mutex> lock(phy_identity_mutex);
-            cached_phy_identity_len = (len > (int)sizeof(cached_phy_identity)) ? (int)sizeof(cached_phy_identity) : len;
-            memcpy(cached_phy_identity, buf, cached_phy_identity_len);
-        }
-    }).detach();
 }
 
 // Send output report to physical controller
@@ -1027,16 +985,6 @@ int main(int argc, char* argv[]) {
                     phy_fd = -1;
                     phy_name = "";
                 } else {
-                    // Kicked off as early as possible (before hiding, before
-                    // virtual device creation) so it has maximal head start
-                    // on hid-playstation's own probe of the virtual device
-                    // moments from now. See prefetch_physical_identity()'s
-                    // comment for why the actual GET_REPORT reply path only
-                    // ever reads the cache this fills, never queries live.
-                    if (controller_type_emulates(target_type)) {
-                        prefetch_physical_identity(phy_fd, target_type == TYPE_DS4 ? 0x12 : 0x09);
-                    }
-
                     // TYPE_NONE is a fully hands-off passthrough mode: the
                     // physical controller is left completely untouched (no
                     // hidraw/event hiding, no battery hiding) so other apps
@@ -1657,33 +1605,7 @@ int main(int argc, char* argv[]) {
                         uint8_t rtype = kernel_ev.u.get_report.rtype;
                         
                         if (rtype == UHID_FEATURE_REPORT) {
-                            // MAC/pairing-info feature reports (0x10/0x12 for DS4, 0x09 for
-                            // DualSense) are how Steam identifies a controller as "the same
-                            // device" across sessions and matches it to a saved nickname —
-                            // it doesn't rely on udev's ID_SERIAL property for this. Relaying
-                            // the real controller's own response here (instead of the static
-                            // placeholder MAC below) makes the virtual device report the same
-                            // identity Steam already knows, instead of showing up as a new
-                            // "Dummy" device every time translation is active. Only possible
-                            // when a physical controller is actually attached; the standalone
-                            // virtual controller (no hardware) has no real MAC to relay and
-                            // keeps the placeholder.
-                            bool relayed = false;
-                            if ((target_type == TYPE_DS4 && (rnum == 0x10 || rnum == 0x12)) ||
-                                (target_type == TYPE_DUALSENSE && rnum == 0x09)) {
-                                std::lock_guard<std::mutex> lock(phy_identity_mutex);
-                                if (cached_phy_identity_len > 0) {
-                                    size_t copy_len = (size_t)cached_phy_identity_len > sizeof(reply_ev.u.get_report_reply.data)
-                                                           ? sizeof(reply_ev.u.get_report_reply.data) : (size_t)cached_phy_identity_len;
-                                    memcpy(reply_ev.u.get_report_reply.data, cached_phy_identity, copy_len);
-                                    reply_ev.u.get_report_reply.data[0] = rnum; // echo back whichever ID was actually requested
-                                    reply_ev.u.get_report_reply.size = copy_len;
-                                    relayed = true;
-                                }
-                            }
-                            if (relayed) {
-                                // handled above
-                            } else if (target_type == TYPE_DS4) {
+                            if (target_type == TYPE_DS4) {
                                 if (rnum == 0x02 || rnum == 0x25) {
                                     reply_ev.u.get_report_reply.size = 37;
                                     reply_ev.u.get_report_reply.data[0] = rnum;
