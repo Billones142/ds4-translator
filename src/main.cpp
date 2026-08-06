@@ -4,8 +4,6 @@
 #include <deque>
 #include <thread>
 #include <mutex>
-#include <condition_variable>
-#include <memory>
 #include <chrono>
 #include <atomic>
 #include <csignal>
@@ -328,55 +326,45 @@ bool rebind_physical_hid_driver(const std::string& hidraw_name) {
     return true;
 }
 
-// Fetches a feature report from the physical controller via HIDIOCGFEATURE,
-// bounded to timeout_ms. HIDIOCGFEATURE is a synchronous control transfer
-// that doesn't honor O_NONBLOCK — the kernel can take several seconds to
-// give up if the physical device isn't fully settled yet (e.g. right after
-// it was just opened), and since this is called from the same
-// single-threaded poll loop that also serves ds4-ctl's IPC socket, an
-// unbounded call here freezes the entire daemon for that whole window
-// (observed: ds4-ctl commands timing out, and the physical controller
-// staying visible to other apps because the hiding sequence right after it
-// is also stuck). The actual ioctl runs on a detached worker thread against
-// a dup'd fd so it's safe to just stop waiting on it; if it doesn't finish
-// within timeout_ms, the caller gets -1 and the worker is abandoned to
-// finish (or never finish) on its own, harmlessly.
-int query_physical_feature_report(int fd, uint8_t report_id, uint8_t* buf, size_t buf_size, int timeout_ms) {
+// Cache for the physical controller's real MAC/pairing-info feature report,
+// filled in the background by prefetch_physical_identity() and read by the
+// UHID_GET_REPORT handler below. See that function's comment for why this
+// has to be a non-blocking cache read rather than a live query, however
+// tightly bounded.
+std::mutex phy_identity_mutex;
+uint8_t cached_phy_identity[64];
+int cached_phy_identity_len = 0;
+
+// Kicks off a background fetch of the physical controller's real MAC/
+// pairing-info feature report (HIDIOCGFEATURE) into the cache above.
+// Deliberately fire-and-forget: HIDIOCGFEATURE doesn't honor O_NONBLOCK and
+// can take a while to complete if the physical device isn't fully settled
+// yet (e.g. right when it's just been opened), and even a *bounded* wait
+// inside the UHID_GET_REPORT reply path was enough to intermittently make
+// hid-playstation's kernel-side probe on the virtual device give up and
+// fail registration outright — that path has to reply immediately, always.
+// Called right after the physical controller is opened, so the fetch has a
+// head start on hid-playstation's own probe sequence, but the reply path
+// falls back to the static placeholder if this hasn't finished yet.
+void prefetch_physical_identity(int fd, uint8_t report_id) {
+    {
+        std::lock_guard<std::mutex> lock(phy_identity_mutex);
+        cached_phy_identity_len = 0; // invalidate any previous physical device's cached identity
+    }
     int dup_fd = dup(fd);
-    if (dup_fd < 0) return -1;
-
-    struct ResultBox {
-        std::mutex m;
-        std::condition_variable cv;
-        bool done = false;
-        int len = -1;
-        uint8_t data[64] = {0};
-    };
-    auto box = std::make_shared<ResultBox>();
-
-    std::thread([dup_fd, report_id, box]() {
-        uint8_t local_buf[64];
-        memset(local_buf, 0, sizeof(local_buf));
-        local_buf[0] = report_id;
-        int len = ioctl(dup_fd, HIDIOCGFEATURE(sizeof(local_buf)), local_buf);
+    if (dup_fd < 0) return;
+    std::thread([dup_fd, report_id]() {
+        uint8_t buf[64];
+        memset(buf, 0, sizeof(buf));
+        buf[0] = report_id;
+        int len = ioctl(dup_fd, HIDIOCGFEATURE(sizeof(buf)), buf);
         close(dup_fd);
-        std::lock_guard<std::mutex> lock(box->m);
-        box->len = len;
         if (len > 0) {
-            size_t n = (size_t)len < sizeof(box->data) ? (size_t)len : sizeof(box->data);
-            memcpy(box->data, local_buf, n);
+            std::lock_guard<std::mutex> lock(phy_identity_mutex);
+            cached_phy_identity_len = (len > (int)sizeof(cached_phy_identity)) ? (int)sizeof(cached_phy_identity) : len;
+            memcpy(cached_phy_identity, buf, cached_phy_identity_len);
         }
-        box->done = true;
-        box->cv.notify_all();
     }).detach();
-
-    std::unique_lock<std::mutex> lock(box->m);
-    bool completed = box->cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&box] { return box->done; });
-    if (!completed || box->len <= 0) return -1;
-
-    size_t copy_len = (size_t)box->len > buf_size ? buf_size : (size_t)box->len;
-    memcpy(buf, box->data, copy_len);
-    return (int)copy_len;
 }
 
 // Send output report to physical controller
@@ -1043,6 +1031,16 @@ int main(int argc, char* argv[]) {
                     phy_fd = -1;
                     phy_name = "";
                 } else {
+                    // Kicked off as early as possible (before hiding, before
+                    // virtual device creation) so it has maximal head start
+                    // on hid-playstation's own probe of the virtual device
+                    // moments from now. See prefetch_physical_identity()'s
+                    // comment for why the actual GET_REPORT reply path only
+                    // ever reads the cache this fills, never queries live.
+                    if (controller_type_emulates(target_type)) {
+                        prefetch_physical_identity(phy_fd, target_type == TYPE_DS4 ? 0x12 : 0x09);
+                    }
+
                     // TYPE_NONE is a fully hands-off passthrough mode: the
                     // physical controller is left completely untouched (no
                     // hidraw/event hiding, no battery hiding) so other apps
@@ -1677,15 +1675,14 @@ int main(int argc, char* argv[]) {
                             // virtual controller (no hardware) has no real MAC to relay and
                             // keeps the placeholder.
                             bool relayed = false;
-                            if (phy_fd >= 0 &&
-                                ((target_type == TYPE_DS4 && (rnum == 0x10 || rnum == 0x12)) ||
-                                 (target_type == TYPE_DUALSENSE && rnum == 0x09))) {
-                                uint8_t phy_buf[64];
-                                int phy_len = query_physical_feature_report(phy_fd, rnum, phy_buf, sizeof(phy_buf), 200);
-                                if (phy_len > 0) {
-                                    size_t copy_len = (size_t)phy_len > sizeof(reply_ev.u.get_report_reply.data)
-                                                           ? sizeof(reply_ev.u.get_report_reply.data) : (size_t)phy_len;
-                                    memcpy(reply_ev.u.get_report_reply.data, phy_buf, copy_len);
+                            if ((target_type == TYPE_DS4 && (rnum == 0x10 || rnum == 0x12)) ||
+                                (target_type == TYPE_DUALSENSE && rnum == 0x09)) {
+                                std::lock_guard<std::mutex> lock(phy_identity_mutex);
+                                if (cached_phy_identity_len > 0) {
+                                    size_t copy_len = (size_t)cached_phy_identity_len > sizeof(reply_ev.u.get_report_reply.data)
+                                                           ? sizeof(reply_ev.u.get_report_reply.data) : (size_t)cached_phy_identity_len;
+                                    memcpy(reply_ev.u.get_report_reply.data, cached_phy_identity, copy_len);
+                                    reply_ev.u.get_report_reply.data[0] = rnum; // echo back whichever ID was actually requested
                                     reply_ev.u.get_report_reply.size = copy_len;
                                     relayed = true;
                                 }
