@@ -3,6 +3,9 @@
 #include <vector>
 #include <deque>
 #include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <memory>
 #include <chrono>
 #include <atomic>
 #include <csignal>
@@ -323,6 +326,57 @@ bool rebind_physical_hid_driver(const std::string& hidraw_name) {
     bind_f.close();
 
     return true;
+}
+
+// Fetches a feature report from the physical controller via HIDIOCGFEATURE,
+// bounded to timeout_ms. HIDIOCGFEATURE is a synchronous control transfer
+// that doesn't honor O_NONBLOCK — the kernel can take several seconds to
+// give up if the physical device isn't fully settled yet (e.g. right after
+// it was just opened), and since this is called from the same
+// single-threaded poll loop that also serves ds4-ctl's IPC socket, an
+// unbounded call here freezes the entire daemon for that whole window
+// (observed: ds4-ctl commands timing out, and the physical controller
+// staying visible to other apps because the hiding sequence right after it
+// is also stuck). The actual ioctl runs on a detached worker thread against
+// a dup'd fd so it's safe to just stop waiting on it; if it doesn't finish
+// within timeout_ms, the caller gets -1 and the worker is abandoned to
+// finish (or never finish) on its own, harmlessly.
+int query_physical_feature_report(int fd, uint8_t report_id, uint8_t* buf, size_t buf_size, int timeout_ms) {
+    int dup_fd = dup(fd);
+    if (dup_fd < 0) return -1;
+
+    struct ResultBox {
+        std::mutex m;
+        std::condition_variable cv;
+        bool done = false;
+        int len = -1;
+        uint8_t data[64] = {0};
+    };
+    auto box = std::make_shared<ResultBox>();
+
+    std::thread([dup_fd, report_id, box]() {
+        uint8_t local_buf[64];
+        memset(local_buf, 0, sizeof(local_buf));
+        local_buf[0] = report_id;
+        int len = ioctl(dup_fd, HIDIOCGFEATURE(sizeof(local_buf)), local_buf);
+        close(dup_fd);
+        std::lock_guard<std::mutex> lock(box->m);
+        box->len = len;
+        if (len > 0) {
+            size_t n = (size_t)len < sizeof(box->data) ? (size_t)len : sizeof(box->data);
+            memcpy(box->data, local_buf, n);
+        }
+        box->done = true;
+        box->cv.notify_all();
+    }).detach();
+
+    std::unique_lock<std::mutex> lock(box->m);
+    bool completed = box->cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&box] { return box->done; });
+    if (!completed || box->len <= 0) return -1;
+
+    size_t copy_len = (size_t)box->len > buf_size ? buf_size : (size_t)box->len;
+    memcpy(buf, box->data, copy_len);
+    return (int)copy_len;
 }
 
 // Send output report to physical controller
@@ -1627,9 +1681,7 @@ int main(int argc, char* argv[]) {
                                 ((target_type == TYPE_DS4 && (rnum == 0x10 || rnum == 0x12)) ||
                                  (target_type == TYPE_DUALSENSE && rnum == 0x09))) {
                                 uint8_t phy_buf[64];
-                                memset(phy_buf, 0, sizeof(phy_buf));
-                                phy_buf[0] = rnum;
-                                int phy_len = ioctl(phy_fd, HIDIOCGFEATURE(sizeof(phy_buf)), phy_buf);
+                                int phy_len = query_physical_feature_report(phy_fd, rnum, phy_buf, sizeof(phy_buf), 200);
                                 if (phy_len > 0) {
                                     size_t copy_len = (size_t)phy_len > sizeof(reply_ev.u.get_report_reply.data)
                                                            ? sizeof(reply_ev.u.get_report_reply.data) : (size_t)phy_len;
