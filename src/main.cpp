@@ -263,25 +263,6 @@ std::vector<std::string> get_event_nodes(const std::string& hidraw_name) {
     return event_nodes;
 }
 
-// Hides the physical controller's own battery/power_supply sysfs entry
-// (e.g. /sys/class/power_supply/ps-controller-battery-<mac>) from
-// unprivileged tools that enumerate /sys/class/power_supply/ directly
-// (MangoHUD, Steam, etc.), the same way its hidraw/event nodes are hidden.
-// Without this, once battery passthrough is active, both the real
-// device's own power_supply entry and the virtual device's (now
-// correctly populated) one are visible, showing duplicate/confusing
-// battery info. Directory-level chmod is enough: sysfs enforces normal
-// directory-traversal permission checks, so removing group/other
-// read+execute blocks readdir()/open() on everything underneath even
-// though the individual attribute files stay world-readable.
-void hide_physical_battery(const std::string& hidraw_name) {
-    std::string ps_dir = "/sys/class/hidraw/" + hidraw_name + "/device/power_supply";
-    if (!fs::exists(ps_dir)) return;
-    for (const auto& entry : fs::directory_iterator(ps_dir)) {
-        chmod(entry.path().c_str(), 0700);
-    }
-}
-
 // Forces the kernel to fully destroy and recreate the physical controller's
 // hid/hidraw/input device nodes, equivalent to a real unplug+replug, by
 // unbinding and rebinding its HID driver via sysfs. Needed on any type
@@ -1116,8 +1097,6 @@ int main(int argc, char* argv[]) {
                             }
                             hidden_nodes.push_back(node);
                         }
-
-                        hide_physical_battery(phy_name);
                     } // target_type != TYPE_NONE
 
                     bool created = true;
