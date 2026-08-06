@@ -1,7 +1,15 @@
+# Prefer git's own description of the checked-out commit (exact tag, or
+# <tag>-<n>-g<hash>[-dirty] between tags) since it's already the source of
+# truth the release workflow tags from. Falls back to a VERSION file for
+# builds without a .git directory — the release tarball ships one (written
+# by the workflow from the tag it's building) so `make` still embeds a
+# real version if a user extracts and rebuilds it themselves.
+VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || cat VERSION 2>/dev/null || echo unknown)
+
 CXX = g++
 CC  = gcc
-CXXFLAGS = -O3 -Wall -std=c++17
-CFLAGS   = -O3 -Wall
+CXXFLAGS = -O3 -Wall -std=c++17 -DDS4_VERSION=\"$(VERSION)\"
+CFLAGS   = -O3 -Wall -DDS4_VERSION=\"$(VERSION)\"
 LDFLAGS  = -lpthread
 
 TARGET_DAEMON = ds4-translator
@@ -26,8 +34,8 @@ SYSTEMDDIR = /etc/systemd/system
 all: $(TARGET_DAEMON) $(TARGET_CTL) $(TARGET_SPOOF) $(TARGET_SPOOF32)
 
 # Debug build: no optimisation, debug symbols, DS4_DEBUG enabled
-debug: CXXFLAGS = -O0 -g -Wall -std=c++17 -DDS4_DEBUG
-debug: CFLAGS   = -O0 -g -Wall -DDS4_DEBUG
+debug: CXXFLAGS = -O0 -g -Wall -std=c++17 -DDS4_DEBUG -DDS4_VERSION=\"$(VERSION)\"
+debug: CFLAGS   = -O0 -g -Wall -DDS4_DEBUG -DDS4_VERSION=\"$(VERSION)\"
 debug: clean all
 
 $(TARGET_DAEMON): $(DAEMON_OBJ)

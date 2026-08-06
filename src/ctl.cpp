@@ -12,9 +12,14 @@
 
 static std::string button_names_joined();
 
+#ifndef DS4_VERSION
+#define DS4_VERSION "unknown"
+#endif
+
 void print_usage() {
     std::cout << "Usage: ds4-ctl <command> [args]" << std::endl;
     std::cout << "Commands:" << std::endl;
+    std::cout << "  version                          Print ds4-ctl's version" << std::endl;
     std::cout << "  status                          Get current status of the translation daemon" << std::endl;
     std::cout << "  set-type <ds4|dualsense|none>    Change the virtual controller emulation type at runtime" << std::endl;
     std::cout << "  create-virtual <ds4|dualsense>   Create a standalone virtual controller, no physical pad needed" << std::endl;
@@ -164,6 +169,7 @@ struct CommandSpec {
     const char *arg_completions; // space-separated tokens, or nullptr
 };
 static const CommandSpec kCommands[] = {
+    {"version",          nullptr},
     {"status",           nullptr},
     {"set-type",         "ds4 dualsense none"},
     {"create-virtual",   "ds4 dualsense"},
@@ -429,6 +435,11 @@ int main(int argc, char* argv[]) {
     }
 
     std::string cmd = argv[1];
+
+    if (cmd == "version" || cmd == "--version" || cmd == "-v") {
+        std::cout << "ds4-ctl " << DS4_VERSION << std::endl;
+        return 0;
+    }
 
     // Hidden, machine-readable queries used by ds4-ctl-completion.bash. The
     // bash script asks the binary for its command list / per-command

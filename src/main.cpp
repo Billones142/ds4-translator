@@ -22,6 +22,10 @@
 #include "descriptors.h"
 #include "raw-gadget-backend.h"
 
+#ifndef DS4_VERSION
+#define DS4_VERSION "unknown"
+#endif
+
 namespace fs = std::filesystem;
 
 enum ControllerType {
@@ -656,7 +660,10 @@ int main(int argc, char* argv[]) {
     // Command line parsing
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "--type" || arg == "-t") {
+        if (arg == "--version" || arg == "-v") {
+            std::cout << "ds4-translator " << DS4_VERSION << std::endl;
+            return 0;
+        } else if (arg == "--type" || arg == "-t") {
             if (i + 1 < argc) {
                 std::string val = argv[++i];
                 if (val == "dualsense") {

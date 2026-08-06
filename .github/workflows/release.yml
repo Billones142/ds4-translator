@@ -17,6 +17,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Full history + tags: `git describe --tags` (used as a sanity
+          # check below, and by anyone rebuilding from this same checkout)
+          # needs more than the tagged commit alone to resolve reliably.
+          fetch-depth: 0
 
       - name: Install build dependencies
         run: |
@@ -26,7 +31,7 @@ jobs:
           sudo apt-get install -y build-essential gcc-multilib g++-multilib
 
       - name: Build
-        run: make all
+        run: make all VERSION="${GITHUB_REF_NAME}"
 
       - name: Package release archive
         run: |
@@ -39,6 +44,9 @@ jobs:
           # immediately without needing a compiler.
           git archive HEAD | tar -x -C "dist/${DIST_NAME}"
           cp ds4-translator ds4-ctl libudev-sony-spoof.so libudev-sony-spoof32.so "dist/${DIST_NAME}/"
+          # Fallback for `make` inside the extracted tarball, which has no
+          # .git for `git describe` to read from.
+          echo "${VERSION}" > "dist/${DIST_NAME}/VERSION"
           tar -czf "${DIST_NAME}.tar.gz" -C dist "${DIST_NAME}"
           echo "ASSET_PATH=${DIST_NAME}.tar.gz" >> "$GITHUB_ENV"
 
