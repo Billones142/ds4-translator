@@ -42,6 +42,11 @@ bool controller_type_emulates(ControllerType type) {
     return type == TYPE_DS4 || type == TYPE_DUALSENSE;
 }
 
+// Every type except TYPE_NONE hides the physical controller from other apps.
+bool controller_type_hides_physical(ControllerType type) {
+    return type != TYPE_NONE;
+}
+
 const char* controller_type_name(ControllerType type) {
     switch (type) {
         case TYPE_DS4: return "DualShock 4";
@@ -273,6 +278,50 @@ void hide_physical_battery(const std::string& hidraw_name) {
     for (const auto& entry : fs::directory_iterator(ps_dir)) {
         chmod(entry.path().c_str(), 0700);
     }
+}
+
+// Forces the kernel to fully destroy and recreate the physical controller's
+// hid/hidraw/input device nodes, equivalent to a real unplug+replug, by
+// unbinding and rebinding its HID driver via sysfs. Needed on any type
+// change that crosses the "is the physical controller hidden from other
+// apps" boundary (TYPE_NONE <-> anything else), because neither direction
+// is otherwise handled correctly for apps that are already running:
+//  - Hiding it (chmod 0600 / EVIOCGRAB) only affects *future* open()
+//    calls; a process (e.g. Steam) that already has the old hidraw node
+//    open keeps reading raw reports from it regardless of permission
+//    changes, until it closes and reopens the node itself.
+//  - Un-hiding it doesn't generate a udev "add" event on its own (the
+//    permission fixup via `udevadm trigger` only replays "change", since
+//    the device was never actually removed) — most hotplug-aware apps,
+//    Steam included, only rescan on "add"/"remove", so a newly-visible
+//    device is never picked up until the app restarts.
+// An actual unbind/bind cycle solves both: existing fds get ENODEV once
+// the old node is destroyed, and the genuine "add" event on rebind is
+// what makes hotplug-aware apps rescan and see it. This only touches the
+// HID driver binding, not the underlying USB/Bluetooth connection, so it
+// doesn't unpair or disconnect Bluetooth controllers.
+bool rebind_physical_hid_driver(const std::string& hidraw_name) {
+    std::error_code ec;
+    fs::path hid_dev = fs::canonical("/sys/class/hidraw/" + hidraw_name + "/device", ec);
+    if (ec) return false;
+    std::string hid_id = hid_dev.filename().string();
+
+    fs::path driver_dir = fs::canonical(hid_dev / "driver", ec);
+    if (ec) return false;
+
+    std::ofstream unbind_f(driver_dir / "unbind");
+    if (!unbind_f.is_open()) return false;
+    unbind_f << hid_id;
+    unbind_f.close();
+
+    usleep(150000); // let the kernel fully tear down the old nodes
+
+    std::ofstream bind_f(driver_dir / "bind");
+    if (!bind_f.is_open()) return false;
+    bind_f << hid_id;
+    bind_f.close();
+
+    return true;
 }
 
 // Send output report to physical controller
@@ -1206,6 +1255,7 @@ int main(int argc, char* argv[]) {
                 emit_neutral_report(target_type); // old type, before it's overwritten below
             }
             bool had_physical = (phy_fd >= 0);
+            ControllerType old_type = target_type;
             target_type = pending_type_change;
             type_change_requested = false;
 
@@ -1222,8 +1272,10 @@ int main(int argc, char* argv[]) {
             // (the previous behavior) just leaked a duplicate,
             // immediately-orphaned UHID device once the scan block created
             // its own moments later.
+            std::string disconnected_phy_name;
             if (phy_fd >= 0) {
                 std::cout << "Releasing physical controller grab..." << std::endl;
+                disconnected_phy_name = phy_name;
                 for (auto& node : hidden_nodes) {
                     if (node.is_grabbed && node.fd >= 0) {
                         ioctl(node.fd, EVIOCGRAB, 0);
@@ -1267,6 +1319,18 @@ int main(int argc, char* argv[]) {
                 // the device once it rediscovers the controller) or
                 // nothing was actively emulated before this type change —
                 // don't eagerly create a device with nothing to drive it.
+            }
+
+            // See rebind_physical_hid_driver()'s doc comment: a permission
+            // fixup alone doesn't retroactively affect apps that already
+            // had the physical device open, and doesn't notify hotplug-
+            // aware apps of a newly-visible device either. Only force this
+            // when hidden-ness actually changed (not e.g. ds4<->dualsense,
+            // which doesn't affect what other apps can see).
+            if (had_physical &&
+                controller_type_hides_physical(old_type) != controller_type_hides_physical(target_type)) {
+                std::cout << "Forcing physical controller re-enumeration (unbind/rebind) so already-running apps pick up the visibility change..." << std::endl;
+                rebind_physical_hid_driver(disconnected_phy_name);
             }
         }
 
