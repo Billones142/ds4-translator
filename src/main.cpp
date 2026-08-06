@@ -3,6 +3,7 @@
 #include <vector>
 #include <deque>
 #include <thread>
+#include <mutex>
 #include <chrono>
 #include <atomic>
 #include <csignal>
@@ -319,6 +320,61 @@ bool rebind_physical_hid_driver(const std::string& hidraw_name) {
     system("udevadm settle --timeout=2");
 
     return true;
+}
+
+// Cache for the physical controller's real MAC/pairing-info feature report,
+// filled in the background by prefetch_physical_identity() and read by the
+// UHID_GET_REPORT handler below. The reply path only trusts this if its
+// length exactly matches what that report is supposed to be (16 bytes for
+// DS4's 0x10/0x12, 20 for DualSense's 0x09); otherwise it falls back to the
+// static placeholder MAC exactly as if this cache were never filled.
+std::mutex phy_identity_mutex;
+uint8_t cached_phy_identity[64];
+int cached_phy_identity_len = 0;
+
+// Kicks off a background fetch of the physical controller's real MAC/
+// pairing-info feature report (HIDIOCGFEATURE) into the cache above, so the
+// virtual device can report the same identity Steam already knows instead
+// of a fixed placeholder that can never match any real controller's saved
+// profile (shows up as a generic "Dummy" device).
+//
+// Deliberately restricted after an earlier unrestricted version broke DS4
+// registration outright:
+//  - USB only. The Bluetooth GET_FEATURE(0x12) response for DS4 didn't
+//    match the 16-byte format our descriptor/hid-playstation's probe
+//    expects (exact cause unconfirmed without hardware access), and
+//    relaying it verbatim corrupted registration; USB's response is
+//    assumed closer to the standard shape, though this is still
+//    unverified against real hardware.
+//  - The reply path (not this function) additionally only trusts the
+//    cached bytes if their length exactly matches what that report is
+//    supposed to be, so even a malformed or unexpectedly-shaped response
+//    can't get relayed into a reply.
+// HIDIOCGFEATURE doesn't honor O_NONBLOCK either, and even a *bounded*
+// wait inside the UHID_GET_REPORT reply path was previously enough to
+// intermittently make hid-playstation's probe give up -- that path has to
+// reply immediately, always, hence this fire-and-forget cache instead of a
+// live query.
+void prefetch_physical_identity(int fd, bool is_bt, uint8_t report_id) {
+    if (is_bt) return;
+    {
+        std::lock_guard<std::mutex> lock(phy_identity_mutex);
+        cached_phy_identity_len = 0; // invalidate any previous physical device's cached identity
+    }
+    int dup_fd = dup(fd);
+    if (dup_fd < 0) return;
+    std::thread([dup_fd, report_id]() {
+        uint8_t buf[64];
+        memset(buf, 0, sizeof(buf));
+        buf[0] = report_id;
+        int len = ioctl(dup_fd, HIDIOCGFEATURE(sizeof(buf)), buf);
+        close(dup_fd);
+        if (len > 0) {
+            std::lock_guard<std::mutex> lock(phy_identity_mutex);
+            cached_phy_identity_len = (len > (int)sizeof(cached_phy_identity)) ? (int)sizeof(cached_phy_identity) : len;
+            memcpy(cached_phy_identity, buf, cached_phy_identity_len);
+        }
+    }).detach();
 }
 
 // Send output report to physical controller
@@ -985,6 +1041,16 @@ int main(int argc, char* argv[]) {
                     phy_fd = -1;
                     phy_name = "";
                 } else {
+                    // Kicked off as early as possible (before hiding, before
+                    // virtual device creation) so it has maximal head start
+                    // on hid-playstation's own probe of the virtual device
+                    // moments from now. See prefetch_physical_identity()'s
+                    // comment for why the actual GET_REPORT reply path only
+                    // ever reads the cache this fills, never queries live.
+                    if (controller_type_emulates(target_type)) {
+                        prefetch_physical_identity(phy_fd, is_bluetooth, target_type == TYPE_DS4 ? 0x12 : 0x09);
+                    }
+
                     // TYPE_NONE is a fully hands-off passthrough mode: the
                     // physical controller is left completely untouched (no
                     // hidraw/event hiding, no battery hiding) so other apps
@@ -1605,7 +1671,21 @@ int main(int argc, char* argv[]) {
                         uint8_t rtype = kernel_ev.u.get_report.rtype;
                         
                         if (rtype == UHID_FEATURE_REPORT) {
-                            if (target_type == TYPE_DS4) {
+                            bool relayed = false;
+                            if ((target_type == TYPE_DS4 && (rnum == 0x10 || rnum == 0x12)) ||
+                                (target_type == TYPE_DUALSENSE && rnum == 0x09)) {
+                                size_t expected_len = (target_type == TYPE_DS4) ? 16 : 20;
+                                std::lock_guard<std::mutex> lock(phy_identity_mutex);
+                                if ((size_t)cached_phy_identity_len == expected_len) {
+                                    memcpy(reply_ev.u.get_report_reply.data, cached_phy_identity, expected_len);
+                                    reply_ev.u.get_report_reply.data[0] = rnum; // echo back whichever ID was actually requested
+                                    reply_ev.u.get_report_reply.size = expected_len;
+                                    relayed = true;
+                                }
+                            }
+                            if (relayed) {
+                                // handled above
+                            } else if (target_type == TYPE_DS4) {
                                 if (rnum == 0x02 || rnum == 0x25) {
                                     reply_ev.u.get_report_reply.size = 37;
                                     reply_ev.u.get_report_reply.data[0] = rnum;
