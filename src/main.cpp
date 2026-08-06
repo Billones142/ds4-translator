@@ -540,6 +540,17 @@ void emit_input_report(ControllerType type, const struct dualshock4_input_report
         for (int i = 0; i < out_ds->num_touch_reports; ++i) {
             out_ds->touch_reports[i] = touch_reps[i];
         }
+        // Any remaining slots (all 3, when num_touch is 0 — every
+        // synthetic/standalone report) must have both points marked "not
+        // touching" (contact bit7 set). Real hardware always fills every
+        // slot in the report regardless of how many actually carry a new
+        // touch event; leaving them zeroed (contact=0x00, x=0, y=0) reads
+        // as a genuine touch at (0,0) to any consumer that doesn't
+        // strictly gate on num_touch_reports before reading slot contents.
+        for (int i = out_ds->num_touch_reports; i < 3; ++i) {
+            out_ds->touch_reports[i].points[0].contact = 0x80;
+            out_ds->touch_reports[i].points[1].contact = 0x80;
+        }
     } else { // DualSense
         out_ev.u.input2.size = 64;
         out_ev.u.input2.data[0] = 0x01;
