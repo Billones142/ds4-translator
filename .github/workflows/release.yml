@@ -43,7 +43,13 @@ jobs:
           # extracting the tarball and running `sudo make install` works
           # immediately without needing a compiler.
           git archive HEAD | tar -x -C "dist/${DIST_NAME}"
-          cp ds4-translator ds4-ctl libudev-sony-spoof.so libudev-sony-spoof32.so "dist/${DIST_NAME}/"
+          # Copy the whole build/ dir, .o files included — not just the
+          # final binaries — so every target in the Makefile's dependency
+          # graph is already satisfied and `make install` on the extracted
+          # tarball does zero compiling (the point of shipping a release:
+          # no compiler required).
+          mkdir -p "dist/${DIST_NAME}/build"
+          cp -r build/. "dist/${DIST_NAME}/build/"
           # Fallback for `make` inside the extracted tarball, which has no
           # .git for `git describe` to read from.
           echo "${VERSION}" > "dist/${DIST_NAME}/VERSION"

@@ -12,20 +12,22 @@ CXXFLAGS = -O3 -Wall -std=c++17 -DDS4_VERSION=\"$(VERSION)\"
 CFLAGS   = -O3 -Wall -DDS4_VERSION=\"$(VERSION)\"
 LDFLAGS  = -lpthread
 
-TARGET_DAEMON = ds4-translator
-TARGET_CTL    = ds4-ctl
-TARGET_SPOOF  = libudev-sony-spoof.so
-TARGET_SPOOF32 = libudev-sony-spoof32.so
-TARGET_INTERCEPT   = libds4-intercept.so
-TARGET_INTERCEPT32 = libds4-intercept32.so
+BUILD_DIR = build
+
+TARGET_DAEMON = $(BUILD_DIR)/ds4-translator
+TARGET_CTL    = $(BUILD_DIR)/ds4-ctl
+TARGET_SPOOF  = $(BUILD_DIR)/libudev-sony-spoof.so
+TARGET_SPOOF32 = $(BUILD_DIR)/libudev-sony-spoof32.so
+TARGET_INTERCEPT   = $(BUILD_DIR)/libds4-intercept.so
+TARGET_INTERCEPT32 = $(BUILD_DIR)/libds4-intercept32.so
 
 DAEMON_SRC = src/main.cpp src/raw-gadget-backend.c
 CTL_SRC    = src/ctl.cpp
 SPOOF_SRC  = src/udev-spoof.c
 INTERCEPT_SRC = src/intercept.c
 
-DAEMON_OBJ = src/main.o src/raw-gadget-backend.o
-CTL_OBJ    = src/ctl.o
+DAEMON_OBJ = $(BUILD_DIR)/main.o $(BUILD_DIR)/raw-gadget-backend.o
+CTL_OBJ    = $(BUILD_DIR)/ctl.o
 
 PREFIX    = /usr/local
 BINDIR    = $(PREFIX)/bin
@@ -38,41 +40,44 @@ debug: CXXFLAGS = -O0 -g -Wall -std=c++17 -DDS4_DEBUG -DDS4_VERSION=\"$(VERSION)
 debug: CFLAGS   = -O0 -g -Wall -DDS4_DEBUG -DDS4_VERSION=\"$(VERSION)\"
 debug: clean all
 
+$(BUILD_DIR):
+	mkdir -p $(BUILD_DIR)
+
 $(TARGET_DAEMON): $(DAEMON_OBJ)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(TARGET_CTL): $(CTL_OBJ)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
-$(TARGET_SPOOF): $(SPOOF_SRC)
+$(TARGET_SPOOF): $(SPOOF_SRC) | $(BUILD_DIR)
 	$(CC) -O3 -fPIC -shared -o $@ $< -ldl
 
-$(TARGET_SPOOF32): $(SPOOF_SRC)
+$(TARGET_SPOOF32): $(SPOOF_SRC) | $(BUILD_DIR)
 	$(CC) -m32 -O3 -fPIC -shared -o $@ $< -ldl
 
 # Diagnostic intercept library (opt-in, not built by default)
 intercept: $(TARGET_INTERCEPT) $(TARGET_INTERCEPT32)
 
-$(TARGET_INTERCEPT): $(INTERCEPT_SRC)
+$(TARGET_INTERCEPT): $(INTERCEPT_SRC) | $(BUILD_DIR)
 	$(CC) -O3 -fPIC -shared -o $@ $< -ldl -lpthread
 
-$(TARGET_INTERCEPT32): $(INTERCEPT_SRC)
+$(TARGET_INTERCEPT32): $(INTERCEPT_SRC) | $(BUILD_DIR)
 	$(CC) -m32 -O3 -fPIC -shared -o $@ $< -ldl -lpthread
 
-%.o: %.cpp
+$(BUILD_DIR)/%.o: src/%.cpp | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
-%.o: %.c
-	$(CC) $(CFLAGS) -c -o $@  $<
+$(BUILD_DIR)/%.o: src/%.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(DAEMON_OBJ) $(CTL_OBJ) $(TARGET_DAEMON) $(TARGET_CTL) $(TARGET_SPOOF) $(TARGET_SPOOF32) $(TARGET_INTERCEPT) $(TARGET_INTERCEPT32)
+	rm -rf $(BUILD_DIR)
 
 install: all
-	install -D -m 755 $(TARGET_DAEMON) $(DESTDIR)$(BINDIR)/$(TARGET_DAEMON)
-	install -D -m 755 $(TARGET_CTL) $(DESTDIR)$(BINDIR)/$(TARGET_CTL)
-	install -D -m 755 $(TARGET_SPOOF) $(DESTDIR)/usr/lib/$(TARGET_SPOOF)
-	install -D -m 755 $(TARGET_SPOOF32) $(DESTDIR)/usr/lib32/$(TARGET_SPOOF)
+	install -D -m 755 $(TARGET_DAEMON) $(DESTDIR)$(BINDIR)/$(notdir $(TARGET_DAEMON))
+	install -D -m 755 $(TARGET_CTL) $(DESTDIR)$(BINDIR)/$(notdir $(TARGET_CTL))
+	install -D -m 755 $(TARGET_SPOOF) $(DESTDIR)/usr/lib/$(notdir $(TARGET_SPOOF))
+	install -D -m 755 $(TARGET_SPOOF32) $(DESTDIR)/usr/lib32/$(notdir $(TARGET_SPOOF32))
 	install -D -m 644 ds4-translator.service $(DESTDIR)$(SYSTEMDDIR)/ds4-translator.service
 	install -D -m 644 72-ds4-translator-hide.rules $(DESTDIR)/etc/udev/rules.d/72-ds4-translator-hide.rules
 	install -D -m 644 ds4-ctl.1 $(DESTDIR)/usr/share/man/man1/ds4-ctl.1
@@ -86,10 +91,10 @@ install: all
 
 uninstall:
 	systemctl disable --now ds4-translator.service || true
-	rm -f $(DESTDIR)$(BINDIR)/$(TARGET_DAEMON)
-	rm -f $(DESTDIR)$(BINDIR)/$(TARGET_CTL)
-	rm -f $(DESTDIR)/usr/lib/$(TARGET_SPOOF)
-	rm -f $(DESTDIR)/usr/lib32/$(TARGET_SPOOF)
+	rm -f $(DESTDIR)$(BINDIR)/$(notdir $(TARGET_DAEMON))
+	rm -f $(DESTDIR)$(BINDIR)/$(notdir $(TARGET_CTL))
+	rm -f $(DESTDIR)/usr/lib/$(notdir $(TARGET_SPOOF))
+	rm -f $(DESTDIR)/usr/lib32/$(notdir $(TARGET_SPOOF32))
 	rm -f $(DESTDIR)$(SYSTEMDDIR)/ds4-translator.service
 	rm -f $(DESTDIR)/etc/udev/rules.d/72-ds4-translator-hide.rules
 	rm -f $(DESTDIR)/usr/share/man/man1/ds4-ctl.1

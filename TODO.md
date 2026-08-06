@@ -1,6 +1,5 @@
 [ ] implement system to detect specific programs (native or wine) and apply a controller config based on that
 [ ] the program should be able to "inject" the controller to programs
-[ ] make it so the builded files are organized in build/
 [ ] kerner messages:
 ´´´
 stefano@gamer-linux:~$ journalctl -k -r
