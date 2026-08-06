@@ -82,6 +82,10 @@ To disable the service and remove all installed files:
 sudo make uninstall
 ```
 
+## Known Issues
+
+- **Standalone virtual controller not detected/responsive in some Wine/Proton games**: The primary use case — a physical DualShock 4 passed through to a virtual device — has been verified working correctly. The standalone virtual controller (created via `ds4-ctl create-virtual`/`ds4-ctl virtual`, with no physical hardware behind it) has been observed failing to receive input in at least one tested Wine/Proton title, despite extensive verification that input is delivered correctly at every layer this project controls: the HID report descriptor is byte-for-byte identical to real hardware, raw button/axis state reaches Wine's DirectInput layer correctly (confirmed via `WINEDEBUG=+dinput` traces), and the virtual device streams a continuous report heartbeat matching real hardware's idle behavior. The root cause hasn't been identified — it likely sits in the game's own higher-level controller-recognition logic rather than in this daemon, but that's unconfirmed. Treat standalone/no-hardware emulation as best-effort for now rather than a guaranteed-working feature.
+
 ## Technical Details
 
 - **Official Driver Reference**: Wire protocol mapping is based on `hid-playstation.c` from the Linux kernel.
