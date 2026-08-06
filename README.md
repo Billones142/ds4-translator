@@ -15,6 +15,7 @@ It includes an IPC runtime control program (`ds4-ctl`) that allows users to chan
   - Exclusively grabs `/dev/input/event*` nodes using `EVIOCGRAB`.
   - Sets `/dev/hidraw*` permissions of the physical controller to `000` while open, restoring them on exit.
 - **Rumble & LED Passthrough**: Translates force-feedback rumble and lightbar colors from games back to the physical DualShock 4 controller.
+- **Battery Status Passthrough**: Forwards the physical controller's real charge level and cable/charging state to the virtual device (translated to DualSense's status format when emulating one), instead of always reporting fully charged.
 - **Bluetooth Support**: Parses both minimal USB and extended Bluetooth input reports from the physical DualShock 4, computing output report CRC32 checksums as required by the Sony Bluetooth HID specification.
 - **Systemd Integration**: Includes a systemd service file to run the translator as a root-level service.
 

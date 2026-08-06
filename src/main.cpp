@@ -463,13 +463,56 @@ void destroy_virtual_device() {
     }
 }
 
+// Battery passthrough: the physical DS4's own status byte (common.status[0])
+// already carries genuine charge/cable-state data from hardware, in the
+// DS4 wire format (bit4 = cable connected, bits0-3 = level, with an
+// out-of-range value of 11 used as a "fully charged" sentinel while wired).
+// When emulating a DS4 target this can be forwarded byte-for-byte, but
+// DualSense uses a different layout (bits0-3 = level, bits4-6 = charging
+// state: 0=discharging, 1=charging, 2=full), so cross-emulating requires
+// decoding to a state both formats can express and re-encoding.
+enum BatteryState { BATTERY_DISCHARGING, BATTERY_CHARGING, BATTERY_FULL };
+
+void decode_ds4_battery(uint8_t ds4_status0, int& percent, BatteryState& state) {
+    uint8_t level = ds4_status0 & 0x0F;
+    bool usb = (ds4_status0 & 0x10) != 0;
+    if (usb) {
+        if (level > 10) { percent = 100; state = BATTERY_FULL; }
+        else { percent = level * 10; state = BATTERY_CHARGING; }
+    } else {
+        percent = (level > 8) ? 100 : (level + 1) * 10;
+        state = BATTERY_DISCHARGING;
+    }
+    if (percent > 100) percent = 100;
+}
+
+uint8_t encode_dualsense_battery(int percent, BatteryState state) {
+    uint8_t status_bits;
+    switch (state) {
+        case BATTERY_FULL:       status_bits = 0x2; break;
+        case BATTERY_CHARGING:   status_bits = 0x1; break;
+        default:                 status_bits = 0x0; break;
+    }
+    int level = (percent - 5) / 10;
+    if (level < 0) level = 0;
+    if (level > 10) level = 10;
+    return (uint8_t)((status_bits << 4) | (level & 0x0F));
+}
+
 // Build and send a UHID_INPUT2 report for `type` from a DS4-format "common"
 // struct. Shared by the physical-passthrough path and the standalone
 // synthetic-input path (`ds4-ctl virtual`), which differ only in how
 // `common` gets populated (real hardware report vs. synthesized from
 // keyboard-driven button state).
+//
+// `has_real_battery`: true only when `common` came from an actual physical
+// controller's own report (its status byte already holds genuine charge/
+// cable-state data — see decode_ds4_battery() above). The standalone
+// virtual controller has no real battery to report, so it keeps reporting
+// a fixed "fully charged, wired" state instead of a meaningless zero.
 void emit_input_report(ControllerType type, const struct dualshock4_input_report_common& common,
-                        uint8_t num_touch, const struct dualshock4_touch_report touch_reps[4]) {
+                        uint8_t num_touch, const struct dualshock4_touch_report touch_reps[4],
+                        bool has_real_battery) {
     struct uhid_event out_ev;
     memset(&out_ev, 0, sizeof(out_ev));
     out_ev.type = UHID_INPUT2;
@@ -479,11 +522,16 @@ void emit_input_report(ControllerType type, const struct dualshock4_input_report
         struct dualshock4_input_report_usb* out_ds = (struct dualshock4_input_report_usb*)out_ev.u.input2.data;
         out_ds->report_id = 0x01;
         out_ds->common = common;
-        // Override battery status: report as USB-wired, fully charged.
-        // status[0] bit4 = cable state (1=USB), bits 3:0 = battery level (0-10, 0x0B=full)
-        // This prevents the kernel from exposing a battery power_supply device.
-        out_ds->common.status[0] = 0x1B; // cable=1, battery=0x0B (full)
-        out_ds->common.status[1] = 0x00;
+        if (!has_real_battery) {
+            // No physical hardware behind this device — report a plausible
+            // fixed state (USB-wired, fully charged) instead of whatever
+            // zeroed/synthetic value `common.status` happens to hold.
+            // status[0] bit4 = cable state (1=USB), bits 3:0 = battery level (0-10, 0x0B=full)
+            out_ds->common.status[0] = 0x1B; // cable=1, battery=0x0B (full)
+            out_ds->common.status[1] = 0x00;
+        }
+        // else: common.status[0]/[1] already came straight from the real
+        // controller's own report via `out_ds->common = common` above.
         out_ds->num_touch_reports = (num_touch > 3) ? 3 : num_touch;
         for (int i = 0; i < out_ds->num_touch_reports; ++i) {
             out_ds->touch_reports[i] = touch_reps[i];
@@ -530,7 +578,14 @@ void emit_input_report(ControllerType type, const struct dualshock4_input_report
             out_ds5->points[1].contact = 0x80;
         }
 
-        out_ds5->status[0] = 0x2B; // Fully charged, complete
+        if (has_real_battery) {
+            int percent;
+            BatteryState state;
+            decode_ds4_battery(common.status[0], percent, state);
+            out_ds5->status[0] = encode_dualsense_battery(percent, state);
+        } else {
+            out_ds5->status[0] = 0x2B; // Fully charged, complete
+        }
         out_ds5->status[1] = 0x00;
         out_ds5->status[2] = 0x00;
     }
@@ -591,7 +646,7 @@ void emit_neutral_report(ControllerType type) {
     struct dualshock4_input_report_common neutral = build_synthetic_common(SyntheticState());
     struct dualshock4_touch_report empty_touch[4];
     memset(empty_touch, 0, sizeof(empty_touch));
-    emit_input_report(type, neutral, 0, empty_touch);
+    emit_input_report(type, neutral, 0, empty_touch, false);
 }
 
 int main(int argc, char* argv[]) {
@@ -904,7 +959,7 @@ int main(int argc, char* argv[]) {
                 struct dualshock4_input_report_common common = build_synthetic_common(synth_state);
                 struct dualshock4_touch_report empty_touch[4];
                 memset(empty_touch, 0, sizeof(empty_touch));
-                emit_input_report(target_type, common, 0, empty_touch);
+                emit_input_report(target_type, common, 0, empty_touch, false);
             }
         }
 
@@ -1017,7 +1072,7 @@ int main(int argc, char* argv[]) {
                                 struct dualshock4_input_report_common common = build_synthetic_common(synth_state);
                                 struct dualshock4_touch_report empty_touch[4];
                                 memset(empty_touch, 0, sizeof(empty_touch));
-                                emit_input_report(target_type, common, 0, empty_touch);
+                                emit_input_report(target_type, common, 0, empty_touch, false);
                                 last_synth_heartbeat = std::chrono::steady_clock::now();
                                 response = "OK";
                             }
@@ -1208,7 +1263,7 @@ int main(int argc, char* argv[]) {
                 }
 
                 if (got_report) {
-                    emit_input_report(target_type, common, num_touch, touch_reps);
+                    emit_input_report(target_type, common, num_touch, touch_reps, true);
                 }
             }
         }
