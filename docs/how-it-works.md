@@ -27,7 +27,7 @@ To prevent games and launchers (like Steam) from receiving double-input or regis
 
 1. **Capturing `hidraw`**: The daemon scans `/dev/hidraw*` to detect a Sony DualShock 4 device (Bluetooth or USB).
 2. **Hiding nodes via udev Rules (`72-ds4-translator-hide.rules`)**:
-   - A custom udev rule `/etc/udev/rules.d/72-ds4-translator-hide.rules` matches the physical DualShock 4 device (by Bluetooth kernel name pattern `0005:054C:05C4.*` or USB matching with `DRIVERS=="usb"`).
+   - A custom udev rule `/etc/udev/rules.d/72-ds4-translator-hide.rules` matches the physical DualShock 4 device (by Bluetooth kernel name pattern `0005:054C:05C4.*`, or by the USB device's own `ATTRS{idVendor}`/`ATTRS{idProduct}` — not `DRIVERS=="usb"`, since on kernels using `hid-playstation` the intermediate hid-class device's driver is `playstation`/`sony`, not `usb`, so a combined `KERNELS=="0003:054C:*"` + `DRIVERS=="usb"` match never resolves to the same ancestor device and silently never fires).
    - The rule runs after default tag rules but before late seat rules. It strips the `uaccess` and `seat` tags (`TAG-="uaccess"`, `TAG-="seat"`) and sets permissions to `0600` owned by `root:root`.
    - Stripping the `uaccess` tag prevents `systemd-logind` from assigning POSIX Access Control Lists (ACLs) to the active logged-in user. This ensures Steam (running as the standard user) cannot open the device, even if it tries to open it immediately on hotplug.
 3. **Hiding nodes via runtime permissions (`chmod 000`)**:

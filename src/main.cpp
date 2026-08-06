@@ -1611,7 +1611,36 @@ int main(int argc, char* argv[]) {
                         uint8_t rtype = kernel_ev.u.get_report.rtype;
                         
                         if (rtype == UHID_FEATURE_REPORT) {
-                            if (target_type == TYPE_DS4) {
+                            // MAC/pairing-info feature reports (0x10/0x12 for DS4, 0x09 for
+                            // DualSense) are how Steam identifies a controller as "the same
+                            // device" across sessions and matches it to a saved nickname —
+                            // it doesn't rely on udev's ID_SERIAL property for this. Relaying
+                            // the real controller's own response here (instead of the static
+                            // placeholder MAC below) makes the virtual device report the same
+                            // identity Steam already knows, instead of showing up as a new
+                            // "Dummy" device every time translation is active. Only possible
+                            // when a physical controller is actually attached; the standalone
+                            // virtual controller (no hardware) has no real MAC to relay and
+                            // keeps the placeholder.
+                            bool relayed = false;
+                            if (phy_fd >= 0 &&
+                                ((target_type == TYPE_DS4 && (rnum == 0x10 || rnum == 0x12)) ||
+                                 (target_type == TYPE_DUALSENSE && rnum == 0x09))) {
+                                uint8_t phy_buf[64];
+                                memset(phy_buf, 0, sizeof(phy_buf));
+                                phy_buf[0] = rnum;
+                                int phy_len = ioctl(phy_fd, HIDIOCGFEATURE(sizeof(phy_buf)), phy_buf);
+                                if (phy_len > 0) {
+                                    size_t copy_len = (size_t)phy_len > sizeof(reply_ev.u.get_report_reply.data)
+                                                           ? sizeof(reply_ev.u.get_report_reply.data) : (size_t)phy_len;
+                                    memcpy(reply_ev.u.get_report_reply.data, phy_buf, copy_len);
+                                    reply_ev.u.get_report_reply.size = copy_len;
+                                    relayed = true;
+                                }
+                            }
+                            if (relayed) {
+                                // handled above
+                            } else if (target_type == TYPE_DS4) {
                                 if (rnum == 0x02 || rnum == 0x25) {
                                     reply_ev.u.get_report_reply.size = 37;
                                     reply_ev.u.get_report_reply.data[0] = rnum;

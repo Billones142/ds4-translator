@@ -15,19 +15,34 @@ TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="
 TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="input", KERNELS=="0005:054C:09CC.*", \
   MODE="0660", TAG-="uaccess", TAG-="seat", ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_INPUT}=""
 
-# USB physical controllers (bus 0003, but has a parent in the usb subsystem to avoid matching virtual uhid)
-TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="hidraw", KERNELS=="0003:054C:05C4.*", DRIVERS=="usb", \
+# USB physical controllers (bus 0003). Matched via the USB device's own
+# ATTRS{idVendor}/ATTRS{idProduct} instead of DRIVERS=="usb", because combined
+# KERNELS+DRIVERS parent-matching requires BOTH keys to match the SAME
+# ancestor device. On kernels using hid-playstation (which handles DS4/DualSense
+# instead of the older hid-sony), there's an intermediate "hid" class device
+# between the hidraw node and the real USB device node: KERNELS=="0003:054C:*"
+# only matches that intermediate hid device (DRIVERS=="playstation" there, not
+# "usb"), while DRIVERS=="usb" only matches the USB device two levels further
+# up. No single device satisfies both, so the rule silently never fired and
+# the physical node kept its default MODE=0660 + uaccess ACL (see
+# /usr/lib/udev/rules.d/60-inputplumber-uaccess.rules) letting unprivileged
+# processes (e.g. games under Wine, Steam) open it directly. ATTRS{idVendor}/
+# idProduct both live on the USB device node itself, so a single ancestor
+# match works regardless of which intermediate HID driver is in use, and it
+# still never matches the virtual UHID node since that has no USB ancestor
+# at all.
+TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="05c4", \
   MODE="0600", OWNER="root", GROUP="root", TAG-="uaccess", TAG-="seat", ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_INPUT}="", \
   ENV{ID_BUS}="", ENV{ID_VENDOR_ID}="", ENV{ID_MODEL_ID}="", ENV{ID_MODEL}="", ENV{ID_VENDOR}=""
 
-TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="hidraw", KERNELS=="0003:054C:09CC.*", DRIVERS=="usb", \
+TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="09cc", \
   MODE="0600", OWNER="root", GROUP="root", TAG-="uaccess", TAG-="seat", ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_INPUT}="", \
   ENV{ID_BUS}="", ENV{ID_VENDOR_ID}="", ENV{ID_MODEL_ID}="", ENV{ID_MODEL}="", ENV{ID_VENDOR}=""
 
-TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="input", KERNELS=="0003:054C:05C4.*", DRIVERS=="usb", \
+TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="input", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="05c4", \
   MODE="0660", TAG-="uaccess", TAG-="seat", ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_INPUT}=""
 
-TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="input", KERNELS=="0003:054C:09CC.*", DRIVERS=="usb", \
+TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="input", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="09cc", \
   MODE="0660", TAG-="uaccess", TAG-="seat", ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_INPUT}=""
 
 # -----------------------------------------------------------------------------
