@@ -38,7 +38,6 @@ To install the daemon and CLI control utility, and enable the systemd service:
 ```bash
 sudo make install
 ```
-*Note: Use `pkexec make install` if running on a system without `sudo` configured.*
 
 By default, the service starts emulating a virtual **DualShock 4** controller.
 
