@@ -21,7 +21,9 @@ void print_usage() {
     std::cout << "Commands:" << std::endl;
     std::cout << "  version                          Print ds4-ctl's version" << std::endl;
     std::cout << "  status                          Get current status of the translation daemon" << std::endl;
-    std::cout << "  set-type <ds4|dualsense|none>    Change the virtual controller emulation type at runtime" << std::endl;
+    std::cout << "  set-type <ds4|dualsense|none|hidden>   Change the virtual controller emulation type at runtime" << std::endl;
+    std::cout << "                                   (none = fully untouched physical passthrough, hidden = physical" << std::endl;
+    std::cout << "                                   hidden from other apps but not translated)" << std::endl;
     std::cout << "  create-virtual <ds4|dualsense>   Create a standalone virtual controller, no physical pad needed" << std::endl;
     std::cout << "  destroy-virtual                  Destroy the standalone virtual controller" << std::endl;
     std::cout << "  virtual [ds4|dualsense]          Create (if needed) a standalone virtual controller and open" << std::endl;
@@ -171,7 +173,7 @@ struct CommandSpec {
 static const CommandSpec kCommands[] = {
     {"version",          nullptr},
     {"status",           nullptr},
-    {"set-type",         "ds4 dualsense none"},
+    {"set-type",         "ds4 dualsense none hidden"},
     {"create-virtual",   "ds4 dualsense"},
     {"destroy-virtual",  nullptr},
     {"virtual",          "ds4 dualsense"},

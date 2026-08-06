@@ -31,8 +31,34 @@ namespace fs = std::filesystem;
 enum ControllerType {
     TYPE_DS4,
     TYPE_DUALSENSE,
-    TYPE_NONE
+    TYPE_NONE,
+    TYPE_HIDDEN
 };
+
+// TYPE_DS4/TYPE_DUALSENSE are the only types that actually drive a virtual
+// device; TYPE_NONE (fully hands-off passthrough) and TYPE_HIDDEN (physical
+// hidden from other apps, but no translation) never create one.
+bool controller_type_emulates(ControllerType type) {
+    return type == TYPE_DS4 || type == TYPE_DUALSENSE;
+}
+
+const char* controller_type_name(ControllerType type) {
+    switch (type) {
+        case TYPE_DS4: return "DualShock 4";
+        case TYPE_DUALSENSE: return "DualSense";
+        case TYPE_HIDDEN: return "Hidden";
+        default: return "None";
+    }
+}
+
+const char* controller_type_config_str(ControllerType type) {
+    switch (type) {
+        case TYPE_DS4: return "ds4";
+        case TYPE_DUALSENSE: return "dualsense";
+        case TYPE_HIDDEN: return "hidden";
+        default: return "none";
+    }
+}
 
 struct PhysicalNode {
     std::string path;
@@ -230,6 +256,25 @@ std::vector<std::string> get_event_nodes(const std::string& hidraw_name) {
     return event_nodes;
 }
 
+// Hides the physical controller's own battery/power_supply sysfs entry
+// (e.g. /sys/class/power_supply/ps-controller-battery-<mac>) from
+// unprivileged tools that enumerate /sys/class/power_supply/ directly
+// (MangoHUD, Steam, etc.), the same way its hidraw/event nodes are hidden.
+// Without this, once battery passthrough is active, both the real
+// device's own power_supply entry and the virtual device's (now
+// correctly populated) one are visible, showing duplicate/confusing
+// battery info. Directory-level chmod is enough: sysfs enforces normal
+// directory-traversal permission checks, so removing group/other
+// read+execute blocks readdir()/open() on everything underneath even
+// though the individual attribute files stay world-readable.
+void hide_physical_battery(const std::string& hidraw_name) {
+    std::string ps_dir = "/sys/class/hidraw/" + hidraw_name + "/device/power_supply";
+    if (!fs::exists(ps_dir)) return;
+    for (const auto& entry : fs::directory_iterator(ps_dir)) {
+        chmod(entry.path().c_str(), 0700);
+    }
+}
+
 // Send output report to physical controller
 extern "C" void send_physical_output_report(int fd, bool is_bluetooth, uint8_t motor_left, uint8_t motor_right, uint8_t r, uint8_t g, uint8_t b) {
     if (is_bluetooth) {
@@ -339,6 +384,8 @@ ControllerType read_config(ControllerType default_type) {
                 return TYPE_DS4;
             } else if (val == "none") {
                 return TYPE_NONE;
+            } else if (val == "hidden") {
+                return TYPE_HIDDEN;
             }
         }
     }
@@ -366,7 +413,7 @@ uint8_t sequence_number = 0;
 void write_config(ControllerType type) {
     std::ofstream f("/etc/ds4-translator.conf");
     if (f.is_open()) {
-        f << "type=" << (type == TYPE_DS4 ? "ds4" : (type == TYPE_NONE ? "none" : "dualsense")) << "\n";
+        f << "type=" << controller_type_config_str(type) << "\n";
     } else {
         std::cerr << "Failed to write config file: /etc/ds4-translator.conf: " << strerror(errno) << std::endl;
     }
@@ -686,8 +733,11 @@ int main(int argc, char* argv[]) {
                 } else if (val == "none") {
                     target_type = TYPE_NONE;
                     type_explicitly_set = true;
+                } else if (val == "hidden") {
+                    target_type = TYPE_HIDDEN;
+                    type_explicitly_set = true;
                 } else {
-                    std::cerr << "Unknown type: " << val << ". Supported: ds4, dualsense, none" << std::endl;
+                    std::cerr << "Unknown type: " << val << ". Supported: ds4, dualsense, none, hidden" << std::endl;
                     return 1;
                 }
             } else {
@@ -714,7 +764,7 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--help" || arg == "-h") {
             std::cout << "Usage: ds4-translator [options]" << std::endl;
             std::cout << "Options:" << std::endl;
-            std::cout << "  -t, --type <ds4|dualsense>   Target virtual controller type (default: ds4)" << std::endl;
+            std::cout << "  -t, --type <ds4|dualsense|none|hidden>   Target virtual controller type (default: ds4)" << std::endl;
             std::cout << "  -b, --backend <uhid|gadget>   Target backend type (default: auto-detect)" << std::endl;
             std::cout << "  -h, --help                  Show this help message" << std::endl;
             return 0;
@@ -734,7 +784,7 @@ int main(int argc, char* argv[]) {
     std::signal(SIGTERM, signal_handler);
 
     std::cout << "Starting DS4 Translator daemon..." << std::endl;
-    std::cout << "Initial Target Emulation: " << (target_type == TYPE_DS4 ? "DualShock 4" : (target_type == TYPE_NONE ? "None" : "DualSense")) << std::endl;
+    std::cout << "Initial Target Emulation: " << controller_type_name(target_type) << std::endl;
 
     int server_fd = setup_ipc_socket();
     if (server_fd < 0) {
@@ -814,63 +864,75 @@ int main(int argc, char* argv[]) {
                     phy_fd = -1;
                     phy_name = "";
                 } else {
-                    // Restrict physical hidraw node to 0600 so unprivileged games ignore it
-                    struct stat phy_st;
-                    if (fstat(phy_fd, &phy_st) == 0) {
-                        orig_mode = phy_st.st_mode & 0777;
-                    }
-                    chmod(phy_path.c_str(), 0600);
-                    // A stale ACL from systemd-logind's "uaccess" tag (granted before this
-                    // daemon's udev rule could strip it, e.g. if the controller connected
-                    // before /run/ds4-translator.sock existed) grants the active user rw
-                    // access regardless of the 0600 mode bits above, so it must be cleared
-                    // explicitly or unprivileged games can still open the node directly.
-                    system(("setfacl -b '" + phy_path + "' 2>/dev/null").c_str());
-
-                    // Grab and hide input events (event and js nodes)
-                    std::vector<std::string> event_paths = get_event_nodes(phy_name);
-                    for (const auto& ev_path : event_paths) {
-                        PhysicalNode node;
-                        node.path = ev_path;
-                        node.fd = -1;
-                        node.orig_mode = 0660;
-                        node.is_grabbed = false;
-
-                        struct stat node_st;
-                        if (stat(ev_path.c_str(), &node_st) == 0) {
-                            node.orig_mode = node_st.st_mode & 0777;
+                    // TYPE_NONE is a fully hands-off passthrough mode: the
+                    // physical controller is left completely untouched (no
+                    // hidraw/event hiding, no battery hiding) so other apps
+                    // see the exact same real device they would without this
+                    // daemon running at all. Every other type (TYPE_HIDDEN
+                    // included) hides it, same as before.
+                    if (target_type != TYPE_NONE) {
+                        // Restrict physical hidraw node to 0600 so unprivileged games ignore it
+                        struct stat phy_st;
+                        if (fstat(phy_fd, &phy_st) == 0) {
+                            orig_mode = phy_st.st_mode & 0777;
                         }
+                        chmod(phy_path.c_str(), 0600);
+                        // A stale ACL from systemd-logind's "uaccess" tag (granted before this
+                        // daemon's udev rule could strip it, e.g. if the controller connected
+                        // before /run/ds4-translator.sock existed) grants the active user rw
+                        // access regardless of the 0600 mode bits above, so it must be cleared
+                        // explicitly or unprivileged games can still open the node directly.
+                        system(("setfacl -b '" + phy_path + "' 2>/dev/null").c_str());
 
-                        // EVIOCGRAB only blocks input *delivery* to other readers; it does
-                        // NOT stop them from opening the node and querying its name/caps
-                        // via EVIOCGNAME/EVIOCGBIT. That alone is enough for the browser
-                        // Gamepad API / SDL to list the physical pad as a second, dead
-                        // controller. Root-only 0600 (mirroring the hidraw fix) actually
-                        // keeps other processes from opening it at all.
-                        chmod(ev_path.c_str(), 0600);
+                        // Grab and hide input events (event and js nodes)
+                        std::vector<std::string> event_paths = get_event_nodes(phy_name);
+                        for (const auto& ev_path : event_paths) {
+                            PhysicalNode node;
+                            node.path = ev_path;
+                            node.fd = -1;
+                            node.orig_mode = 0660;
+                            node.is_grabbed = false;
 
-                        // We only grab event nodes, not js nodes (EVIOCGRAB is only for evdev)
-                        if (ev_path.find("event") != std::string::npos) {
-                            int ev_fd = open(ev_path.c_str(), O_RDONLY | O_NONBLOCK);
-                            if (ev_fd >= 0) {
-                                if (ioctl(ev_fd, EVIOCGRAB, 1) >= 0) {
-                                    node.fd = ev_fd;
-                                    node.is_grabbed = true;
-                                    std::cout << "Successfully grabbed and hid event node: " << ev_path << std::endl;
-                                } else {
-                                    std::cerr << "Warning: Failed to grab event node " << ev_path << ": " << strerror(errno) << std::endl;
-                                    close(ev_fd);
-                                }
+                            struct stat node_st;
+                            if (stat(ev_path.c_str(), &node_st) == 0) {
+                                node.orig_mode = node_st.st_mode & 0777;
                             }
-                        } else {
-                            std::cout << "Successfully hid joystick node: " << ev_path << std::endl;
+
+                            // EVIOCGRAB only blocks input *delivery* to other readers; it does
+                            // NOT stop them from opening the node and querying its name/caps
+                            // via EVIOCGNAME/EVIOCGBIT. That alone is enough for the browser
+                            // Gamepad API / SDL to list the physical pad as a second, dead
+                            // controller. Root-only 0600 (mirroring the hidraw fix) actually
+                            // keeps other processes from opening it at all.
+                            chmod(ev_path.c_str(), 0600);
+
+                            // We only grab event nodes, not js nodes (EVIOCGRAB is only for evdev)
+                            if (ev_path.find("event") != std::string::npos) {
+                                int ev_fd = open(ev_path.c_str(), O_RDONLY | O_NONBLOCK);
+                                if (ev_fd >= 0) {
+                                    if (ioctl(ev_fd, EVIOCGRAB, 1) >= 0) {
+                                        node.fd = ev_fd;
+                                        node.is_grabbed = true;
+                                        std::cout << "Successfully grabbed and hid event node: " << ev_path << std::endl;
+                                    } else {
+                                        std::cerr << "Warning: Failed to grab event node " << ev_path << ": " << strerror(errno) << std::endl;
+                                        close(ev_fd);
+                                    }
+                                }
+                            } else {
+                                std::cout << "Successfully hid joystick node: " << ev_path << std::endl;
+                            }
+                            hidden_nodes.push_back(node);
                         }
-                        hidden_nodes.push_back(node);
-                    }
+
+                        hide_physical_battery(phy_name);
+                    } // target_type != TYPE_NONE
 
                     bool created = true;
                     bool reused_existing = false;
                     if (target_type == TYPE_NONE) {
+                        std::cout << "Emulation disabled. Physical controller left untouched (fully visible to other apps)." << std::endl;
+                    } else if (target_type == TYPE_HIDDEN) {
                         std::cout << "Emulation disabled. Hiding physical controller only." << std::endl;
                     } else if (phy_disconnect_pending_destroy) {
                         // Reconnected within the grace window: the virtual
@@ -900,7 +962,7 @@ int main(int argc, char* argv[]) {
                         phy_name = "";
                         usleep(500000); // Sleep 500ms before retrying
                     } else {
-                        if (target_type != TYPE_NONE) {
+                        if (controller_type_emulates(target_type)) {
                             if (!reused_existing) {
                                 usleep(100000); // 100ms settling delay for udev properties
                             }
@@ -998,7 +1060,7 @@ int main(int argc, char* argv[]) {
                     if (cmd == "status") {
                         response = "Physical Controller: " + (phy_name.empty() ? "None" : "/dev/" + phy_name) + "\n";
                         response += "Connection Type: " + std::string(phy_fd >= 0 ? (is_bluetooth ? "Bluetooth" : "USB") : "N/A") + "\n";
-                        response += "Virtual Emulation: " + std::string(target_type == TYPE_DS4 ? "DualShock 4" : (target_type == TYPE_NONE ? "None" : "DualSense")) + "\n";
+                        response += "Virtual Emulation: " + std::string(controller_type_name(target_type)) + "\n";
                         response += "Device Open by Host: " + std::string(((backend_type == BACKEND_GADGET) ? virtual_gadget.configured : device_open) ? "Yes" : "No") + "\n";
                         response += "Standalone Virtual (no hardware): " + std::string(standalone_virtual ? "Yes" : "No") + "\n";
                         response += "Physical Auto-Scan Disabled (release-physical): " + std::string(ignore_physical ? "Yes" : "No") + "\n";
@@ -1118,9 +1180,18 @@ int main(int argc, char* argv[]) {
                             pending_type_change = TYPE_NONE;
                             type_change_requested = true;
                             write_config(TYPE_NONE);
-                            response = "OK: Changing emulation type to None (translation disabled)...";
+                            response = "OK: Changing emulation type to None (translation disabled, physical controller untouched)...";
                         } else {
                             response = "Already set to None";
+                        }
+                    } else if (cmd == "set-type hidden") {
+                        if (target_type != TYPE_HIDDEN) {
+                            pending_type_change = TYPE_HIDDEN;
+                            type_change_requested = true;
+                            write_config(TYPE_HIDDEN);
+                            response = "OK: Changing emulation type to Hidden (translation disabled, physical controller hidden)...";
+                        } else {
+                            response = "Already set to Hidden";
                         }
                     }
                     write(client_fd, response.c_str(), response.size());
@@ -1168,10 +1239,15 @@ int main(int argc, char* argv[]) {
             }
 
             if (target_type == TYPE_NONE) {
-                std::cout << "Emulation type set to None. Disabling translation." << std::endl;
+                std::cout << "Emulation type set to None. Disabling translation and leaving the physical controller untouched." << std::endl;
                 standalone_virtual = false;
                 std::ofstream f("/run/ds4-translator.none");
                 f.close();
+                system("udevadm trigger");
+            } else if (target_type == TYPE_HIDDEN) {
+                std::cout << "Emulation type set to Hidden. Disabling translation but keeping the physical controller hidden." << std::endl;
+                standalone_virtual = false;
+                unlink("/run/ds4-translator.none");
                 system("udevadm trigger");
             } else {
                 unlink("/run/ds4-translator.none");
@@ -1214,7 +1290,7 @@ int main(int argc, char* argv[]) {
             // so nothing looks stuck "held" during the grace window, but
             // leave the device itself (and its LED/rumble state) alive in
             // case the controller comes back. See PHYSICAL_DISCONNECT_GRACE.
-            if (target_type != TYPE_NONE &&
+            if (controller_type_emulates(target_type) &&
                 ((backend_type == BACKEND_GADGET) ? virtual_gadget.configured : device_open)) {
                 emit_neutral_report(target_type);
                 phy_disconnect_pending_destroy = true;
