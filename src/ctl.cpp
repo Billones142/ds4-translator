@@ -1,8 +1,11 @@
 #include <iostream>
 #include <string>
+#include <vector>
+#include <deque>
 #include <cstring>
 #include <cstdio>
 #include <cstdint>
+#include <ctime>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -34,6 +37,11 @@ void print_usage() {
     std::cout << "  tap <button>                     Briefly press+release one button on the active standalone" << std::endl;
     std::cout << "                                   virtual controller. For scripting automated input patterns." << std::endl;
     std::cout << "                                   Buttons: " << button_names_joined() << std::endl;
+    std::cout << "  test                             Live-monitor the active controller: current button/stick" << std::endl;
+    std::cout << "                                   state in real time, plus a scrolling log of LED/rumble" << std::endl;
+    std::cout << "                                   commands sent to it. Shows the virtual device for ds4/" << std::endl;
+    std::cout << "                                   dualsense types, or the raw physical controller for" << std::endl;
+    std::cout << "                                   none/hidden (LED/rumble aren't observable for none)." << std::endl;
 }
 
 // Connect to the daemon's Unix socket, send one command, return its response.
@@ -180,6 +188,7 @@ static const CommandSpec kCommands[] = {
     {"release-physical", nullptr},
     {"resume-physical",  nullptr},
     {"tap",              nullptr},
+    {"test",             nullptr},
 };
 
 static const CommandSpec* find_command(const std::string& name) {
@@ -405,6 +414,224 @@ static int run_virtual_ui(const std::string& type) {
     return 0;
 }
 
+// ---------- Live monitor (`ds4-ctl test`) ----------
+//
+// Read-only counterpart to the button tester above: instead of driving
+// input, it subscribes to the daemon's "test" stream (a persistent
+// connection the daemon keeps open and pushes lines to, rather than the
+// one-shot request/response every other command uses — see the "test"
+// handler in main.cpp) and displays whatever the daemon says the active
+// controller — virtual device, or raw physical passthrough for type=none/
+// hidden — currently looks like, plus a scrolling log of LED/rumble
+// output commands it observed being sent to it.
+
+static UiState decode_raw_state(uint8_t b0, uint8_t b1, uint8_t b2) {
+    UiState s;
+    s.dpad = b0 & 0x0F;
+    if (b0 & 0x10) s.buttons |= SYN_BTN_SQUARE;
+    if (b0 & 0x20) s.buttons |= SYN_BTN_CROSS;
+    if (b0 & 0x40) s.buttons |= SYN_BTN_CIRCLE;
+    if (b0 & 0x80) s.buttons |= SYN_BTN_TRIANGLE;
+    if (b1 & 0x01) s.buttons |= SYN_BTN_L1;
+    if (b1 & 0x02) s.buttons |= SYN_BTN_R1;
+    if (b1 & 0x04) s.buttons |= SYN_BTN_L2;
+    if (b1 & 0x08) s.buttons |= SYN_BTN_R2;
+    if (b1 & 0x10) s.buttons |= SYN_BTN_SHARE;
+    if (b1 & 0x20) s.buttons |= SYN_BTN_OPTIONS;
+    if (b1 & 0x40) s.buttons |= SYN_BTN_L3;
+    if (b1 & 0x80) s.buttons |= SYN_BTN_R3;
+    if (b2 & 0x01) s.buttons |= SYN_BTN_PS;
+    if (b2 & 0x02) s.buttons |= SYN_BTN_TOUCHPAD;
+    return s;
+}
+
+struct TestState {
+    bool have_state = false;
+    std::string source;
+    UiState ui;
+    uint8_t lx = 128, ly = 128, rx = 128, ry = 128, l2 = 0, r2 = 0;
+    std::string note = "Waiting for data from daemon...";
+};
+
+static void redraw_test(const std::string& header, const std::vector<std::string>& caveats,
+                         const TestState& st, const std::deque<std::string>& events) {
+    std::cout << "\x1b[H";
+    std::cout << "\x1b[0KDS4-CTL Live Monitor                     (Esc / q / Ctrl+C to quit)\n";
+    std::cout << "\x1b[0K" << header << "\n";
+    for (const auto& c : caveats) {
+        std::cout << "\x1b[0K  ! " << c << "\n";
+    }
+    std::cout << "\x1b[0K\n";
+    if (!st.have_state) {
+        std::cout << "\x1b[0K" << st.note << "\n";
+    } else {
+        std::cout << "\x1b[0KSource: " << st.source << "\n";
+        std::cout << "\x1b[0K\n";
+        std::cout << "\x1b[0K              " << mark(st.ui.buttons, SYN_BTN_TRIANGLE, "Triangle") << "\n";
+        std::cout << "\x1b[0K   " << mark(st.ui.buttons, SYN_BTN_SQUARE, "Square") << "                " << mark(st.ui.buttons, SYN_BTN_CIRCLE, "Circle") << "\n";
+        std::cout << "\x1b[0K              " << mark(st.ui.buttons, SYN_BTN_CROSS, "Cross") << "\n";
+        std::cout << "\x1b[0K\n";
+        std::cout << "\x1b[0KD-Pad: " << dpad_name(st.ui.dpad) << "\n";
+        std::cout << "\x1b[0K   " << mark(st.ui.buttons, SYN_BTN_L1, "L1") << "  " << mark(st.ui.buttons, SYN_BTN_R1, "R1")
+                  << "      " << mark(st.ui.buttons, SYN_BTN_L2, "L2") << "  " << mark(st.ui.buttons, SYN_BTN_R2, "R2")
+                  << "      " << mark(st.ui.buttons, SYN_BTN_L3, "L3") << "  " << mark(st.ui.buttons, SYN_BTN_R3, "R3") << "\n";
+        std::cout << "\x1b[0K   " << mark(st.ui.buttons, SYN_BTN_SHARE, "Share") << "  " << mark(st.ui.buttons, SYN_BTN_OPTIONS, "Options")
+                  << "      " << mark(st.ui.buttons, SYN_BTN_PS, "PS") << "  " << mark(st.ui.buttons, SYN_BTN_TOUCHPAD, "Touchpad") << "\n";
+        std::cout << "\x1b[0K\n";
+        char buf[128];
+        snprintf(buf, sizeof(buf), "LX=%3u LY=%3u   RX=%3u RY=%3u   L2=%3u R2=%3u",
+                 st.lx, st.ly, st.rx, st.ry, st.l2, st.r2);
+        std::cout << "\x1b[0K" << buf << "\n";
+    }
+    std::cout << "\x1b[0K\n";
+    std::cout << "\x1b[0KLED/rumble commands received, most recent last:\n";
+    if (events.empty()) {
+        std::cout << "\x1b[0K  (none yet)\n";
+    } else {
+        for (const auto& e : events) {
+            std::cout << "\x1b[0K  " << e << "\n";
+        }
+    }
+    std::cout << "\x1b[0J" << std::flush;
+}
+
+static int run_test_ui() {
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        std::cerr << "Failed to create socket: " << strerror(errno) << std::endl;
+        return 1;
+    }
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, "/run/ds4-translator.sock", sizeof(addr.sun_path) - 1);
+
+    if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        std::cerr << "Failed to connect to translation daemon (is the ds4-translator service running?): " << strerror(errno) << std::endl;
+        close(fd);
+        print_daemon_unreachable_help();
+        return 1;
+    }
+
+    std::string req = "test";
+    if (write(fd, req.c_str(), req.size()) < 0) {
+        std::cerr << "Failed to write to daemon: " << strerror(errno) << std::endl;
+        close(fd);
+        return 1;
+    }
+
+    struct termios orig_term, raw_term;
+    if (tcgetattr(STDIN_FILENO, &orig_term) < 0) {
+        std::cerr << "Failed to query terminal settings: " << strerror(errno) << std::endl;
+        close(fd);
+        return 1;
+    }
+    raw_term = orig_term;
+    raw_term.c_lflag &= ~(ICANON | ECHO);
+    raw_term.c_cc[VMIN] = 0;
+    raw_term.c_cc[VTIME] = 0;
+    tcsetattr(STDIN_FILENO, TCSANOW, &raw_term);
+
+    std::cout << "\x1b[2J\x1b[H" << std::flush;
+
+    std::string header = "(connecting...)";
+    std::vector<std::string> caveats;
+    TestState st;
+    std::deque<std::string> events;
+    const size_t MAX_EVENTS = 12;
+
+    std::string rx_accum;
+    bool quit = false;
+    bool need_redraw = true;
+
+    while (!quit) {
+        struct pollfd pfds[2];
+        pfds[0].fd = fd;
+        pfds[0].events = POLLIN;
+        pfds[1].fd = STDIN_FILENO;
+        pfds[1].events = POLLIN;
+        int pr = poll(pfds, 2, 100);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+
+        if (pr > 0 && (pfds[0].revents & (POLLHUP | POLLERR))) {
+            std::cout << "\nDaemon connection closed." << std::endl;
+            break;
+        }
+
+        if (pr > 0 && (pfds[0].revents & POLLIN)) {
+            char buf[1024];
+            ssize_t n = read(fd, buf, sizeof(buf));
+            if (n <= 0) {
+                if (!(n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) {
+                    std::cout << "\nDaemon connection closed." << std::endl;
+                    break;
+                }
+            } else {
+                rx_accum.append(buf, (size_t)n);
+                size_t nl;
+                while ((nl = rx_accum.find('\n')) != std::string::npos) {
+                    std::string line = rx_accum.substr(0, nl);
+                    rx_accum.erase(0, nl + 1);
+                    need_redraw = true;
+
+                    if (line.rfind("OK:", 0) == 0) {
+                        header = line;
+                    } else if (line.rfind("CAVEAT ", 0) == 0) {
+                        caveats.push_back(line.substr(7));
+                    } else if (line.rfind("STATE ", 0) == 0) {
+                        char source[16];
+                        unsigned x, y, rxv, ry, z, rz, b0, b1, b2;
+                        int nf = sscanf(line.c_str(), "STATE %15s %u %u %u %u %u %u %x %x %x",
+                                        source, &x, &y, &rxv, &ry, &z, &rz, &b0, &b1, &b2);
+                        if (nf == 10) {
+                            st.have_state = true;
+                            st.source = source;
+                            st.lx = (uint8_t)x;  st.ly = (uint8_t)y;
+                            st.rx = (uint8_t)rxv; st.ry = (uint8_t)ry;
+                            st.l2 = (uint8_t)z;  st.r2 = (uint8_t)rz;
+                            st.ui = decode_raw_state((uint8_t)b0, (uint8_t)b1, (uint8_t)b2);
+                        }
+                    } else if (line.rfind("NOTE ", 0) == 0) {
+                        st.have_state = false;
+                        st.note = line.substr(5);
+                    } else if (line.rfind("EVENT ", 0) == 0) {
+                        time_t t = time(nullptr);
+                        struct tm tmv;
+                        localtime_r(&t, &tmv);
+                        char ts[16];
+                        strftime(ts, sizeof(ts), "%H:%M:%S", &tmv);
+                        events.push_back(std::string("[") + ts + "] " + line.substr(6));
+                        if (events.size() > MAX_EVENTS) events.pop_front();
+                    }
+                }
+            }
+        }
+
+        if (pr > 0 && (pfds[1].revents & POLLIN)) {
+            unsigned char c;
+            if (read(STDIN_FILENO, &c, 1) == 1) {
+                if (c == 0x1b || c == 3 || c == 'q' || c == 'Q') {
+                    quit = true;
+                }
+            }
+        }
+
+        if (need_redraw) {
+            need_redraw = false;
+            redraw_test(header, caveats, st, events);
+        }
+    }
+
+    tcsetattr(STDIN_FILENO, TCSANOW, &orig_term);
+    close(fd);
+    std::cout << "\nExiting live monitor." << std::endl;
+    return 0;
+}
+
 // One-shot press+release for scripting automated input patterns (e.g. the
 // wine-controller-probe harness driving synthetic button presses while a
 // probe polls the device, with no human at the keyboard). Sends the button
@@ -488,6 +715,10 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         return run_tap(argv[2]);
+    }
+
+    if (cmd == "test") {
+        return run_test_ui();
     }
 
     std::string full_cmd = cmd;

@@ -1,6 +1,7 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <deque>
 #include <thread>
 #include <chrono>
 #include <atomic>
@@ -459,6 +460,13 @@ uint8_t cur_r = 0, cur_g = 0, cur_b = 255;
 }
 uint8_t sequence_number = 0;
 
+// Last input state actually handed to the virtual device (physical
+// passthrough or standalone synthetic), cached purely so `ds4-ctl test`
+// can inspect what a game would currently see without needing its own
+// separate read path into the report-forwarding logic below.
+struct dualshock4_input_report_common last_virtual_common;
+bool last_virtual_valid = false;
+
 void write_config(ControllerType type) {
     std::ofstream f("/etc/ds4-translator.conf");
     if (f.is_open()) {
@@ -613,6 +621,9 @@ uint8_t encode_dualsense_battery(int percent, BatteryState state) {
 void emit_input_report(ControllerType type, const struct dualshock4_input_report_common& common,
                         uint8_t num_touch, const struct dualshock4_touch_report touch_reps[4],
                         bool has_real_battery) {
+    last_virtual_common = common;
+    last_virtual_valid = true;
+
     struct uhid_event out_ev;
     memset(&out_ev, 0, sizeof(out_ev));
     out_ev.type = UHID_INPUT2;
@@ -872,6 +883,9 @@ int main(int argc, char* argv[]) {
     auto last_synth_heartbeat = std::chrono::steady_clock::now();
     constexpr auto SYNTH_HEARTBEAT_INTERVAL = std::chrono::milliseconds(8);
 
+    auto last_test_broadcast = std::chrono::steady_clock::now();
+    constexpr auto TEST_BROADCAST_INTERVAL = std::chrono::milliseconds(33); // ~30Hz, plenty for a human-readable live view
+
     // A dropped physical connection (Bluetooth hiccup, brief unplug) used to
     // tear the virtual device down immediately, which is what actually made
     // "emulation stops" intermittent: any game/Wine process that had the
@@ -890,6 +904,68 @@ int main(int argc, char* argv[]) {
 
     bool type_change_requested = false;
     ControllerType pending_type_change = target_type;
+
+    // `ds4-ctl test` live-monitor state. Subscriber fds get a periodic
+    // STATE line (whatever the active source — virtual device or raw
+    // physical passthrough — currently looks like) plus an EVENT line
+    // whenever an LED/rumble output report actually changes something.
+    // Kept local to main() since nothing outside the poll loop touches it.
+    std::vector<int> test_subscribers;
+    std::deque<std::string> test_event_log; // small ring buffer replayed to new subscribers
+    constexpr size_t TEST_EVENT_LOG_MAX = 20;
+
+    struct dualshock4_input_report_common last_phy_common;
+    memset(&last_phy_common, 0, sizeof(last_phy_common));
+    bool last_phy_valid = false;
+
+    auto test_log_event = [&](const std::string& line) {
+        test_event_log.push_back(line);
+        if (test_event_log.size() > TEST_EVENT_LOG_MAX) test_event_log.pop_front();
+        std::string msg = "EVENT " + line + "\n";
+        for (auto it = test_subscribers.begin(); it != test_subscribers.end(); ) {
+            if (write(*it, msg.c_str(), msg.size()) < 0) {
+                close(*it);
+                it = test_subscribers.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    };
+
+    auto test_broadcast_state = [&]() {
+        if (test_subscribers.empty()) return;
+        std::string line;
+        if (controller_type_emulates(target_type)) {
+            bool vdev_exists = (backend_type == BACKEND_GADGET) ? virtual_gadget.device_open : (uhid_fd >= 0);
+            if (vdev_exists && last_virtual_valid) {
+                char buf[160];
+                snprintf(buf, sizeof(buf), "STATE VIRTUAL %u %u %u %u %u %u %02x %02x %02x\n",
+                         last_virtual_common.x, last_virtual_common.y, last_virtual_common.rx, last_virtual_common.ry,
+                         last_virtual_common.z, last_virtual_common.rz,
+                         last_virtual_common.buttons[0], last_virtual_common.buttons[1], last_virtual_common.buttons[2]);
+                line = buf;
+            } else {
+                line = "NOTE No active virtual controller yet (connect the physical controller, or run 'ds4-ctl create-virtual').\n";
+            }
+        } else if (last_phy_valid) {
+            char buf[160];
+            snprintf(buf, sizeof(buf), "STATE PHYSICAL %u %u %u %u %u %u %02x %02x %02x\n",
+                     last_phy_common.x, last_phy_common.y, last_phy_common.rx, last_phy_common.ry,
+                     last_phy_common.z, last_phy_common.rz,
+                     last_phy_common.buttons[0], last_phy_common.buttons[1], last_phy_common.buttons[2]);
+            line = buf;
+        } else {
+            line = "NOTE No physical controller connected.\n";
+        }
+        for (auto it = test_subscribers.begin(); it != test_subscribers.end(); ) {
+            if (write(*it, line.c_str(), line.size()) < 0) {
+                close(*it);
+                it = test_subscribers.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    };
 
     while (running) {
         // If physical controller disconnected, scan & setup. Skipped while a
@@ -1073,7 +1149,7 @@ int main(int argc, char* argv[]) {
             server_poll_idx = pfds.size() - 1;
         }
 
-        int poll_timeout = standalone_virtual ? 8 : 1000;
+        int poll_timeout = standalone_virtual ? 8 : (test_subscribers.empty() ? 1000 : 33);
         int poll_ret = poll(pfds.data(), pfds.size(), poll_timeout);
         if (poll_ret < 0) {
             if (errno == EINTR) continue;
@@ -1092,6 +1168,14 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        if (!test_subscribers.empty()) {
+            auto now = std::chrono::steady_clock::now();
+            if (now - last_test_broadcast >= TEST_BROADCAST_INTERVAL) {
+                last_test_broadcast = now;
+                test_broadcast_state();
+            }
+        }
+
         // Handle Unix Domain Socket configuration clients
         if (server_poll_idx >= 0 && (pfds[server_poll_idx].revents & POLLIN)) {
             int client_fd = accept(server_fd, nullptr, nullptr);
@@ -1106,6 +1190,7 @@ int main(int argc, char* argv[]) {
                     }
 
                     std::string response = "Unknown command";
+                    bool keep_open = false; // set by "test": ownership of client_fd moves to test_subscribers
                     if (cmd == "status") {
                         response = "Physical Controller: " + (phy_name.empty() ? "None" : "/dev/" + phy_name) + "\n";
                         response += "Connection Type: " + std::string(phy_fd >= 0 ? (is_bluetooth ? "Bluetooth" : "USB") : "N/A") + "\n";
@@ -1242,10 +1327,44 @@ int main(int argc, char* argv[]) {
                         } else {
                             response = "Already set to Hidden";
                         }
+                    } else if (cmd == "test") {
+                        // Turns this connection into a live push stream instead of a
+                        // one-shot request/response: client_fd is handed off to
+                        // test_subscribers (see the lambdas declared near the top of
+                        // main()) rather than closed below, and gets a periodic STATE
+                        // line plus an EVENT line on every LED/rumble change until it
+                        // disconnects (ds4-ctl's `test` command runs until Ctrl+C).
+                        fcntl(client_fd, F_SETFL, O_NONBLOCK);
+                        std::string header = "OK: Test monitor active. Type=" + std::string(controller_type_name(target_type));
+                        if (controller_type_emulates(target_type)) {
+                            header += " Source=Virtual controller\n";
+                        } else if (target_type == TYPE_HIDDEN) {
+                            header += " Source=Physical controller (hidden)\n"
+                                      "CAVEAT Physical controller is hidden -- no other app can reach it to send LED/rumble commands.\n";
+                        } else {
+                            header += " Source=Physical controller (full passthrough)\n"
+                                      "CAVEAT type=none is full passthrough -- LED/rumble commands other apps send directly\n"
+                                      "CAVEAT to the physical controller can't be observed here.\n";
+                        }
+                        keep_open = true;
+                        if (write(client_fd, header.c_str(), header.size()) >= 0) {
+                            for (const auto& ev : test_event_log) {
+                                std::string msg = "EVENT " + ev + "\n";
+                                write(client_fd, msg.c_str(), msg.size());
+                            }
+                            test_subscribers.push_back(client_fd);
+                        } else {
+                            close(client_fd);
+                        }
                     }
-                    write(client_fd, response.c_str(), response.size());
+                    if (!keep_open) {
+                        write(client_fd, response.c_str(), response.size());
+                        close(client_fd);
+                    }
                 }
-                close(client_fd);
+                else {
+                    close(client_fd);
+                }
             }
         }
 
@@ -1387,8 +1506,11 @@ int main(int argc, char* argv[]) {
                     // Trigger disconnect manually
                     pfds[phy_poll_idx].revents |= POLLHUP;
                 }
-            } else if (((backend_type == BACKEND_GADGET) ? virtual_gadget.configured : device_open) && 
-                       ((backend_type == BACKEND_GADGET) || uhid_fd >= 0)) {
+            } else {
+                // Parsed unconditionally (not just when a virtual device is
+                // open) so last_phy_common stays current for `ds4-ctl test`
+                // even in "none"/"hidden" mode, where nothing else reads
+                // physical reports at all.
                 struct dualshock4_input_report_common common;
                 bool got_report = false;
                 uint8_t num_touch = 0;
@@ -1426,7 +1548,12 @@ int main(int argc, char* argv[]) {
                 }
 
                 if (got_report) {
-                    emit_input_report(target_type, common, num_touch, touch_reps, true);
+                    last_phy_common = common;
+                    last_phy_valid = true;
+                    if (((backend_type == BACKEND_GADGET) ? virtual_gadget.configured : device_open) &&
+                        ((backend_type == BACKEND_GADGET) || uhid_fd >= 0)) {
+                        emit_input_report(target_type, common, num_touch, touch_reps, true);
+                    }
                 }
             }
         }
@@ -1629,6 +1756,16 @@ int main(int argc, char* argv[]) {
 
                         if (update) {
                             if (motor_left != cur_motor_left || motor_right != cur_motor_right || r != cur_r || g != cur_g || b != cur_b) {
+                                if (r != cur_r || g != cur_g || b != cur_b) {
+                                    char buf[64];
+                                    snprintf(buf, sizeof(buf), "LED r=%u g=%u b=%u", r, g, b);
+                                    test_log_event(buf);
+                                }
+                                if (motor_left != cur_motor_left || motor_right != cur_motor_right) {
+                                    char buf[64];
+                                    snprintf(buf, sizeof(buf), "RUMBLE left=%u right=%u", motor_left, motor_right);
+                                    test_log_event(buf);
+                                }
                                 cur_motor_left = motor_left;
                                 cur_motor_right = motor_right;
                                 cur_r = r;
@@ -1648,6 +1785,9 @@ int main(int argc, char* argv[]) {
     }
 
     // Clean up Unix socket
+    for (int fd : test_subscribers) {
+        close(fd);
+    }
     if (server_fd >= 0) {
         close(server_fd);
         unlink("/run/ds4-translator.sock");
