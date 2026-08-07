@@ -10,10 +10,10 @@ TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="
   ENV{ID_BUS}="", ENV{ID_VENDOR_ID}="", ENV{ID_MODEL_ID}="", ENV{ID_MODEL}="", ENV{ID_VENDOR}=""
 
 TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="input", KERNELS=="0005:054C:05C4.*", \
-  MODE="0660", TAG-="uaccess", TAG-="seat", ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_INPUT}=""
+  MODE="0600", OWNER="root", GROUP="root", TAG-="uaccess", TAG-="seat", ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_INPUT}=""
 
 TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="input", KERNELS=="0005:054C:09CC.*", \
-  MODE="0660", TAG-="uaccess", TAG-="seat", ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_INPUT}=""
+  MODE="0600", OWNER="root", GROUP="root", TAG-="uaccess", TAG-="seat", ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_INPUT}=""
 
 # USB physical controllers (bus 0003). Matched via the USB device's own
 # ATTRS{idVendor}/ATTRS{idProduct} instead of DRIVERS=="usb", because combined
@@ -40,10 +40,10 @@ TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="
   ENV{ID_BUS}="", ENV{ID_VENDOR_ID}="", ENV{ID_MODEL_ID}="", ENV{ID_MODEL}="", ENV{ID_VENDOR}=""
 
 TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="input", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="05c4", \
-  MODE="0660", TAG-="uaccess", TAG-="seat", ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_INPUT}=""
+  MODE="0600", OWNER="root", GROUP="root", TAG-="uaccess", TAG-="seat", ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_INPUT}=""
 
 TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="input", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="09cc", \
-  MODE="0660", TAG-="uaccess", TAG-="seat", ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_INPUT}=""
+  MODE="0600", OWNER="root", GROUP="root", TAG-="uaccess", TAG-="seat", ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_INPUT}=""
 
 # -----------------------------------------------------------------------------
 # Virtual controller USB emulation properties injection (so Steam/Proton/Wine recognize it as a real USB gamepad)

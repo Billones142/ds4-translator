@@ -9,6 +9,7 @@ StartLimitBurst=3
 Type=simple
 ExecStartPre=-/usr/bin/modprobe raw_gadget
 ExecStartPre=-/usr/bin/modprobe dummy_hcd
+ExecStartPre=-/usr/bin/modprobe libcomposite
 ExecStart=/usr/local/bin/ds4-translator
 Restart=on-failure
 RestartSec=10

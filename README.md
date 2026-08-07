@@ -26,6 +26,13 @@ Ensure that the User-space HID (`uhid`) kernel module is loaded:
 sudo modprobe uhid
 ```
 
+The default `uhid` backend needs nothing else. The experimental `gadget` and
+`hidg` backends (see [Backend Selection](#backend-selection-experimental)
+below) additionally need `raw_gadget`/`dummy_hcd` (gadget) or `libcomposite`
+plus a mounted `configfs` (hidg, `/sys/kernel/config`, mounted by default on
+most distros) — `ds4-translator.service` already loads all of these at
+startup regardless of which backend ends up active.
+
 ## Installation
 
 ### Option 1: Download a release
@@ -75,6 +82,25 @@ Device Open by Host: Yes
   ds4-ctl set-type ds4
   ```
 
+### Backend Selection (experimental)
+
+By default the virtual controller is created via `/dev/uhid`, which injects
+directly into the kernel's HID subsystem without a real USB enumeration
+handshake. Two alternative backends are available that instead create a
+genuinely enumerated USB device (via `dummy_hcd`), for testing whether that
+distinction matters to any particular game's controller detection:
+
+```bash
+ds4-ctl set-backend uhid     # default, stable
+ds4-ctl set-backend gadget   # raw_gadget + dummy_hcd, hand-rolled USB enumeration
+ds4-ctl set-backend hidg     # configfs + kernel's f_hid gadget function
+```
+
+Like `set-type`, this takes effect immediately (recreating the virtual
+device) and persists across restarts. Both `gadget` and `hidg` are
+experimental and have not been verified end-to-end against real hardware —
+see Known Issues below.
+
 ## Uninstalling
 
 To disable the service and remove all installed files:
@@ -84,6 +110,14 @@ sudo make uninstall
 
 ## Known Issues
 
+- **`gadget`/`hidg` backends are experimental and unverified**: Both create a
+  real enumerated USB device instead of a UHID virtual device, but neither
+  has been confirmed working end-to-end (Steam/browser detection, in-game
+  input) against real hardware. `hidg` in particular does not answer
+  GET_REPORT feature-report requests (calibration/pairing info) on kernels
+  without newer `f_hid` support — see `docs/how-it-works.md`. If either
+  backend fails to create a device at all, `ds4-ctl set-backend uhid` reverts
+  to the known-working default.
 - **Emulated DS4 not detected in some Wine/Proton games (confirmed: Satisfactory)**: Not limited to the standalone/no-hardware virtual controller — even physical-passthrough DS4 emulation fails to be detected at all in affected titles, no matter the configuration. The same physical hardware emulated as a **DualSense** (`ds4-ctl set-type dualsense`) works correctly in the same game, so if the emulated DS4 isn't detected, try switching type as a workaround. The root cause hasn't been identified — the HID report descriptor is byte-for-byte identical to real hardware, raw button/axis state reaches Wine's DirectInput layer correctly (confirmed via `WINEDEBUG=+dinput` traces), and the virtual device streams a continuous report heartbeat matching real hardware's idle behavior, so it likely sits in the game/engine's own controller-recognition logic rather than this daemon — but the DS4-vs-DualSense split on identical input is itself unexplained. Treat DS4 emulation as best-effort per-game rather than guaranteed-working; DualSense emulation has not shown this issue in any title tested so far.
 - **Steam identifies the emulated controller as a different controller than the physical one**: Steam identifies a controller via a MAC/pairing-info HID feature report it reads directly from the device, not from udev properties, and the virtual device reports a fixed placeholder MAC rather than the physical controller's real one, so Steam treats it as a distinct device from the physical controller's own saved profile until Steam is restarted or the physical controller is disconnected and reconnected. Relaying the real MAC through was attempted twice and both times broke DS4 detection outright (see git history), so this is not being pursued further without a way to test against real hardware beyond what's available here — it's cosmetic (the controller still works, just isn't recognized as "the same" one) and considered lower priority than DS4 actually being detected at all.
 - **"Bluetooth Authentication" popup when connecting via Bluetooth**: Only affects controllers paired over Bluetooth (not USB). Changing the emulation type (`ds4-ctl set-type ...`) releases and re-scans the physical controller, which briefly drops and re-establishes its Bluetooth HID connection — BlueZ can prompt for service authorization on that reconnect even for an already-paired, already-trusted device.

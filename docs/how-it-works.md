@@ -47,6 +47,38 @@ The daemon uses the kernel's User-space HID (`/dev/uhid`) driver to create a vir
   - It exposes a virtual MAC address (`74:e7:d6:3a:47:e8`) that matches the `uniq` field in UHID registration and the responses to Feature Reports `0x09` (DualSense pairing) and `0x12` (DS4 pairing).
   - It handles `UHID_GET_REPORT` and responds to Feature Reports `0x05` (calibration data) and `0x20` (firmware info) with authentic byte payloads from real controllers. This satisfies game security checks (like those in native PlayStation PC ports like *Jedi: Survivor*) which would otherwise reject mock devices.
 
+### 3a. Alternative Backends (experimental)
+
+UHID skips real USB enumeration entirely — the kernel's HID subsystem
+receives a fully-formed device with no `GET_DESCRIPTOR`/`SET_CONFIGURATION`
+handshake. Two alternative backends instead present a genuinely enumerated
+USB device, selectable at runtime via `ds4-ctl set-backend <uhid|gadget|hidg>`
+(persisted to `/etc/ds4-translator.conf` as `backend=...`, alongside `type=`):
+
+* **`gadget`** (`src/raw-gadget-backend.c`): uses `/dev/raw-gadget` bound to
+  the `dummy_hcd` kernel module's `dummy_udc.0`, hand-rolling every USB
+  control-transfer response (device/config/string/HID/report descriptors,
+  `SET_CONFIGURATION`, `SET_REPORT`, `SET_IDLE`) itself.
+* **`hidg`** (`src/hidg-backend.c`): builds the same USB gadget via configfs
+  (`/sys/kernel/config/usb_gadget/`) using the kernel's built-in `f_hid`
+  function, bound to the same `dummy_udc.0`. The kernel handles the USB
+  control-transfer handshake itself; userspace only reads/writes HID reports
+  on the resulting `/dev/hidgN` node.
+
+  It answers control-transfer GET_REPORT requests (calibration data, pairing
+  info — see section 3 above) via the `GADGET_HID_READ_GET_REPORT_ID`/
+  `GADGET_HID_WRITE_GET_REPORT` ioctls (`linux/usb/g_hid.h`) with the same
+  authentic payloads UHID and `gadget` serve.
+
+  **Known limitation**: those ioctls were added to `f_hid` around 2022; on
+  older kernels without them, `hidg-backend.c` detects the unsupported ioctl
+  at startup and falls back to the kernel's built-in zero-filled/stall
+  response for feature reports instead.
+
+Both are opt-in and fall back to `uhid` automatically if device creation
+fails (`create_virtual_device()` in `main.cpp`). Neither has been verified
+end-to-end against real hardware — see README Known Issues.
+
 ---
 
 ## 4. Input & Output Translation
