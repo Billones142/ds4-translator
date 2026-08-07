@@ -29,8 +29,10 @@ void print_usage() {
     std::cout << "                                   hidden from other apps but not translated)" << std::endl;
     std::cout << "  create-virtual <ds4|dualsense>   Create a standalone virtual controller, no physical pad needed" << std::endl;
     std::cout << "  destroy-virtual                  Destroy the standalone virtual controller" << std::endl;
-    std::cout << "  virtual [ds4|dualsense]          Create (if needed) a standalone virtual controller and open" << std::endl;
+    std::cout << "  virtual [ds4|dualsense] [--auto] Create (if needed) a standalone virtual controller and open" << std::endl;
     std::cout << "                                   an interactive keyboard button-tester UI to drive it" << std::endl;
+    std::cout << "                                   (--auto: destroy it on exit, but only if this run is the" << std::endl;
+    std::cout << "                                   one that created it)" << std::endl;
     std::cout << "  release-physical                 Stop using/re-scanning the physical controller (leaves it" << std::endl;
     std::cout << "                                   plugged in but untouched) so create-virtual can run instead" << std::endl;
     std::cout << "  resume-physical                  Re-enable physical controller auto-scan after release-physical" << std::endl;
@@ -184,7 +186,7 @@ static const CommandSpec kCommands[] = {
     {"set-type",         "ds4 dualsense none hidden"},
     {"create-virtual",   "ds4 dualsense"},
     {"destroy-virtual",  nullptr},
-    {"virtual",          "ds4 dualsense"},
+    {"virtual",          "ds4 dualsense --auto"},
     {"release-physical", nullptr},
     {"resume-physical",  nullptr},
     {"tap",              nullptr},
@@ -287,7 +289,7 @@ static void redraw(const UiState& s, const std::string& daemon_status, bool stat
     std::cout << "\x1b[0J" << std::flush;
 }
 
-static int run_virtual_ui(const std::string& type) {
+static int run_virtual_ui(const std::string& type, bool auto_destroy) {
     std::string resp;
     if (!send_command("create-virtual " + type, resp)) {
         std::cerr << resp << std::endl;
@@ -298,9 +300,19 @@ static int run_virtual_ui(const std::string& type) {
         std::cerr << resp << std::endl;
         return 1;
     }
+    // Only auto-destroy on exit if this invocation is the one that actually
+    // created the device (response starts "OK:") -- if one was already
+    // active ("Virtual controller already active."), it likely belongs to
+    // some other session/purpose, and --auto shouldn't silently rip that
+    // away just because this run also happened to want one.
+    bool created_by_us = resp.rfind("OK:", 0) == 0;
     std::cout << resp << std::endl;
-    std::cout << "Starting interactive tester... (leaves the virtual controller running on exit;\n"
-                 "use 'ds4-ctl destroy-virtual' to remove it)" << std::endl;
+    if (auto_destroy) {
+        std::cout << "Starting interactive tester... (--auto: virtual controller will be destroyed on exit)" << std::endl;
+    } else {
+        std::cout << "Starting interactive tester... (leaves the virtual controller running on exit;\n"
+                     "use 'ds4-ctl destroy-virtual' to remove it)" << std::endl;
+    }
     sleep(1);
 
     struct termios orig_term, raw_term;
@@ -309,7 +321,14 @@ static int run_virtual_ui(const std::string& type) {
         return 1;
     }
     raw_term = orig_term;
-    raw_term.c_lflag &= ~(ICANON | ECHO);
+    // ISIG is cleared too (not just ICANON/ECHO): otherwise a real Ctrl+C
+    // raises SIGINT and the terminal driver never delivers byte 0x03 to
+    // read() at all, so the loop's own "c == 3" Ctrl+C handling below never
+    // runs and the process dies via the default SIGINT disposition instead
+    // -- skipping tcsetattr restoration and, now, the --auto destroy-on-exit
+    // below. Clearing ISIG makes Ctrl+C arrive as plain data like every
+    // other key here, so it always goes through the normal exit path.
+    raw_term.c_lflag &= ~(ICANON | ECHO | ISIG);
     raw_term.c_cc[VMIN] = 0;
     raw_term.c_cc[VTIME] = 0;
     tcsetattr(STDIN_FILENO, TCSANOW, &raw_term);
@@ -410,7 +429,16 @@ static int run_virtual_ui(const std::string& type) {
     }
 
     tcsetattr(STDIN_FILENO, TCSANOW, &orig_term);
-    std::cout << "\nExiting tester. Virtual controller left running; use 'ds4-ctl destroy-virtual' to remove it." << std::endl;
+    if (auto_destroy && created_by_us) {
+        std::string destroy_resp;
+        send_command("destroy-virtual", destroy_resp);
+        std::cout << "\nExiting tester. " << destroy_resp << std::endl;
+    } else if (auto_destroy) {
+        std::cout << "\nExiting tester. --auto was set, but this session didn't create the virtual controller "
+                     "(one was already active); leaving it running. Use 'ds4-ctl destroy-virtual' to remove it." << std::endl;
+    } else {
+        std::cout << "\nExiting tester. Virtual controller left running; use 'ds4-ctl destroy-virtual' to remove it." << std::endl;
+    }
     return 0;
 }
 
@@ -699,14 +727,19 @@ int main(int argc, char* argv[]) {
 
     if (cmd == "virtual") {
         std::string type = "ds4";
-        if (argc >= 3) {
-            type = argv[2];
-            if (!is_in_list(type, spec->arg_completions)) {
-                std::cerr << "Error: Invalid type. Supported: " << spec->arg_completions << std::endl;
+        bool auto_destroy = false;
+        for (int i = 2; i < argc; ++i) {
+            std::string arg = argv[i];
+            if (arg == "--auto") {
+                auto_destroy = true;
+            } else if (is_in_list(arg, spec->arg_completions)) {
+                type = arg;
+            } else {
+                std::cerr << "Error: Invalid argument '" << arg << "'. Supported: " << spec->arg_completions << " --auto" << std::endl;
                 return 1;
             }
         }
-        return run_virtual_ui(type);
+        return run_virtual_ui(type, auto_destroy);
     }
 
     if (cmd == "tap") {
