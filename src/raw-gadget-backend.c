@@ -285,10 +285,21 @@ static void* ep_out_loop(void *arg) {
 // (correct only for requests that themselves carry an IN/OUT data stage).
 // So the correct ack for e.g. SET_CONFIGURATION/SET_INTERFACE/SET_IDLE
 // (no data stage) and SET_REPORT (data-OUT stage, already read) is always
-// a zero-length EP0_WRITE, confirmed against live sysfs state: without
-// this, USB_RAW_IOCTL_CONFIGURE alone left the gadget stuck unconfigured
-// from the host's perspective (bConfigurationValue/interface sysfs
-// entries never appeared) even though it returned success.
+// a zero-length EP0_WRITE.
+//
+// Call this as early as possible after receiving the event -- confirmed
+// by disassembling this system's actual raw_gadget.ko (no kernel source
+// package available, so this is ground truth rather than a guess):
+// raw_process_ep0_io() requires the driver's own internal
+// ep0_in_pending/ep0_out_pending flags (and a dev->state precondition) to
+// still be valid when this is called, and delaying it behind slower
+// side-effect ioctls (EP_ENABLE, CONFIGURE) was observed to invalidate
+// that pending state before the ack got a chance to run -- manifesting
+// as EBUSY (wrong/stale pending-direction flag) or EINVAL (dev->state
+// moved on) depending on timing, and, before this function existed at
+// all, as the gadget staying stuck unconfigured from the host's
+// perspective (bConfigurationValue/interface sysfs entries never
+// appearing) even though USB_RAW_IOCTL_CONFIGURE itself returned success.
 static void ack_zero_length_status(struct RawGadgetDevice *dev, const char *what) {
     struct usb_raw_control_io status_io;
     memset(&status_io, 0, sizeof(status_io));
@@ -422,6 +433,23 @@ static bool handle_control_request(struct RawGadgetDevice *dev, void *event_ptr)
                 break;
             }
             case USB_REQ_SET_CONFIGURATION: {
+                // Acked FIRST, before any of the slower EP_ENABLE/CONFIGURE
+                // side-effect calls below -- confirmed by disassembling the
+                // actual raw_gadget.ko on this system (no kernel source
+                // package available, so this is from ground truth rather
+                // than guessing): raw_process_ep0_io() requires the
+                // driver's own dev->ep0_in_pending/ep0_out_pending flags
+                // (and a dev->state precondition) to still be valid at ack
+                // time, or it fails outright -- EBUSY for a stale/wrong
+                // pending-direction flag, EINVAL if dev->state moved on.
+                // Both were observed live across earlier attempts at this
+                // fix, with the common thread being that EP_ENABLE/
+                // CONFIGURE ran *before* the ack and evidently gave the
+                // driver enough time/opportunity to invalidate that pending
+                // state before we got to it. Acking immediately avoids the
+                // race entirely.
+                ack_zero_length_status(dev, "SET_CONFIGURATION");
+
                 struct usb_endpoint_descriptor ep_in_desc = {
                     .bLength = 7,
                     .bDescriptorType = 5,
@@ -436,7 +464,7 @@ static bool handle_control_request(struct RawGadgetDevice *dev, void *event_ptr)
                 } else {
                     dev->ep_in = ep_in_id;
                 }
-                
+
                 struct usb_endpoint_descriptor ep_out_desc = {
                     .bLength = 7,
                     .bDescriptorType = 5,
@@ -451,28 +479,11 @@ static bool handle_control_request(struct RawGadgetDevice *dev, void *event_ptr)
                 } else {
                     dev->ep_out = ep_out_id;
                 }
-                
+
                 ioctl(dev->fd, USB_RAW_IOCTL_CONFIGURE, 0);
 
                 dev->device_open = true;
                 dev->eps_enabled = true;
-
-                // Not routed through the generic reply dispatch below --
-                // see ack_zero_length_status()'s doc comment. Briefly: two
-                // things were wrong here before, found in order. First, the
-                // generic dispatch's EP0_READ(length=0) failed outright
-                // with EINVAL (SET_CONFIGURATION's bmRequestType has the
-                // OUT direction bit, which the dispatch reads literally).
-                // After skipping that call (on the assumption
-                // USB_RAW_IOCTL_CONFIGURE alone completed the pending
-                // request), the daemon stopped erroring, but the host still
-                // never saw the transaction finish -- confirmed live via
-                // sysfs (bConfigurationValue/the interface's own sysfs
-                // directory never appeared, meaning usbcore stayed stuck in
-                // the "addressed" state). CONFIGURE only flips gadget-side
-                // descriptor/endpoint state; it doesn't itself complete the
-                // pending control transfer.
-                ack_zero_length_status(dev, "SET_CONFIGURATION");
                 return true;
             }
             case USB_REQ_GET_INTERFACE: {
