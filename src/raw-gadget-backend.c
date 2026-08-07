@@ -302,12 +302,29 @@ static void* ep_out_loop(void *arg) {
 // appearing) even though USB_RAW_IOCTL_CONFIGURE itself returned success.
 static void ack_zero_length_status(struct RawGadgetDevice *dev, const char *what) {
     struct usb_raw_control_io status_io;
-    memset(&status_io, 0, sizeof(status_io));
-    status_io.inner.ep = 0;
-    status_io.inner.length = 0;
-    if (ioctl(dev->fd, USB_RAW_IOCTL_EP0_WRITE, &status_io) < 0) {
-        fprintf(stderr, "ioctl(USB_RAW_IOCTL_EP0_WRITE) [%s status ack]: %s\n", what, strerror(errno));
+    // EBUSY here means raw_gadget's own ep0_in_pending flag wasn't set yet
+    // when we called this -- observed even when this is the very first
+    // ioctl issued after EVENT_FETCH returned the control event, i.e. a
+    // narrow kernel-side race between the event becoming visible to
+    // userspace and the driver internally marking the pending-ack state,
+    // not a stale/wrong flag from something we did. Retrying a few times
+    // with a short sleep gives that window a chance to close instead of
+    // abandoning the status stage outright (which the host reads as -110
+    // ETIMEDOUT ~5s later, since nothing ever completes it).
+    for (int attempt = 0; attempt < 20; attempt++) {
+        memset(&status_io, 0, sizeof(status_io));
+        status_io.inner.ep = 0;
+        status_io.inner.length = 0;
+        if (ioctl(dev->fd, USB_RAW_IOCTL_EP0_WRITE, &status_io) == 0) {
+            return;
+        }
+        if (errno != EBUSY) {
+            fprintf(stderr, "ioctl(USB_RAW_IOCTL_EP0_WRITE) [%s status ack]: %s\n", what, strerror(errno));
+            return;
+        }
+        usleep(500); // 0.5ms
     }
+    fprintf(stderr, "ioctl(USB_RAW_IOCTL_EP0_WRITE) [%s status ack]: gave up after retries (EBUSY)\n", what);
 }
 
 static bool handle_control_request(struct RawGadgetDevice *dev, void *event_ptr) {

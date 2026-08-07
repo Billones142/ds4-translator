@@ -27,6 +27,9 @@ void print_usage() {
     std::cout << "  set-type <ds4|dualsense|none|hidden>   Change the virtual controller emulation type at runtime" << std::endl;
     std::cout << "                                   (none = fully untouched physical passthrough, hidden = physical" << std::endl;
     std::cout << "                                   hidden from other apps but not translated)" << std::endl;
+    std::cout << "  set-backend <uhid|gadget|hidg>   Change the virtual controller backend at runtime (recreates the" << std::endl;
+    std::cout << "                                   device). uhid is the default/stable path; gadget and hidg both" << std::endl;
+    std::cout << "                                   emulate a real enumerated USB device instead and are experimental." << std::endl;
     std::cout << "  create-virtual <ds4|dualsense>   Create a standalone virtual controller, no physical pad needed" << std::endl;
     std::cout << "  destroy-virtual                  Destroy the standalone virtual controller" << std::endl;
     std::cout << "  virtual [ds4|dualsense] [--auto] Create (if needed) a standalone virtual controller and open" << std::endl;
@@ -184,6 +187,7 @@ static const CommandSpec kCommands[] = {
     {"version",          nullptr},
     {"status",           nullptr},
     {"set-type",         "ds4 dualsense none hidden"},
+    {"set-backend",      "uhid gadget hidg"},
     {"create-virtual",   "ds4 dualsense"},
     {"destroy-virtual",  nullptr},
     {"virtual",          "ds4 dualsense --auto"},
@@ -755,7 +759,7 @@ int main(int argc, char* argv[]) {
     }
 
     std::string full_cmd = cmd;
-    if (cmd == "set-type" || cmd == "create-virtual") {
+    if (cmd == "set-type" || cmd == "create-virtual" || cmd == "set-backend") {
         if (argc < 3) {
             std::cerr << "Error: " << cmd << " requires a target type (" << spec->arg_completions << ")" << std::endl;
             return 1;

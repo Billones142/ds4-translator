@@ -22,6 +22,7 @@
 
 #include "descriptors.h"
 #include "raw-gadget-backend.h"
+#include "hidg-backend.h"
 
 #ifndef DS4_VERSION
 #define DS4_VERSION "unknown"
@@ -440,12 +441,54 @@ ControllerType read_config(ControllerType default_type) {
 
 enum BackendType {
     BACKEND_UHID,
-    BACKEND_GADGET
+    BACKEND_GADGET,
+    BACKEND_HIDG
 };
+
+const char* backend_type_name(BackendType backend) {
+    switch (backend) {
+        case BACKEND_GADGET: return "raw-gadget";
+        case BACKEND_HIDG: return "hidg";
+        default: return "uhid";
+    }
+}
+
+const char* backend_type_config_str(BackendType backend) {
+    switch (backend) {
+        case BACKEND_GADGET: return "gadget";
+        case BACKEND_HIDG: return "hidg";
+        default: return "uhid";
+    }
+}
+
+BackendType read_backend_config(BackendType default_backend) {
+    std::ifstream f("/etc/ds4-translator.conf");
+    if (!f.is_open()) {
+        return default_backend;
+    }
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.rfind("backend=", 0) == 0) {
+            std::string val = line.substr(8);
+            while (!val.empty() && (val.back() == '\n' || val.back() == '\r' || val.back() == ' ')) {
+                val.pop_back();
+            }
+            if (val == "gadget") {
+                return BACKEND_GADGET;
+            } else if (val == "hidg") {
+                return BACKEND_HIDG;
+            } else if (val == "uhid") {
+                return BACKEND_UHID;
+            }
+        }
+    }
+    return default_backend;
+}
 
 BackendType backend_type = BACKEND_UHID;
 bool backend_explicitly_set = false;
 RawGadgetDevice virtual_gadget = { .fd = -1, .ep_in = -1, .ep_out = -1, .device_open = false, .target_type = 0, .eps_enabled = false, .ep_out_thread_spawned = false, .configured = false };
+HidgDevice virtual_hidg = { .fd = -1, .device_open = false, .configured = false, .target_type = 0, .out_thread_spawned = false, .in_thread_spawned = false, .pending_report_len = 0, .report_pending = false };
 
 extern "C" {
 int phy_fd = -1;
@@ -463,26 +506,31 @@ uint8_t sequence_number = 0;
 struct dualshock4_input_report_common last_virtual_common;
 bool last_virtual_valid = false;
 
-void write_config(ControllerType type) {
+void write_config(ControllerType type, BackendType backend) {
     std::ofstream f("/etc/ds4-translator.conf");
     if (f.is_open()) {
         f << "type=" << controller_type_config_str(type) << "\n";
+        f << "backend=" << backend_type_config_str(backend) << "\n";
     } else {
         std::cerr << "Failed to write config file: /etc/ds4-translator.conf: " << strerror(errno) << std::endl;
     }
 }
 
 bool create_virtual_device(ControllerType type) {
-    if (!backend_explicitly_set) {
-        backend_type = BACKEND_UHID;
-    }
-
     if (backend_type == BACKEND_GADGET) {
         if (raw_gadget_init(&virtual_gadget, type == TYPE_DS4 ? 1 : 2)) {
             std::cout << "Virtual USB Controller created via Gadget." << std::endl;
             return true;
         } else {
             std::cerr << "Failed to initialize Gadget backend. Falling back to UHID backend..." << std::endl;
+            backend_type = BACKEND_UHID;
+        }
+    } else if (backend_type == BACKEND_HIDG) {
+        if (hidg_init(&virtual_hidg, type == TYPE_DS4 ? 1 : 2)) {
+            std::cout << "Virtual USB Controller created via HIDG." << std::endl;
+            return true;
+        } else {
+            std::cerr << "Failed to initialize HIDG backend. Falling back to UHID backend..." << std::endl;
             backend_type = BACKEND_UHID;
         }
     }
@@ -543,6 +591,9 @@ void destroy_virtual_device() {
     if (backend_type == BACKEND_GADGET) {
         raw_gadget_close(&virtual_gadget);
         usleep(200000); // Give kernel time to unbind dummy_udc.0
+    } else if (backend_type == BACKEND_HIDG) {
+        hidg_close(&virtual_hidg);
+        usleep(200000); // Give kernel time to unbind the gadget UDC
     } else {
         if (uhid_fd >= 0) {
             struct uhid_event destroy_ev;
@@ -710,6 +761,8 @@ void emit_input_report(ControllerType type, const struct dualshock4_input_report
 
     if (backend_type == BACKEND_GADGET) {
         raw_gadget_send_input_report(&virtual_gadget, out_ev.u.input2.data, out_ev.u.input2.size);
+    } else if (backend_type == BACKEND_HIDG) {
+        hidg_send_input_report(&virtual_hidg, out_ev.u.input2.data, out_ev.u.input2.size);
     } else {
         uhid_write(uhid_fd, out_ev);
     }
@@ -806,11 +859,14 @@ int main(int argc, char* argv[]) {
                 if (val == "gadget") {
                     backend_type = BACKEND_GADGET;
                     backend_explicitly_set = true;
+                } else if (val == "hidg") {
+                    backend_type = BACKEND_HIDG;
+                    backend_explicitly_set = true;
                 } else if (val == "uhid") {
                     backend_type = BACKEND_UHID;
                     backend_explicitly_set = true;
                 } else {
-                    std::cerr << "Unknown backend: " << val << ". Supported: uhid, gadget" << std::endl;
+                    std::cerr << "Unknown backend: " << val << ". Supported: uhid, gadget, hidg" << std::endl;
                     return 1;
                 }
             } else {
@@ -821,7 +877,7 @@ int main(int argc, char* argv[]) {
             std::cout << "Usage: ds4-translator [options]" << std::endl;
             std::cout << "Options:" << std::endl;
             std::cout << "  -t, --type <ds4|dualsense|none|hidden>   Target virtual controller type (default: ds4)" << std::endl;
-            std::cout << "  -b, --backend <uhid|gadget>   Target backend type (default: auto-detect)" << std::endl;
+            std::cout << "  -b, --backend <uhid|gadget|hidg>   Target backend type (default: last used, via config)" << std::endl;
             std::cout << "  -h, --help                  Show this help message" << std::endl;
             return 0;
         }
@@ -832,9 +888,9 @@ int main(int argc, char* argv[]) {
     }
 
     if (!backend_explicitly_set) {
-        backend_type = BACKEND_UHID;
-        std::cout << "Using stable UHID backend by default." << std::endl;
+        backend_type = read_backend_config(BACKEND_UHID);
     }
+    std::cout << "Using " << backend_type_name(backend_type) << " backend." << std::endl;
 
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
@@ -863,6 +919,24 @@ int main(int argc, char* argv[]) {
     mode_t orig_mode = 0660;
 
     bool device_open = false;
+
+    // True when the active backend's virtual device is fully set up and
+    // ready to carry traffic. Each backend tracks "configured" its own way
+    // (UHID has no such concept of its own, so it reuses device_open, which
+    // this function's UHID_OPEN/UHID_CLOSE handling below keeps in sync).
+    auto vdev_configured = [&]() -> bool {
+        if (backend_type == BACKEND_GADGET) return virtual_gadget.configured;
+        if (backend_type == BACKEND_HIDG) return virtual_hidg.configured;
+        return device_open;
+    };
+    // Same as vdev_configured(), but for call sites that used to also check
+    // uhid_fd >= 0 alongside the UHID device_open flag (raw-gadget/hidg have
+    // no equivalent fd to check here -- their I/O runs on dedicated threads).
+    auto vdev_ready_for_io = [&]() -> bool {
+        if (backend_type == BACKEND_GADGET) return virtual_gadget.configured;
+        if (backend_type == BACKEND_HIDG) return virtual_hidg.configured;
+        return device_open && uhid_fd >= 0;
+    };
 
     // Real USB DS4 hardware streams input reports continuously (~250Hz)
     // even at rest, so physical-passthrough mode inherits that heartbeat
@@ -900,6 +974,8 @@ int main(int argc, char* argv[]) {
 
     bool type_change_requested = false;
     ControllerType pending_type_change = target_type;
+    bool backend_change_requested = false;
+    BackendType pending_backend_change = backend_type;
 
     // `ds4-ctl test` live-monitor state. Subscriber fds get a periodic
     // STATE line (whatever the active source — virtual device or raw
@@ -932,7 +1008,8 @@ int main(int argc, char* argv[]) {
         if (test_subscribers.empty()) return;
         std::string line;
         if (controller_type_emulates(target_type)) {
-            bool vdev_exists = (backend_type == BACKEND_GADGET) ? virtual_gadget.device_open : (uhid_fd >= 0);
+            bool vdev_exists = (backend_type == BACKEND_GADGET) ? virtual_gadget.device_open :
+                                (backend_type == BACKEND_HIDG) ? virtual_hidg.device_open : (uhid_fd >= 0);
             if (vdev_exists && last_virtual_valid) {
                 char buf[160];
                 snprintf(buf, sizeof(buf), "STATE VIRTUAL %u %u %u %u %u %u %02x %02x %02x\n",
@@ -1124,8 +1201,8 @@ int main(int argc, char* argv[]) {
             pfds.push_back(p);
             phy_poll_idx = pfds.size() - 1;
         }
-        if (backend_type == BACKEND_GADGET) {
-            // EP0 events handled by ep0_loop thread — no fd polling needed
+        if (backend_type == BACKEND_GADGET || backend_type == BACKEND_HIDG) {
+            // EP0/OUT events handled by dedicated backend threads — no fd polling needed
         } else {
             if (uhid_fd >= 0) {
                 struct pollfd p;
@@ -1189,7 +1266,8 @@ int main(int argc, char* argv[]) {
                         response = "Physical Controller: " + (phy_name.empty() ? "None" : "/dev/" + phy_name) + "\n";
                         response += "Connection Type: " + std::string(phy_fd >= 0 ? (is_bluetooth ? "Bluetooth" : "USB") : "N/A") + "\n";
                         response += "Virtual Emulation: " + std::string(controller_type_name(target_type)) + "\n";
-                        response += "Device Open by Host: " + std::string(((backend_type == BACKEND_GADGET) ? virtual_gadget.configured : device_open) ? "Yes" : "No") + "\n";
+                        response += "Active Backend: " + std::string(backend_type_name(backend_type)) + "\n";
+                        response += "Device Open by Host: " + std::string((vdev_configured()) ? "Yes" : "No") + "\n";
                         response += "Standalone Virtual (no hardware): " + std::string(standalone_virtual ? "Yes" : "No") + "\n";
                         response += "Physical Auto-Scan Disabled (release-physical): " + std::string(ignore_physical ? "Yes" : "No") + "\n";
                         if (phy_disconnect_pending_destroy) {
@@ -1218,7 +1296,7 @@ int main(int argc, char* argv[]) {
                         if (!standalone_virtual) {
                             response = "Error: No standalone virtual controller is active.";
                         } else {
-                            if ((backend_type == BACKEND_GADGET) ? virtual_gadget.configured : device_open) {
+                            if (vdev_configured()) {
                                 emit_neutral_report(target_type);
                             }
                             destroy_virtual_device();
@@ -1246,7 +1324,7 @@ int main(int argc, char* argv[]) {
                             chmod(phy_path.c_str(), orig_mode);
                             phy_name = "";
 
-                            if ((backend_type == BACKEND_GADGET) ? virtual_gadget.configured : device_open) {
+                            if (vdev_configured()) {
                                 emit_neutral_report(target_type);
                             }
                             destroy_virtual_device();
@@ -1289,7 +1367,7 @@ int main(int argc, char* argv[]) {
                         if (target_type != TYPE_DS4) {
                             pending_type_change = TYPE_DS4;
                             type_change_requested = true;
-                            write_config(TYPE_DS4);
+                            write_config(TYPE_DS4, backend_type);
                             response = "OK: Changing emulation type to DualShock 4...";
                         } else {
                             response = "Already set to DualShock 4";
@@ -1298,7 +1376,7 @@ int main(int argc, char* argv[]) {
                         if (target_type != TYPE_DUALSENSE) {
                             pending_type_change = TYPE_DUALSENSE;
                             type_change_requested = true;
-                            write_config(TYPE_DUALSENSE);
+                            write_config(TYPE_DUALSENSE, backend_type);
                             response = "OK: Changing emulation type to DualSense...";
                         } else {
                             response = "Already set to DualSense";
@@ -1307,7 +1385,7 @@ int main(int argc, char* argv[]) {
                         if (target_type != TYPE_NONE) {
                             pending_type_change = TYPE_NONE;
                             type_change_requested = true;
-                            write_config(TYPE_NONE);
+                            write_config(TYPE_NONE, backend_type);
                             response = "OK: Changing emulation type to None (translation disabled, physical controller untouched)...";
                         } else {
                             response = "Already set to None";
@@ -1316,10 +1394,21 @@ int main(int argc, char* argv[]) {
                         if (target_type != TYPE_HIDDEN) {
                             pending_type_change = TYPE_HIDDEN;
                             type_change_requested = true;
-                            write_config(TYPE_HIDDEN);
+                            write_config(TYPE_HIDDEN, backend_type);
                             response = "OK: Changing emulation type to Hidden (translation disabled, physical controller hidden)...";
                         } else {
                             response = "Already set to Hidden";
+                        }
+                    } else if (cmd == "set-backend uhid" || cmd == "set-backend gadget" || cmd == "set-backend hidg") {
+                        BackendType want_backend = (cmd == "set-backend uhid") ? BACKEND_UHID :
+                                                    (cmd == "set-backend gadget") ? BACKEND_GADGET : BACKEND_HIDG;
+                        if (backend_type != want_backend) {
+                            pending_backend_change = want_backend;
+                            backend_change_requested = true;
+                            write_config(target_type, want_backend);
+                            response = "OK: Changing backend to " + std::string(backend_type_name(want_backend)) + "...";
+                        } else {
+                            response = "Already using backend " + std::string(backend_type_name(want_backend));
                         }
                     } else if (cmd == "test") {
                         // Turns this connection into a live push stream instead of a
@@ -1362,9 +1451,9 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Recreate virtual device on dynamic emulation type reload
-        if (type_change_requested) {
-            if ((backend_type == BACKEND_GADGET) ? virtual_gadget.configured : device_open) {
+        // Recreate virtual device on dynamic emulation type and/or backend reload
+        if (type_change_requested || backend_change_requested) {
+            if (vdev_configured()) {
                 emit_neutral_report(target_type); // old type, before it's overwritten below
             }
             bool had_physical = (phy_fd >= 0);
@@ -1372,7 +1461,13 @@ int main(int argc, char* argv[]) {
             target_type = pending_type_change;
             type_change_requested = false;
 
+            // destroy_virtual_device() must run against the OLD backend_type
+            // (it's what's actually live right now); only reassign the
+            // global afterward, so create_virtual_device() below (and the
+            // auto-scan block, on its next iteration) picks up the new one.
             destroy_virtual_device();
+            backend_type = pending_backend_change;
+            backend_change_requested = false;
             phy_disconnect_pending_destroy = false;
 
             // Release physical controller grab and permissions. If a
@@ -1468,7 +1563,7 @@ int main(int argc, char* argv[]) {
             // leave the device itself (and its LED/rumble state) alive in
             // case the controller comes back. See PHYSICAL_DISCONNECT_GRACE.
             if (controller_type_emulates(target_type) &&
-                ((backend_type == BACKEND_GADGET) ? virtual_gadget.configured : device_open)) {
+                (vdev_configured())) {
                 emit_neutral_report(target_type);
                 phy_disconnect_pending_destroy = true;
                 phy_disconnect_time = std::chrono::steady_clock::now();
@@ -1544,8 +1639,7 @@ int main(int argc, char* argv[]) {
                 if (got_report) {
                     last_phy_common = common;
                     last_phy_valid = true;
-                    if (((backend_type == BACKEND_GADGET) ? virtual_gadget.configured : device_open) &&
-                        ((backend_type == BACKEND_GADGET) || uhid_fd >= 0)) {
+                    if (vdev_ready_for_io()) {
                         emit_input_report(target_type, common, num_touch, touch_reps, true);
                     }
                 }
@@ -1802,7 +1896,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Destroy virtual controller
-    if ((backend_type == BACKEND_GADGET) ? virtual_gadget.configured : device_open) {
+    if (vdev_configured()) {
         emit_neutral_report(target_type);
     }
     destroy_virtual_device();

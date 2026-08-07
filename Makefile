@@ -37,12 +37,12 @@ TARGET_SPOOF32 = $(BUILD_DIR)/libudev-sony-spoof32.so
 TARGET_INTERCEPT   = $(BUILD_DIR)/libds4-intercept.so
 TARGET_INTERCEPT32 = $(BUILD_DIR)/libds4-intercept32.so
 
-DAEMON_SRC = src/main.cpp src/raw-gadget-backend.c
+DAEMON_SRC = src/main.cpp src/raw-gadget-backend.c src/hidg-backend.c
 CTL_SRC    = src/ctl.cpp
 SPOOF_SRC  = src/udev-spoof.c
 INTERCEPT_SRC = src/intercept.c
 
-DAEMON_OBJ = $(BUILD_DIR)/main.o $(BUILD_DIR)/raw-gadget-backend.o
+DAEMON_OBJ = $(BUILD_DIR)/main.o $(BUILD_DIR)/raw-gadget-backend.o $(BUILD_DIR)/hidg-backend.o
 CTL_OBJ    = $(BUILD_DIR)/ctl.o
 
 PREFIX    = /usr/local
@@ -104,6 +104,9 @@ install: all
 	systemctl daemon-reload
 	systemctl enable ds4-translator.service
 	systemctl restart ds4-translator.service
+ifdef SUDO_USER
+	chown -R $(SUDO_USER):$(SUDO_USER) $(BUILD_DIR)
+endif
 
 uninstall:
 	systemctl disable --now ds4-translator.service || true
