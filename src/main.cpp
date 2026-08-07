@@ -75,7 +75,7 @@ struct PhysicalNode {
 
 std::atomic<bool> running(true);
 
-void signal_handler(int sig) {
+void signal_handler(int /*sig*/) {
     running = false;
 }
 

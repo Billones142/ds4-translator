@@ -8,8 +8,24 @@ VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || cat VERSI
 
 CXX = g++
 CC  = gcc
-CXXFLAGS = -O3 -Wall -std=c++17 -DDS4_VERSION=\"$(VERSION)\"
-CFLAGS   = -O3 -Wall -DDS4_VERSION=\"$(VERSION)\"
+
+# This project talks to the kernel through raw ioctls, configfs, and manual
+# struct-packed HID reports -- exactly the code where an unnoticed implicit
+# conversion, shadowed variable, or format-string slip turns into a silent
+# low-level bug (or a security issue) instead of a compile error. Errors,
+# not just warnings: `make` refuses to produce a binary until these are
+# clean, rather than letting them quietly ship.
+# -Wno-missing-field-initializers: this codebase's designated-initializer
+# structs (RawGadgetDevice, HidgDevice) deliberately list only the fields
+# that need a non-zero starting value -- the C/C++ standard guarantees
+# every omitted field is zero/false/null-initialized, so warning on that is
+# a false positive here, not a real omission.
+STRICT_WARNINGS = -Wall -Wextra -Werror -Wshadow -Wformat=2 -Wformat-security \
+                   -Wnull-dereference -Wpointer-arith -Wcast-align -Wundef -Wwrite-strings \
+                   -Wno-missing-field-initializers
+
+CXXFLAGS = -O3 $(STRICT_WARNINGS) -std=c++17 -DDS4_VERSION=\"$(VERSION)\"
+CFLAGS   = -O3 $(STRICT_WARNINGS) -DDS4_VERSION=\"$(VERSION)\"
 LDFLAGS  = -lpthread
 
 BUILD_DIR = build
@@ -36,8 +52,8 @@ SYSTEMDDIR = /etc/systemd/system
 all: $(TARGET_DAEMON) $(TARGET_CTL) $(TARGET_SPOOF) $(TARGET_SPOOF32)
 
 # Debug build: no optimisation, debug symbols, DS4_DEBUG enabled
-debug: CXXFLAGS = -O0 -g -Wall -std=c++17 -DDS4_DEBUG -DDS4_VERSION=\"$(VERSION)\"
-debug: CFLAGS   = -O0 -g -Wall -DDS4_DEBUG -DDS4_VERSION=\"$(VERSION)\"
+debug: CXXFLAGS = -O0 -g $(STRICT_WARNINGS) -std=c++17 -DDS4_DEBUG -DDS4_VERSION=\"$(VERSION)\"
+debug: CFLAGS   = -O0 -g $(STRICT_WARNINGS) -DDS4_DEBUG -DDS4_VERSION=\"$(VERSION)\"
 debug: clean all
 
 $(BUILD_DIR):
