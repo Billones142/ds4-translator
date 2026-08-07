@@ -277,6 +277,28 @@ static void* ep_out_loop(void *arg) {
     return NULL;
 }
 
+// Acks the status stage of a no-data-stage (or already-read data-OUT)
+// control request. A control transfer's status stage is always the
+// opposite direction of its data stage, or IN when there's no data stage
+// at all -- never simply "whatever bmRequestType's direction bit says",
+// which is what the generic reply dispatch further down actually checks
+// (correct only for requests that themselves carry an IN/OUT data stage).
+// So the correct ack for e.g. SET_CONFIGURATION/SET_INTERFACE/SET_IDLE
+// (no data stage) and SET_REPORT (data-OUT stage, already read) is always
+// a zero-length EP0_WRITE, confirmed against live sysfs state: without
+// this, USB_RAW_IOCTL_CONFIGURE alone left the gadget stuck unconfigured
+// from the host's perspective (bConfigurationValue/interface sysfs
+// entries never appeared) even though it returned success.
+static void ack_zero_length_status(struct RawGadgetDevice *dev, const char *what) {
+    struct usb_raw_control_io status_io;
+    memset(&status_io, 0, sizeof(status_io));
+    status_io.inner.ep = 0;
+    status_io.inner.length = 0;
+    if (ioctl(dev->fd, USB_RAW_IOCTL_EP0_WRITE, &status_io) < 0) {
+        fprintf(stderr, "ioctl(USB_RAW_IOCTL_EP0_WRITE) [%s status ack]: %s\n", what, strerror(errno));
+    }
+}
+
 static bool handle_control_request(struct RawGadgetDevice *dev, void *event_ptr) {
     struct usb_raw_control_event *event = (struct usb_raw_control_event *)event_ptr;
     struct usb_ctrlrequest *ctrl = &event->ctrl;
@@ -434,18 +456,23 @@ static bool handle_control_request(struct RawGadgetDevice *dev, void *event_ptr)
 
                 dev->device_open = true;
                 dev->eps_enabled = true;
-                // Returns directly instead of falling through to the generic
-                // reply dispatch below (which would call EP0_READ to ack the
-                // zero-length status stage, or EP0_STALL if `reply` were left
-                // false): USB_RAW_IOCTL_CONFIGURE already both applies the
-                // configuration and completes the pending SET_CONFIGURATION
-                // control request as its response. A subsequent EP0_READ call
-                // for the same already-completed request has nothing pending
-                // to read and fails with EINVAL ("Invalid argument") -- this
-                // was observed live and is why SET_CONFIGURATION never used to
-                // successfully finish enumeration (and falling through to
-                // EP0_STALL instead would be worse: a well-formed
-                // SET_CONFIGURATION would be reported as failed to the host).
+
+                // Not routed through the generic reply dispatch below --
+                // see ack_zero_length_status()'s doc comment. Briefly: two
+                // things were wrong here before, found in order. First, the
+                // generic dispatch's EP0_READ(length=0) failed outright
+                // with EINVAL (SET_CONFIGURATION's bmRequestType has the
+                // OUT direction bit, which the dispatch reads literally).
+                // After skipping that call (on the assumption
+                // USB_RAW_IOCTL_CONFIGURE alone completed the pending
+                // request), the daemon stopped erroring, but the host still
+                // never saw the transaction finish -- confirmed live via
+                // sysfs (bConfigurationValue/the interface's own sysfs
+                // directory never appeared, meaning usbcore stayed stuck in
+                // the "addressed" state). CONFIGURE only flips gadget-side
+                // descriptor/endpoint state; it doesn't itself complete the
+                // pending control transfer.
+                ack_zero_length_status(dev, "SET_CONFIGURATION");
                 return true;
             }
             case USB_REQ_GET_INTERFACE: {
@@ -455,9 +482,8 @@ static bool handle_control_request(struct RawGadgetDevice *dev, void *event_ptr)
                 break;
             }
             case USB_REQ_SET_INTERFACE: {
-                io.inner.length = 0;
-                reply = true;
-                break;
+                ack_zero_length_status(dev, "SET_INTERFACE");
+                return true;
             }
         }
     } else if ((ctrl->bRequestType & USB_TYPE_MASK) == USB_TYPE_CLASS) {
@@ -542,21 +568,34 @@ static bool handle_control_request(struct RawGadgetDevice *dev, void *event_ptr)
                 break;
             }
             case 0x09: { // SET_REPORT
-                struct usb_raw_ep_io ep0_read_io;
-                memset(&ep0_read_io, 0, sizeof(ep0_read_io));
-                ep0_read_io.ep = 0;
-                ep0_read_io.flags = 0;
-                ep0_read_io.length = ctrl->wLength;
-                ioctl(dev->fd, USB_RAW_IOCTL_EP0_READ, &ep0_read_io);
-                
-                io.inner.length = 0;
-                reply = true;
-                break;
+                // ep0_read_io used to be a bare `struct usb_raw_ep_io` (8
+                // bytes: ep+flags+length, no trailing buffer) with the
+                // kernel told to read ctrl->wLength bytes into its
+                // zero-length flexible-array `data[]` member -- for any
+                // wLength > 0 (every real SET_REPORT, e.g. 9 bytes for a
+                // DS4 rumble/LED report) that writes past the end of this
+                // stack variable. Reusing the same usb_raw_control_io
+                // wrapper (ep0 struct + a real EP0_MAX_DATA-sized buffer
+                // immediately after it) used everywhere else in this
+                // function fixes that.
+                struct usb_raw_control_io read_io;
+                memset(&read_io, 0, sizeof(read_io));
+                read_io.inner.ep = 0;
+                read_io.inner.length = ctrl->wLength;
+                ioctl(dev->fd, USB_RAW_IOCTL_EP0_READ, &read_io);
+
+                ack_zero_length_status(dev, "SET_REPORT");
+                return true;
             }
             case 0x0a: { // SET_IDLE
-                io.inner.length = 0;
-                reply = true;
-                break;
+                // Worth calling out specifically among the
+                // ack_zero_length_status() call sites: Linux's own usbhid
+                // driver issues SET_IDLE as part of its own probe() on
+                // every HID interface it binds to, so getting this wrong
+                // could well have been blocking driver binding even after
+                // SET_CONFIGURATION itself was fixed to complete correctly.
+                ack_zero_length_status(dev, "SET_IDLE");
+                return true;
             }
         }
     }
