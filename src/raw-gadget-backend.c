@@ -430,12 +430,22 @@ static bool handle_control_request(struct RawGadgetDevice *dev, void *event_ptr)
                 }
                 
                 ioctl(dev->fd, USB_RAW_IOCTL_CONFIGURE, 0);
-                
+
                 dev->device_open = true;
                 dev->eps_enabled = true;
-                io.inner.length = 0;
-                reply = true;
-                break;
+                // Returns directly instead of falling through to the generic
+                // reply dispatch below (which would call EP0_READ to ack the
+                // zero-length status stage, or EP0_STALL if `reply` were left
+                // false): USB_RAW_IOCTL_CONFIGURE already both applies the
+                // configuration and completes the pending SET_CONFIGURATION
+                // control request as its response. A subsequent EP0_READ call
+                // for the same already-completed request has nothing pending
+                // to read and fails with EINVAL ("Invalid argument") -- this
+                // was observed live and is why SET_CONFIGURATION never used to
+                // successfully finish enumeration (and falling through to
+                // EP0_STALL instead would be worse: a well-formed
+                // SET_CONFIGURATION would be reported as failed to the host).
+                return true;
             }
             case USB_REQ_GET_INTERFACE: {
                 io.data[0] = 0;
