@@ -20,7 +20,7 @@
 #endif
 
 static void dummy_signal_handler(int sig) {
-    // Just to interrupt blocking ioctl
+    (void)sig; // Just to interrupt blocking ioctl
 }
 
 // Raw Gadget definitions
