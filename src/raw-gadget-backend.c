@@ -190,6 +190,7 @@ extern bool is_bluetooth;
 extern void send_physical_output_report(int fd, bool bluetooth, uint8_t motor_left, uint8_t motor_right, uint8_t r, uint8_t g, uint8_t b);
 
 static void* ep0_loop(void *arg);   /* forward declaration */
+static void* ep_in_loop(void *arg); /* forward declaration */
 
 static void* ep_out_loop(void *arg) {
     struct RawGadgetDevice *dev = (struct RawGadgetDevice *)arg;
@@ -589,6 +590,11 @@ bool raw_gadget_init(struct RawGadgetDevice *dev, int type) {
     dev->target_type = type;
     dev->eps_enabled = false;
     dev->ep_out_thread_spawned = false;
+    dev->ep_in_thread_spawned = false;
+    dev->pending_report_len = 0;
+    dev->report_pending = false;
+    pthread_mutex_init(&dev->report_mutex, NULL);
+    pthread_cond_init(&dev->report_cond, NULL);
 
     dev->fd = open("/dev/raw-gadget", O_RDWR | O_CLOEXEC);
     if (dev->fd < 0) {
@@ -644,6 +650,12 @@ bool raw_gadget_init(struct RawGadgetDevice *dev, int type) {
         perror("Failed to spawn ep_out_loop thread");
     }
 
+    if (pthread_create(&dev->ep_in_thread, NULL, ep_in_loop, dev) == 0) {
+        dev->ep_in_thread_spawned = true;
+    } else {
+        perror("Failed to spawn ep_in_loop thread");
+    }
+
     return true;
 }
 
@@ -660,6 +672,23 @@ void raw_gadget_close(struct RawGadgetDevice *dev) {
         pthread_join(dev->ep_out_thread, NULL);
         dev->ep_out_thread_spawned = false;
     }
+    if (dev->ep_in_thread_spawned) {
+        // Unlike ep0_loop/ep_out_loop, this thread can be blocked in
+        // either of two different places -- waiting on the condvar for
+        // the next report, or inside the blocking EP_WRITE ioctl sending
+        // one -- so both wake mechanisms are needed: SIGUSR1 interrupts
+        // the ioctl (same as the other two threads), and signaling the
+        // condvar (after device_open is already false, so the loop's
+        // wait predicate sees it and exits) wakes it if it was waiting.
+        pthread_kill(dev->ep_in_thread, SIGUSR1);
+        pthread_mutex_lock(&dev->report_mutex);
+        pthread_cond_signal(&dev->report_cond);
+        pthread_mutex_unlock(&dev->report_mutex);
+        pthread_join(dev->ep_in_thread, NULL);
+        dev->ep_in_thread_spawned = false;
+    }
+    pthread_mutex_destroy(&dev->report_mutex);
+    pthread_cond_destroy(&dev->report_cond);
     if (dev->eps_enabled) {
         if (dev->ep_in >= 0) ioctl(dev->fd, USB_RAW_IOCTL_EP_DISABLE, dev->ep_in);
         if (dev->ep_out >= 0) ioctl(dev->fd, USB_RAW_IOCTL_EP_DISABLE, dev->ep_out);
@@ -711,20 +740,58 @@ static void* ep0_loop(void *arg) {
     return NULL;
 }
 
+// Owns the actual (blocking) USB_RAW_IOCTL_EP_WRITE call -- see the
+// report_mutex/report_cond fields' doc comment in the header for why this
+// can't run on whatever thread calls raw_gadget_send_input_report().
+static void* ep_in_loop(void *arg) {
+    struct RawGadgetDevice *dev = (struct RawGadgetDevice *)arg;
+    uint8_t local_buf[sizeof(dev->pending_report)];
+
+    while (dev->device_open) {
+        pthread_mutex_lock(&dev->report_mutex);
+        while (dev->device_open && !dev->report_pending) {
+            pthread_cond_wait(&dev->report_cond, &dev->report_mutex);
+        }
+        if (!dev->device_open) {
+            pthread_mutex_unlock(&dev->report_mutex);
+            break;
+        }
+        size_t len = dev->pending_report_len;
+        memcpy(local_buf, dev->pending_report, len);
+        dev->report_pending = false;
+        pthread_mutex_unlock(&dev->report_mutex);
+
+        if (!dev->configured || !dev->eps_enabled || dev->ep_in < 0) continue;
+
+        struct usb_raw_ep_io *io = (struct usb_raw_ep_io *)malloc(sizeof(struct usb_raw_ep_io) + len);
+        io->ep = dev->ep_in;
+        io->flags = 0;
+        io->length = len;
+        memcpy(io->data, local_buf, len);
+
+        int rv = ioctl(dev->fd, USB_RAW_IOCTL_EP_WRITE, io);
+        if (rv < 0 && errno != EINTR) {
+            perror("ioctl(USB_RAW_IOCTL_EP_WRITE)");
+        }
+        free(io);
+    }
+    return NULL;
+}
+
+// Stages the latest report for ep_in_loop to send and returns immediately
+// -- never touches the fd/ioctl directly. Superseding a not-yet-sent report
+// is fine: every report carries full controller state, not a delta, so the
+// newest one staged is always the only one worth sending.
 bool raw_gadget_send_input_report(struct RawGadgetDevice *dev, const uint8_t *data, size_t size) {
     if (!dev->configured || !dev->eps_enabled || dev->ep_in < 0) return false;
-    
-    struct usb_raw_ep_io *io = (struct usb_raw_ep_io *)malloc(sizeof(struct usb_raw_ep_io) + size);
-    io->ep = dev->ep_in;
-    io->flags = 0;
-    io->length = size;
-    memcpy(io->data, data, size);
-    
-    int rv = ioctl(dev->fd, USB_RAW_IOCTL_EP_WRITE, io);
-    if (rv < 0) {
-        perror("ioctl(USB_RAW_IOCTL_EP_WRITE)");
-    }
-    free(io);
-    
-    return rv >= 0;
+    if (size > sizeof(dev->pending_report)) return false;
+
+    pthread_mutex_lock(&dev->report_mutex);
+    memcpy(dev->pending_report, data, size);
+    dev->pending_report_len = size;
+    dev->report_pending = true;
+    pthread_cond_signal(&dev->report_cond);
+    pthread_mutex_unlock(&dev->report_mutex);
+
+    return true;
 }
