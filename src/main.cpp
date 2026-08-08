@@ -439,7 +439,16 @@ extern "C" void send_physical_output_report(int fd, bool is_bluetooth, uint8_t m
 
 // UHID Helper to write events
 int uhid_write(int fd, const struct uhid_event& ev) {
-    ssize_t ret = write(fd, &ev, sizeof(ev));
+    // linux/uhid.h documents that short writes are zero-extended by the
+    // kernel, so the hot-path UHID_INPUT2 event only needs type + size +
+    // the actual report bytes, not the full ~4.3KB struct (dominated by
+    // the unrelated CREATE2 rd_data[4096] union member). Every other
+    // event type (rare: create/destroy/get-set-report) keeps the full size.
+    size_t len = sizeof(ev);
+    if (ev.type == UHID_INPUT2) {
+        len = sizeof(ev.type) + sizeof(ev.u.input2.size) + ev.u.input2.size;
+    }
+    ssize_t ret = write(fd, &ev, len);
     if (ret < 0) {
         std::cerr << "uhid write failed: " << strerror(errno) << std::endl;
         return -1;
@@ -578,6 +587,11 @@ uint8_t sequence_number = 0;
 // separate read path into the report-forwarding logic below.
 struct dualshock4_input_report_common last_virtual_common;
 bool last_virtual_valid = false;
+// Mirrors `!test_subscribers.empty()` so emit_input_report() (a free
+// function with no access to main()'s locals) can skip the copy above
+// when nobody's connected via `ds4-ctl test` to read it. Single-threaded:
+// only main()'s poll loop writes this.
+bool g_has_test_subscribers = false;
 
 void write_config(ControllerType type, BackendType ds4_backend, BackendType dualsense_backend) {
     std::ofstream f("/etc/ds4-translator.conf");
@@ -731,11 +745,22 @@ uint8_t encode_dualsense_battery(int percent, BatteryState state) {
 void emit_input_report(ControllerType type, const struct dualshock4_input_report_common& common,
                         uint8_t num_touch, const struct dualshock4_touch_report touch_reps[4],
                         bool has_real_battery) {
-    last_virtual_common = common;
-    last_virtual_valid = true;
+    if (g_has_test_subscribers) {
+        last_virtual_common = common;
+        last_virtual_valid = true;
+    }
 
     struct uhid_event out_ev;
-    memset(&out_ev, 0, sizeof(out_ev));
+    // Only the payload bytes we're about to populate need to start zeroed
+    // (dualshock4_input_report_usb::reserved[3] / touch-padding slots on
+    // the DS4 side, various reserved*[] fields on the DualSense side).
+    // `type` and `input2.size` are both set below, and the ~4.3KB
+    // rd_data/create2/etc. portions of the union are never read for an
+    // INPUT2 event, so they don't need clearing.
+    const size_t payload_len = (type == TYPE_DS4)
+        ? sizeof(struct dualshock4_input_report_usb)
+        : 64; // matches out_ev.u.input2.size = 64; in the DualSense branch below
+    memset(out_ev.u.input2.data, 0, payload_len);
     out_ev.type = UHID_INPUT2;
 
     if (type == TYPE_DS4) {
@@ -1041,6 +1066,7 @@ int main(int argc, char* argv[]) {
                 ++it;
             }
         }
+        g_has_test_subscribers = !test_subscribers.empty();
     };
 
     auto test_broadcast_state = [&]() {
@@ -1076,8 +1102,10 @@ int main(int argc, char* argv[]) {
                 ++it;
             }
         }
+        g_has_test_subscribers = !test_subscribers.empty();
     };
 
+    std::vector<struct pollfd> pfds; // reused across iterations; cleared and repopulated each pass below
     while (running) {
         // If physical controller disconnected, scan & setup. Skipped while a
         // standalone virtual controller (created via `ds4-ctl virtual`, no
@@ -1227,7 +1255,7 @@ int main(int argc, char* argv[]) {
         }
 
         // Build poll FD set
-        std::vector<struct pollfd> pfds;
+        pfds.clear();
         int phy_poll_idx = -1;
         int uhid_poll_idx = -1;
         int server_poll_idx = -1;
@@ -1516,6 +1544,7 @@ int main(int argc, char* argv[]) {
                                 if (write(client_fd, msg.c_str(), msg.size()) < 0) break; // dead fd; later ticks will drop it
                             }
                             test_subscribers.push_back(client_fd);
+                            g_has_test_subscribers = true;
                         } else {
                             close(client_fd);
                         }
@@ -1719,8 +1748,10 @@ int main(int argc, char* argv[]) {
                 }
 
                 if (got_report) {
-                    last_phy_common = common;
-                    last_phy_valid = true;
+                    if (g_has_test_subscribers) {
+                        last_phy_common = common;
+                        last_phy_valid = true;
+                    }
                     if (vdev_ready_for_io()) {
                         emit_input_report(target_type, common, num_touch, touch_reps, true);
                     }

@@ -42,12 +42,12 @@ udevadm info -q all /dev/input/event256
 `libds4-intercept.so` is a lightweight `LD_PRELOAD` diagnostic tool designed to trace low-level system calls between games and controller device nodes (`/dev/hidraw*`, `/dev/input/event*`, `/dev/input/js*`).
 
 ### Building the Interceptor
-The interceptor library is opt-in and can be built via:
+The interceptor lives outside the daemon build, in `tools/ds4-intercept/`, and is built via its own script:
 
 ```bash
-make intercept
+tools/ds4-intercept/build.sh
 ```
-This generates:
+This generates, under `tools/ds4-intercept/build/`:
 - `libds4-intercept.so` (64-bit applications / native games)
 - `libds4-intercept32.so` (32-bit applications)
 
