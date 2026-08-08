@@ -249,7 +249,7 @@ static void send_ui_state(const UiState& s) {
     // a plausible value.
     uint8_t l2 = (s.buttons & SYN_BTN_L2) ? 255 : 0;
     uint8_t r2 = (s.buttons & SYN_BTN_R2) ? 255 : 0;
-    snprintf(cmdbuf, sizeof(cmdbuf), "input %x %u %u %u %u %u %u %u",
+    (void)snprintf(cmdbuf, sizeof(cmdbuf), "input %x %u %u %u %u %u %u %u",
              s.buttons, s.dpad, 128, 128, 128, 128, l2, r2);
     std::string resp;
     send_command(cmdbuf, resp);
@@ -274,7 +274,7 @@ static void redraw(const UiState& s, const std::string& daemon_status, bool stat
               << "      " << mark(s.buttons, SYN_BTN_PS, "PS(P)") << "  " << mark(s.buttons, SYN_BTN_TOUCHPAD, "Touchpad(T)") << "\n";
     std::cout << "\x1b[0K\n";
     char hexbuf[16];
-    snprintf(hexbuf, sizeof(hexbuf), "0x%04X", s.buttons);
+    (void)snprintf(hexbuf, sizeof(hexbuf), "0x%04X", s.buttons);
     std::cout << "\x1b[0KRaw button bitmask: " << hexbuf << "   dpad=" << (int)s.dpad << "\n";
     std::cout << "\x1b[0K(Sticks fixed centered; L2/R2 analog mirrors digital press)\n";
     std::cout << "\x1b[0K\n";
@@ -282,7 +282,6 @@ static void redraw(const UiState& s, const std::string& daemon_status, bool stat
     std::cout << "\x1b[0K\n";
     std::cout << "\x1b[0KDaemon status:\n";
     if (status_ok) {
-        std::string line;
         size_t start = 0;
         while (start < daemon_status.size()) {
             size_t nl = daemon_status.find('\n', start);
@@ -514,7 +513,7 @@ static void redraw_test(const std::string& header, const std::vector<std::string
                   << "      " << mark(st.ui.buttons, SYN_BTN_PS, "PS") << "  " << mark(st.ui.buttons, SYN_BTN_TOUCHPAD, "Touchpad") << "\n";
         std::cout << "\x1b[0K\n";
         char buf[128];
-        snprintf(buf, sizeof(buf), "LX=%3u LY=%3u   RX=%3u RY=%3u   L2=%3u R2=%3u",
+        (void)snprintf(buf, sizeof(buf), "LX=%3u LY=%3u   RX=%3u RY=%3u   L2=%3u R2=%3u",
                  st.lx, st.ly, st.rx, st.ry, st.l2, st.r2);
         std::cout << "\x1b[0K" << buf << "\n";
     }
@@ -620,7 +619,12 @@ static int run_test_ui() {
                     } else if (line.rfind("STATE ", 0) == 0) {
                         char source[16];
                         unsigned x, y, rxv, ry, z, rz, b0, b1, b2;
-                        int nf = sscanf(line.c_str(), "STATE %15s %u %u %u %u %u %u %x %x %x",
+                        // sscanf over strtoul: this is our own daemon's line-oriented
+                        // status protocol over a local control socket, not adversarial
+                        // input -- the nf==10 field-count check below is the validation
+                        // that matters here, and a strtoul-chain rewrite for 10 fields
+                        // buys no real safety over that.
+                        int nf = sscanf(line.c_str(), "STATE %15s %u %u %u %u %u %u %x %x %x", // NOLINT(cert-err34-c,bugprone-unchecked-string-to-number-conversion)
                                         source, &x, &y, &rxv, &ry, &z, &rz, &b0, &b1, &b2);
                         if (nf == 10) {
                             st.have_state = true;
@@ -638,7 +642,7 @@ static int run_test_ui() {
                         struct tm tmv;
                         localtime_r(&t, &tmv);
                         char ts[16];
-                        strftime(ts, sizeof(ts), "%H:%M:%S", &tmv);
+                        (void)strftime(ts, sizeof(ts), "%H:%M:%S", &tmv);
                         events.push_back(std::string("[") + ts + "] " + line.substr(6));
                         if (events.size() > MAX_EVENTS) events.pop_front();
                     }

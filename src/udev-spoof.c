@@ -1,3 +1,4 @@
+// NOLINTNEXTLINE(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp) -- glibc feature-test macro, not user code
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <string.h>
@@ -16,14 +17,14 @@ static void init_functions() {
         void *handle = dlopen("libudev.so.1", RTLD_LAZY);
         if (!handle) handle = dlopen("libudev.so", RTLD_LAZY);
         if (!handle) {
-            fprintf(stderr, "[udev-spoof] ERROR: Failed to load libudev.so.1 or libudev.so!\n");
+            (void)fprintf(stderr, "[udev-spoof] ERROR: Failed to load libudev.so.1 or libudev.so!\n");
             return;
         }
         real_get_parent = dlsym(handle, "udev_device_get_parent_with_subsystem_devtype");
         real_get_sysattr = dlsym(handle, "udev_device_get_sysattr_value");
         real_get_property = dlsym(handle, "udev_device_get_property_value");
         real_get_subsystem = dlsym(handle, "udev_device_get_subsystem");
-        fprintf(stderr, "[udev-spoof] Library initialized: parent=%p, sysattr=%p, property=%p, subsystem=%p\n", 
+        (void)fprintf(stderr, "[udev-spoof] Library initialized: parent=%p, sysattr=%p, property=%p, subsystem=%p\n",
                 real_get_parent, real_get_sysattr, real_get_property, real_get_subsystem);
     }
 }
@@ -51,7 +52,7 @@ struct udev_device *udev_device_get_parent_with_subsystem_devtype(struct udev_de
     init_functions();
     
     if (subsystem && !strcmp(subsystem, "usb") && is_virtual_sony_controller(udev_device)) {
-        fprintf(stderr, "[udev-spoof] Spoofing parent query for virtual Sony controller. Returning marked fake parent.\n");
+        (void)fprintf(stderr, "[udev-spoof] Spoofing parent query for virtual Sony controller. Returning marked fake parent.\n");
         return (struct udev_device *)((uintptr_t)udev_device | 1);
     }
     
@@ -73,7 +74,7 @@ const char *udev_device_get_subsystem(struct udev_device *udev_device) {
     init_functions();
     
     if ((uintptr_t)udev_device & 1) {
-        fprintf(stderr, "[udev-spoof] Spoofing subsystem query for fake parent: usb\n");
+        (void)fprintf(stderr, "[udev-spoof] Spoofing subsystem query for fake parent: usb\n");
         return "usb";
     }
     
@@ -91,7 +92,7 @@ const char *udev_device_get_sysattr_value(struct udev_device *udev_device, const
         const char *pid = real_get_property(real_dev, "ID_MODEL_ID");
         int is_dualsense = pid && !strcmp(pid, "0ce6");
         
-        fprintf(stderr, "[udev-spoof] Spoofing sysattr query on fake parent: %s\n", sysattr);
+        (void)fprintf(stderr, "[udev-spoof] Spoofing sysattr query on fake parent: %s\n", sysattr);
         
         if (!strcmp(sysattr, "manufacturer")) {
             return is_dualsense ? "Sony Interactive Entertainment" : "Sony Computer Entertainment";
@@ -105,7 +106,7 @@ const char *udev_device_get_sysattr_value(struct udev_device *udev_device, const
         if (!strcmp(sysattr, "uevent")) {
             const char *real_uevent = real_get_sysattr ? real_get_sysattr(real_dev, sysattr) : "";
             static char spoofed_uevent[2048];
-            snprintf(spoofed_uevent, sizeof(spoofed_uevent), "%s\nPRODUCT=054c/05c4/0100\n", real_uevent);
+            (void)snprintf(spoofed_uevent, sizeof(spoofed_uevent), "%s\nPRODUCT=054c/05c4/0100\n", real_uevent);
             return spoofed_uevent;
         }
     }

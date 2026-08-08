@@ -18,6 +18,7 @@
  *   - libudev      → hooks udev_device and udev_enumerate functions
  */
 
+// NOLINTNEXTLINE(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp) -- glibc feature-test macro, not user code
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <stdio.h>
@@ -154,14 +155,14 @@ static void log_msg(const char *fmt, ...) {
     clock_gettime(CLOCK_MONOTONIC, &ts);
 
     pthread_mutex_lock(&lock);
-    fprintf(logfile, "[%5ld.%03ld] [pid=%d %s tid=%ld] ",
+    (void)fprintf(logfile, "[%5ld.%03ld] [pid=%d %s tid=%ld] ",
             (long)ts.tv_sec % 100000, ts.tv_nsec / 1000000,
             self_pid, proc_name, (long)gettid());
     va_list ap;
     va_start(ap, fmt);
-    vfprintf(logfile, fmt, ap);
+    (void)vfprintf(logfile, fmt, ap);
     va_end(ap);
-    fputc('\n', logfile);
+    (void)fputc('\n', logfile);
     pthread_mutex_unlock(&lock);
 }
 
@@ -175,7 +176,7 @@ static void hex_dump(const char *label, const void *data, size_t len) {
         pos += snprintf(buf + pos, sizeof(buf) - pos, "%02x ", p[i]);
     }
     if (len > show) {
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "... (+%zu more)", len - show);
+        (void)snprintf(buf + pos, sizeof(buf) - pos, "... (+%zu more)", len - show);
     }
     log_msg("  %s (%zu bytes): %s", label, len, buf);
 }
@@ -327,24 +328,24 @@ static const char *decode_evdev_ioctl(unsigned long request) {
     if (type == 'E') {
         static char buf[64];
         switch (nr) {
-            case 0x06: snprintf(buf, sizeof(buf), "EVIOCGNAME(%u)", size); return buf;
-            case 0x07: snprintf(buf, sizeof(buf), "EVIOCGPHYS(%u)", size); return buf;
-            case 0x08: snprintf(buf, sizeof(buf), "EVIOCGUNIQ(%u)", size); return buf;
-            case 0x09: snprintf(buf, sizeof(buf), "EVIOCGPROP(%u)", size); return buf;
-            case 0x90: snprintf(buf, sizeof(buf), "EVIOCGRAB(%s)", (dir & _IOC_WRITE) ? "grab" : "release"); return buf;
+            case 0x06: (void)snprintf(buf, sizeof(buf), "EVIOCGNAME(%u)", size); return buf;
+            case 0x07: (void)snprintf(buf, sizeof(buf), "EVIOCGPHYS(%u)", size); return buf;
+            case 0x08: (void)snprintf(buf, sizeof(buf), "EVIOCGUNIQ(%u)", size); return buf;
+            case 0x09: (void)snprintf(buf, sizeof(buf), "EVIOCGPROP(%u)", size); return buf;
+            case 0x90: (void)snprintf(buf, sizeof(buf), "EVIOCGRAB(%s)", (dir & _IOC_WRITE) ? "grab" : "release"); return buf;
             default:
                 /* EVIOCGBIT(ev, len) = _IOC(_IOC_READ, 'E', 0x20+ev, len) */
                 if (nr >= 0x20 && nr < 0x40) {
-                    snprintf(buf, sizeof(buf), "EVIOCGBIT(type=%u, len=%u)", nr - 0x20, size);
+                    (void)snprintf(buf, sizeof(buf), "EVIOCGBIT(type=%u, len=%u)", nr - 0x20, size);
                     return buf;
                 }
                 /* EVIOCGABS(axis) = _IOR('E', 0x40+axis, struct input_absinfo) */
                 if (nr >= 0x40 && nr < 0x80) {
-                    snprintf(buf, sizeof(buf), "EVIOCGABS(axis=%u)", nr - 0x40);
+                    (void)snprintf(buf, sizeof(buf), "EVIOCGABS(axis=%u)", nr - 0x40);
                     return buf;
                 }
                 /* EVIOCGKEY, etc */
-                snprintf(buf, sizeof(buf), "EVIOC_0x%02x(sz=%u)", nr, size);
+                (void)snprintf(buf, sizeof(buf), "EVIOC_0x%02x(sz=%u)", nr, size);
                 return buf;
         }
     }
@@ -367,13 +368,13 @@ static const char *decode_hidraw_ioctl(unsigned long request) {
     if (type == 'H') {
         static char buf[64];
         switch (nr) {
-            case 0x04: snprintf(buf, sizeof(buf), "HIDIOCGRAWNAME(%u)", size); return buf;
-            case 0x05: snprintf(buf, sizeof(buf), "HIDIOCGRAWPHYS(%u)", size); return buf;
-            case 0x06: snprintf(buf, sizeof(buf), "HIDIOCSFEATURE(%u)", size); return buf;
-            case 0x07: snprintf(buf, sizeof(buf), "HIDIOCGFEATURE(%u)", size); return buf;
-            case 0x08: snprintf(buf, sizeof(buf), "HIDIOCGRAWUNIQ(%u)", size); return buf;
+            case 0x04: (void)snprintf(buf, sizeof(buf), "HIDIOCGRAWNAME(%u)", size); return buf;
+            case 0x05: (void)snprintf(buf, sizeof(buf), "HIDIOCGRAWPHYS(%u)", size); return buf;
+            case 0x06: (void)snprintf(buf, sizeof(buf), "HIDIOCSFEATURE(%u)", size); return buf;
+            case 0x07: (void)snprintf(buf, sizeof(buf), "HIDIOCGFEATURE(%u)", size); return buf;
+            case 0x08: (void)snprintf(buf, sizeof(buf), "HIDIOCGRAWUNIQ(%u)", size); return buf;
             default:
-                snprintf(buf, sizeof(buf), "HIDRAW_0x%02x(sz=%u)", nr, size);
+                (void)snprintf(buf, sizeof(buf), "HIDRAW_0x%02x(sz=%u)", nr, size);
                 return buf;
         }
     }
@@ -393,7 +394,7 @@ static const char *decode_ioctl(unsigned long request, dev_type_t type) {
 
     if (!name) {
         static char buf[32];
-        snprintf(buf, sizeof(buf), "ioctl(0x%08lx)", request);
+        (void)snprintf(buf, sizeof(buf), "ioctl(0x%08lx)", request);
         name = buf;
     }
     return name;
@@ -820,7 +821,7 @@ __attribute__((destructor))
 static void intercept_fini(void) {
     if (logfile && logfile != stderr) {
         log_msg("=== ds4-intercept unloading ===");
-        fclose(logfile);
+        (void)fclose(logfile);
         logfile = NULL;
     }
 }

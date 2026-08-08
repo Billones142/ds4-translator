@@ -1,0 +1,54 @@
+name: Lint
+
+# The project's linter is baked into the Makefile: STRICT_WARNINGS
+# (-Wall -Wextra -Werror -Wshadow -Wformat=2 ...) makes gcc/g++ reject
+# the build on any warning, so building with these flags *is* the lint
+# check. Run both the release and debug variants since debug flips on
+# -DDS4_DEBUG, which can guard code paths not compiled otherwise.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          # gcc/g++-multilib provide -m32 support, needed for the
+          # 32-bit libudev-sony-spoof32.so target alongside the 64-bit one.
+          sudo apt-get install -y build-essential gcc-multilib g++-multilib
+
+      - name: Lint (release build, warnings-as-errors)
+        run: make all
+
+      - name: Lint (debug build, warnings-as-errors)
+        run: make debug
+
+  clang-tidy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install clang-tidy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tidy
+
+      - name: Run clang-tidy (checks + WarningsAsErrors from .clang-tidy)
+        run: |
+          set -e
+          for f in src/*.cpp; do
+            echo "=== $f ==="
+            clang-tidy "$f" -- -std=c++17 -Isrc -DDS4_VERSION=\"ci\"
+          done
+          for f in src/*.c; do
+            echo "=== $f ==="
+            clang-tidy "$f" -- -Isrc -DDS4_VERSION=\"ci\"
+          done
