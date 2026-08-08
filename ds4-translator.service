@@ -7,9 +7,9 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
-ExecStartPre=-/usr/bin/modprobe raw_gadget
 ExecStartPre=-/usr/bin/modprobe dummy_hcd
 ExecStartPre=-/usr/bin/modprobe libcomposite
+ExecStartPre=-/usr/bin/modprobe usb_f_fs
 ExecStart=/usr/local/bin/ds4-translator
 Restart=on-failure
 RestartSec=10

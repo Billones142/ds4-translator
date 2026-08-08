@@ -47,37 +47,51 @@ The daemon uses the kernel's User-space HID (`/dev/uhid`) driver to create a vir
   - It exposes a virtual MAC address (`74:e7:d6:3a:47:e8`) that matches the `uniq` field in UHID registration and the responses to Feature Reports `0x09` (DualSense pairing) and `0x12` (DS4 pairing).
   - It handles `UHID_GET_REPORT` and responds to Feature Reports `0x05` (calibration data) and `0x20` (firmware info) with authentic byte payloads from real controllers. This satisfies game security checks (like those in native PlayStation PC ports like *Jedi: Survivor*) which would otherwise reject mock devices.
 
-### 3a. Alternative Backends (experimental)
+### 3a. Backend Selection (per controller type)
 
 UHID skips real USB enumeration entirely — the kernel's HID subsystem
 receives a fully-formed device with no `GET_DESCRIPTOR`/`SET_CONFIGURATION`
-handshake. Two alternative backends instead present a genuinely enumerated
-USB device, selectable at runtime via `ds4-ctl set-backend <uhid|gadget|hidg>`
-(persisted to `/etc/ds4-translator.conf` as `backend=...`, alongside `type=`):
+handshake. That's confirmed to matter: some Wine/Proton titles never detect
+a DS4 emulated this way, no matter the configuration. `functionfs`
+(`src/functionfs-backend.c`) instead presents a genuinely enumerated USB
+device and is confirmed to fix that detection failure. DualSense emulation
+never showed the issue on either backend.
 
-* **`gadget`** (`src/raw-gadget-backend.c`): uses `/dev/raw-gadget` bound to
-  the `dummy_hcd` kernel module's `dummy_udc.0`, hand-rolling every USB
-  control-transfer response (device/config/string/HID/report descriptors,
-  `SET_CONFIGURATION`, `SET_REPORT`, `SET_IDLE`) itself.
-* **`hidg`** (`src/hidg-backend.c`): builds the same USB gadget via configfs
-  (`/sys/kernel/config/usb_gadget/`) using the kernel's built-in `f_hid`
-  function, bound to the same `dummy_udc.0`. The kernel handles the USB
-  control-transfer handshake itself; userspace only reads/writes HID reports
-  on the resulting `/dev/hidgN` node.
+DS4 and DualSense each have their own independent backend setting because
+of this — `ds4-ctl set-backend <ds4|dualsense> <uhid|functionfs>`, persisted
+to `/etc/ds4-translator.conf` as `backend_ds4=`/`backend_dualsense=`
+alongside `type=`, defaulting to `ds4=functionfs`, `dualsense=uhid`. Either
+type can still be pointed at either backend if wanted (`functionfs` works
+for DualSense too); only the defaults differ.
 
-  It answers control-transfer GET_REPORT requests (calibration data, pairing
-  info — see section 3 above) via the `GADGET_HID_READ_GET_REPORT_ID`/
-  `GADGET_HID_WRITE_GET_REPORT` ioctls (`linux/usb/g_hid.h`) with the same
-  authentic payloads UHID and `gadget` serve.
+`functionfs` builds the gadget via configfs
+(`/sys/kernel/config/usb_gadget/`) using the generic `ffs` function, mounted
+at `/dev/ffs-ds4emu0` and bound to the `dummy_hcd` kernel module's
+`dummy_udc.0`. Standard requests (`GET_DESCRIPTOR` for device/config/string,
+`SET_CONFIGURATION`, `SET_INTERFACE`) are answered by the gadget core itself
+below FunctionFS — userspace (`ep0_loop()`) only sees the HID-specific class
+requests (`GET_REPORT`/`SET_REPORT`/`SET_IDLE`) and the interface's own
+`GET_DESCRIPTOR(HID_REPORT)`, read and answered directly as plain
+`read()`/`write()` on `ep0`. Modeled after
+[senseshock](https://github.com/muhammad23012009/senseshock)'s use of
+FunctionFS for the same purpose (emulating a DS4 over a from-scratch USB
+gadget), adapted to this project's own report descriptors and feature-report
+tables (see section 3 above for the HW/FW version fields it answers with).
 
-  **Known limitation**: those ioctls were added to `f_hid` around 2022; on
-  older kernels without them, `hidg-backend.c` detects the unsupported ioctl
-  at startup and falls back to the kernel's built-in zero-filled/stall
-  response for feature reports instead.
+`functionfs` is opt-in and falls back to `uhid` automatically if device
+creation fails (`create_virtual_device()` in `main.cpp`). It's the only
+backend confirmed working end-to-end against real hardware — kernel's
+`hid-playstation` driver binds to it, creates `hidraw`/input/Motion
+Sensors/Touchpad nodes, and it's confirmed to fix DS4 detection in
+Wine/Proton titles that never detected the `uhid` DS4.
 
-Both are opt-in and fall back to `uhid` automatically if device creation
-fails (`create_virtual_device()` in `main.cpp`). Neither has been verified
-end-to-end against real hardware — see README Known Issues.
+Two earlier alternative backends (`gadget`, hand-rolled `/dev/raw-gadget`
+ioctls; `hidg`, configfs + kernel `f_hid`) were removed after `functionfs`
+proved out real-enumeration DS4 detection — an unrelated udev bug (see
+`72-ds4-translator-hide.rules`'s `DEVPATH!=` guard) had silently kept both
+of them from ever being reachable at all, so neither was ever actually
+confirmed working, and `functionfs` already covers the same real-enumeration
+path without their raw ioctl/kernel-source-reverse-engineering surface area.
 
 ---
 

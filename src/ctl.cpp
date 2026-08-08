@@ -27,9 +27,12 @@ void print_usage() {
     std::cout << "  set-type <ds4|dualsense|none|hidden>   Change the virtual controller emulation type at runtime" << std::endl;
     std::cout << "                                   (none = fully untouched physical passthrough, hidden = physical" << std::endl;
     std::cout << "                                   hidden from other apps but not translated)" << std::endl;
-    std::cout << "  set-backend <uhid|gadget|hidg>   Change the virtual controller backend at runtime (recreates the" << std::endl;
-    std::cout << "                                   device). uhid is the default/stable path; gadget and hidg both" << std::endl;
-    std::cout << "                                   emulate a real enumerated USB device instead and are experimental." << std::endl;
+    std::cout << "  set-backend <ds4|dualsense> <uhid|functionfs>   Change that controller type's backend at" << std::endl;
+    std::cout << "                                   runtime (recreates the device if that type is currently" << std::endl;
+    std::cout << "                                   active, otherwise just persists for later). Defaults:" << std::endl;
+    std::cout << "                                   dualsense=uhid, ds4=functionfs -- uhid never reliably" << std::endl;
+    std::cout << "                                   enumerates as a real USB device, which some Wine/Proton" << std::endl;
+    std::cout << "                                   titles need to detect DS4 emulation; functionfs does." << std::endl;
     std::cout << "  create-virtual <ds4|dualsense>   Create a standalone virtual controller, no physical pad needed" << std::endl;
     std::cout << "  destroy-virtual                  Destroy the standalone virtual controller" << std::endl;
     std::cout << "  virtual [ds4|dualsense] [--auto] Create (if needed) a standalone virtual controller and open" << std::endl;
@@ -105,7 +108,7 @@ static void print_daemon_unreachable_help() {
     std::cerr << "  2. View recent logs from the daemon:" << std::endl;
     std::cerr << "     journalctl -u ds4-translator.service -n 20" << std::endl;
     std::cerr << "  3. Verify kernel modules are loaded:" << std::endl;
-    std::cerr << "     lsmod | grep -E \"raw_gadget|dummy_hcd\"" << std::endl;
+    std::cerr << "     lsmod | grep -E \"dummy_hcd|libcomposite|usb_f_fs\"" << std::endl;
 }
 
 // ---------- Interactive virtual controller button tester ----------
@@ -187,7 +190,7 @@ static const CommandSpec kCommands[] = {
     {"version",          nullptr},
     {"status",           nullptr},
     {"set-type",         "ds4 dualsense none hidden"},
-    {"set-backend",      "uhid gadget hidg"},
+    {"set-backend",      nullptr}, // position-aware, special-cased in --complete-args below
     {"create-virtual",   "ds4 dualsense"},
     {"destroy-virtual",  nullptr},
     {"virtual",          "ds4 dualsense --auto"},
@@ -716,6 +719,18 @@ int main(int argc, char* argv[]) {
         std::string target = argv[2];
         if (target == "tap") {
             std::cout << button_names_joined() << std::endl;
+        } else if (target == "set-backend") {
+            // Position-aware (unlike every other command here): argv[3], if
+            // present, is the controller word already typed -- offer
+            // ds4/dualsense first, then uhid/functionfs once one of those is
+            // picked. argv[3:] wasn't passed at all until
+            // ds4-ctl-completion.bash started forwarding every prior word
+            // instead of just the command name.
+            if (argc <= 3) {
+                std::cout << "ds4 dualsense" << std::endl;
+            } else if (argc == 4) {
+                std::cout << "uhid functionfs" << std::endl;
+            }
         } else if (const CommandSpec *spec = find_command(target)) {
             if (spec->arg_completions) std::cout << spec->arg_completions << std::endl;
         }
@@ -759,7 +774,23 @@ int main(int argc, char* argv[]) {
     }
 
     std::string full_cmd = cmd;
-    if (cmd == "set-type" || cmd == "create-virtual" || cmd == "set-backend") {
+    if (cmd == "set-backend") {
+        if (argc < 4) {
+            std::cerr << "Error: set-backend requires <ds4|dualsense> <uhid|functionfs>" << std::endl;
+            return 1;
+        }
+        std::string ctrl = argv[2];
+        std::string backend = argv[3];
+        if (ctrl != "ds4" && ctrl != "dualsense") {
+            std::cerr << "Error: Invalid controller type. Supported: ds4 dualsense" << std::endl;
+            return 1;
+        }
+        if (backend != "uhid" && backend != "functionfs") {
+            std::cerr << "Error: Invalid backend. Supported: uhid functionfs" << std::endl;
+            return 1;
+        }
+        full_cmd += " " + ctrl + " " + backend;
+    } else if (cmd == "set-type" || cmd == "create-virtual") {
         if (argc < 3) {
             std::cerr << "Error: " << cmd << " requires a target type (" << spec->arg_completions << ")" << std::endl;
             return 1;
