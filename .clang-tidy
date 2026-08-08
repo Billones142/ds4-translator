@@ -1,0 +1,30 @@
+---
+# This project talks to the kernel through raw ioctls, configfs, and
+# packed HID structs -- exactly where UB, unsafe casts, and unchecked
+# buffer/size arithmetic turn into silent low-level bugs or security
+# holes. bugprone/cert/clang-analyzer target that; cppcoreguidelines
+# is trimmed to its security-relevant subset (pro-type-*, pro-bounds-*)
+# since the full profile is too style-opinionated for a C-flavored
+# codebase talking directly to kernel ABIs.
+Checks: >
+  -*,
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  portability-*,
+  -bugprone-easily-swappable-parameters,
+  -cert-err58-cpp,
+  -clang-analyzer-optin.performance.Padding,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
+
+# cppcoreguidelines-pro-bounds-*/pro-type-vararg were tried and dropped:
+# they flag every raw array index and every snprintf call, which is the
+# baseline idiom for this codebase's HID/struct handling, not a security
+# issue on its own -- pure noise here.
+#
+# clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
+# pushes memcpy/memset towards C11 Annex K's memcpy_s/memset_s, which
+# glibc on Linux doesn't implement -- an unfixable false positive.
+
+WarningsAsErrors: '*'
+HeaderFilterRegex: '^.*/src/.*'

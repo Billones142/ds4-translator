@@ -19,6 +19,11 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/wait.h>
+#include <sstream>
+#include <cstdlib>
+#include <cerrno>
+#include <climits>
 
 #include "descriptors.h"
 #include "functionfs-backend.h"
@@ -262,6 +267,72 @@ std::vector<std::string> get_event_nodes(const std::string& hidraw_name) {
     return event_nodes;
 }
 
+// Runs an external program directly via fork/exec, bypassing the shell --
+// unlike system(), argv entries are passed as-is with no quoting/escaping
+// step, so a path containing a shell metacharacter can't turn into command
+// injection. Stderr is discarded (matches the "2>/dev/null" callers this
+// replaces, which is fine here: they're best-effort, non-fatal cleanup).
+static void run_no_shell(const char* path, std::initializer_list<const char*> args) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+        std::vector<char*> argv;
+        argv.push_back(const_cast<char*>(path));
+        for (const char* a : args) argv.push_back(const_cast<char*>(a));
+        argv.push_back(nullptr);
+        execvp(path, argv.data());
+        _exit(127);
+    } else if (pid > 0) {
+        int status;
+        waitpid(pid, &status, 0);
+    }
+}
+
+// Runs `udevadm trigger` after a delay, detached from this process (double
+// fork: the immediate child exits right away, orphaning the grandchild to
+// init, so the parent's waitpid() below returns almost instantly instead of
+// blocking for the delay+trigger). See the call site for why this needs to
+// be non-blocking, and why a shell (system()) isn't needed for it either.
+static void background_delayed_udevadm_trigger() {
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (fork() == 0) {
+            usleep(250000);
+            int devnull = open("/dev/null", O_WRONLY);
+            if (devnull >= 0) {
+                dup2(devnull, STDOUT_FILENO);
+                dup2(devnull, STDERR_FILENO);
+                close(devnull);
+            }
+            execlp("udevadm", "udevadm", "trigger", (char*)nullptr);
+            _exit(127);
+        }
+        _exit(0);
+    } else if (pid > 0) {
+        int status;
+        waitpid(pid, &status, 0);
+    }
+}
+
+// strtoul-based replacement for sscanf's %u/%x conversions: the IPC control
+// socket (see setup_ipc_socket()) is bound 0666 so any local user can send
+// it commands, and unlike sscanf, strtoul actually reports out-of-range and
+// non-numeric input via errno/endptr rather than silently truncating it.
+static bool parse_unsigned_token(const std::string& tok, int base, unsigned int& out) {
+    if (tok.empty()) return false;
+    errno = 0;
+    char* end = nullptr;
+    unsigned long v = strtoul(tok.c_str(), &end, base);
+    if (end != tok.c_str() + tok.size()) return false; // trailing junk
+    if (errno == ERANGE || v > UINT_MAX) return false;
+    out = (unsigned int)v;
+    return true;
+}
+
 // Forces the kernel to fully destroy and recreate the physical controller's
 // hid/hidraw/input device nodes, equivalent to a real unplug+replug, by
 // unbinding and rebinding its HID driver via sysfs. Needed on any type
@@ -316,7 +387,7 @@ bool rebind_physical_hid_driver(const std::string& hidraw_name) {
     bind_f << hid_id;
     bind_f.close();
 
-    system("udevadm settle --timeout=2");
+    run_no_shell("udevadm", {"settle", "--timeout=2"});
 
     return true;
 }
@@ -576,7 +647,7 @@ bool create_virtual_device(ControllerType type) {
         // kernel's raw_request timeout (-EIO), which fails DS4 probe entirely
         // ("Failed to retrieve DualShock4 pairing info", "probe ... failed with
         // error -5") and leaves the device with no hidraw/input nodes at all.
-        system("(sleep 0.25 && udevadm trigger) >/dev/null 2>&1 &");
+        background_delayed_udevadm_trigger();
         return true;
     }
     return false;
@@ -862,8 +933,8 @@ int main(int argc, char* argv[]) {
     backend_type = (target_type == TYPE_DS4) ? backend_for_ds4 : backend_for_dualsense;
     std::cout << "Using " << backend_type_name(backend_type) << " backend." << std::endl;
 
-    std::signal(SIGINT, signal_handler);
-    std::signal(SIGTERM, signal_handler);
+    (void)std::signal(SIGINT, signal_handler);
+    (void)std::signal(SIGTERM, signal_handler);
 
     std::cout << "Starting DS4 Translator daemon..." << std::endl;
     std::cout << "Initial Target Emulation: " << controller_type_name(target_type) << std::endl;
@@ -878,7 +949,7 @@ int main(int argc, char* argv[]) {
     if (target_type == TYPE_NONE) {
         std::ofstream f("/run/ds4-translator.none");
         f.close();
-        system("udevadm trigger");
+        run_no_shell("udevadm", {"trigger"});
     } else {
         unlink("/run/ds4-translator.none");
     }
@@ -979,7 +1050,7 @@ int main(int argc, char* argv[]) {
             bool vdev_exists = (backend_type == BACKEND_FUNCTIONFS) ? virtual_functionfs.device_open : (uhid_fd >= 0);
             if (vdev_exists && last_virtual_valid) {
                 char buf[160];
-                snprintf(buf, sizeof(buf), "STATE VIRTUAL %u %u %u %u %u %u %02x %02x %02x\n",
+                (void)snprintf(buf, sizeof(buf), "STATE VIRTUAL %u %u %u %u %u %u %02x %02x %02x\n",
                          last_virtual_common.x, last_virtual_common.y, last_virtual_common.rx, last_virtual_common.ry,
                          last_virtual_common.z, last_virtual_common.rz,
                          last_virtual_common.buttons[0], last_virtual_common.buttons[1], last_virtual_common.buttons[2]);
@@ -989,7 +1060,7 @@ int main(int argc, char* argv[]) {
             }
         } else if (last_phy_valid) {
             char buf[160];
-            snprintf(buf, sizeof(buf), "STATE PHYSICAL %u %u %u %u %u %u %02x %02x %02x\n",
+            (void)snprintf(buf, sizeof(buf), "STATE PHYSICAL %u %u %u %u %u %u %02x %02x %02x\n",
                      last_phy_common.x, last_phy_common.y, last_phy_common.rx, last_phy_common.ry,
                      last_phy_common.z, last_phy_common.rz,
                      last_phy_common.buttons[0], last_phy_common.buttons[1], last_phy_common.buttons[2]);
@@ -1047,7 +1118,7 @@ int main(int argc, char* argv[]) {
                         // before /run/ds4-translator.sock existed) grants the active user rw
                         // access regardless of the 0600 mode bits above, so it must be cleared
                         // explicitly or unprivileged games can still open the node directly.
-                        system(("setfacl -b '" + phy_path + "' 2>/dev/null").c_str());
+                        run_no_shell("setfacl", {"-b", phy_path.c_str()});
 
                         // Grab and hide input events (event and js nodes)
                         std::vector<std::string> event_paths = get_event_nodes(phy_name);
@@ -1166,7 +1237,7 @@ int main(int argc, char* argv[]) {
             p.fd = phy_fd;
             p.events = POLLIN;
             pfds.push_back(p);
-            phy_poll_idx = pfds.size() - 1;
+            phy_poll_idx = static_cast<int>(pfds.size() - 1);
         }
         if (backend_type == BACKEND_FUNCTIONFS) {
             // EP0/OUT events handled by dedicated backend threads — no fd polling needed
@@ -1176,7 +1247,7 @@ int main(int argc, char* argv[]) {
                 p.fd = uhid_fd;
                 p.events = POLLIN;
                 pfds.push_back(p);
-                uhid_poll_idx = pfds.size() - 1;
+                uhid_poll_idx = static_cast<int>(pfds.size() - 1);
             }
         }
         if (server_fd >= 0) {
@@ -1184,7 +1255,7 @@ int main(int argc, char* argv[]) {
             p.fd = server_fd;
             p.events = POLLIN;
             pfds.push_back(p);
-            server_poll_idx = pfds.size() - 1;
+            server_poll_idx = static_cast<int>(pfds.size() - 1);
         }
 
         int poll_timeout = standalone_virtual ? 8 : (test_subscribers.empty() ? 1000 : 33);
@@ -1309,10 +1380,20 @@ int main(int argc, char* argv[]) {
                         if (!standalone_virtual) {
                             response = "Error: No standalone virtual controller is active. Use create-virtual (or ds4-ctl virtual) first.";
                         } else {
-                            unsigned int buttons_val, dpad_val, lx_val, ly_val, rx_val, ry_val, l2_val, r2_val;
-                            int n = sscanf(cmd.c_str(), "input %x %u %u %u %u %u %u %u",
-                                           &buttons_val, &dpad_val, &lx_val, &ly_val, &rx_val, &ry_val, &l2_val, &r2_val);
-                            if (n != 8) {
+                            unsigned int buttons_val = 0, dpad_val = 0, lx_val = 0, ly_val = 0, rx_val = 0, ry_val = 0, l2_val = 0, r2_val = 0;
+                            std::istringstream iss(cmd.substr(6)); // past "input "
+                            std::vector<std::string> toks;
+                            for (std::string t; iss >> t; ) toks.push_back(t);
+                            bool parsed = toks.size() == 8 &&
+                                parse_unsigned_token(toks[0], 16, buttons_val) &&
+                                parse_unsigned_token(toks[1], 10, dpad_val) &&
+                                parse_unsigned_token(toks[2], 10, lx_val) &&
+                                parse_unsigned_token(toks[3], 10, ly_val) &&
+                                parse_unsigned_token(toks[4], 10, rx_val) &&
+                                parse_unsigned_token(toks[5], 10, ry_val) &&
+                                parse_unsigned_token(toks[6], 10, l2_val) &&
+                                parse_unsigned_token(toks[7], 10, r2_val);
+                            if (!parsed) {
                                 response = "Error: malformed input command";
                             } else {
                                 synth_state.buttons = (uint16_t)buttons_val;
@@ -1502,15 +1583,15 @@ int main(int argc, char* argv[]) {
                 standalone_virtual = false;
                 std::ofstream f("/run/ds4-translator.none");
                 f.close();
-                system("udevadm trigger");
+                run_no_shell("udevadm", {"trigger"});
             } else if (target_type == TYPE_HIDDEN) {
                 std::cout << "Emulation type set to Hidden. Disabling translation but keeping the physical controller hidden." << std::endl;
                 standalone_virtual = false;
                 unlink("/run/ds4-translator.none");
-                system("udevadm trigger");
+                run_no_shell("udevadm", {"trigger"});
             } else {
                 unlink("/run/ds4-translator.none");
-                system("udevadm trigger");
+                run_no_shell("udevadm", {"trigger"});
 
                 if (!had_physical && standalone_virtual) {
                     // A standalone virtual controller (no hardware) was
@@ -1857,12 +1938,12 @@ int main(int argc, char* argv[]) {
                             if (motor_left != cur_motor_left || motor_right != cur_motor_right || r != cur_r || g != cur_g || b != cur_b) {
                                 if (r != cur_r || g != cur_g || b != cur_b) {
                                     char buf[64];
-                                    snprintf(buf, sizeof(buf), "LED r=%u g=%u b=%u", r, g, b);
+                                    (void)snprintf(buf, sizeof(buf), "LED r=%u g=%u b=%u", r, g, b);
                                     test_log_event(buf);
                                 }
                                 if (motor_left != cur_motor_left || motor_right != cur_motor_right) {
                                     char buf[64];
-                                    snprintf(buf, sizeof(buf), "RUMBLE left=%u right=%u", motor_left, motor_right);
+                                    (void)snprintf(buf, sizeof(buf), "RUMBLE left=%u right=%u", motor_left, motor_right);
                                     test_log_event(buf);
                                 }
                                 cur_motor_left = motor_left;
@@ -1877,6 +1958,8 @@ int main(int argc, char* argv[]) {
                         }
                         break;
                     }
+                    default:
+                        break; // unhandled UHID event types (kernel API is non-enum) are ignored
                 }
             }
         }

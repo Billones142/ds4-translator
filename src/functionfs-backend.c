@@ -130,7 +130,7 @@ static bool write_file_str(const char *path, const char *content) {
     ssize_t written = write(fd, content, len);
     close(fd);
     if (written != (ssize_t)len) {
-        fprintf(stderr, "Short write to %s\n", path);
+        (void)fprintf(stderr, "Short write to %s\n", path);
         return false;
     }
     return true;
@@ -165,7 +165,7 @@ static void teardown_gadget_dir(void) {
 static bool ensure_configfs_mounted(void) {
     struct stat st;
     if (stat("/sys/kernel/config", &st) != 0) {
-        fprintf(stderr, "/sys/kernel/config does not exist -- is CONFIG_CONFIGFS_FS enabled?\n");
+        (void)fprintf(stderr, "/sys/kernel/config does not exist -- is CONFIG_CONFIGFS_FS enabled?\n");
         return false;
     }
     if (stat("/sys/kernel/config/usb_gadget", &st) == 0) {
@@ -178,7 +178,7 @@ static bool ensure_configfs_mounted(void) {
     if (stat("/sys/kernel/config/usb_gadget", &st) == 0) {
         return true;
     }
-    fprintf(stderr, "/sys/kernel/config/usb_gadget does not exist -- is the libcomposite kernel module loaded? (modprobe libcomposite)\n");
+    (void)fprintf(stderr, "/sys/kernel/config/usb_gadget does not exist -- is the libcomposite kernel module loaded? (modprobe libcomposite)\n");
     return false;
 }
 
@@ -195,10 +195,10 @@ static bool find_udc(char *out, size_t out_size) {
     while ((entry = readdir(d)) != NULL) {
         if (entry->d_name[0] == '.') continue;
         if (!found) {
-            snprintf(first, sizeof(first), "%s", entry->d_name);
+            (void)snprintf(first, sizeof(first), "%s", entry->d_name);
         }
         if (strncmp(entry->d_name, "dummy_udc", 9) == 0) {
-            snprintf(out, out_size, "%s", entry->d_name);
+            (void)snprintf(out, out_size, "%s", entry->d_name);
             found = true;
             break;
         }
@@ -206,10 +206,10 @@ static bool find_udc(char *out, size_t out_size) {
     closedir(d);
     if (found) return true;
     if (first[0] != '\0') {
-        snprintf(out, out_size, "%s", first);
+        (void)snprintf(out, out_size, "%s", first);
         return true;
     }
-    fprintf(stderr, "No UDC found under /sys/class/udc -- is dummy_hcd loaded?\n");
+    (void)fprintf(stderr, "No UDC found under /sys/class/udc -- is dummy_hcd loaded?\n");
     return false;
 }
 
@@ -277,8 +277,8 @@ static size_t build_ffs_descriptors(int target_type, uint8_t *buf) {
     memcpy(header, &magic, 4);
     memcpy(header + 4, &total_len32, 4);
     memcpy(header + 8, &flags, 4);
-    memcpy(header + 12, &fs_count, 4);
-    memcpy(header + 16, &hs_count, 4);
+    memcpy(header + 12, &fs_count, 4); // NOLINT(bugprone-not-null-terminated-result) -- fixed-size uint32 field, not a string
+    memcpy(header + 16, &hs_count, 4); // NOLINT(bugprone-not-null-terminated-result) -- fixed-size uint32 field, not a string
     (void)descs_len;
 
     return total_len;
@@ -640,7 +640,7 @@ bool functionfs_init(struct FunctionFSDevice *dev, int target_type) {
         return false;
     }
     char udc_line[300];
-    snprintf(udc_line, sizeof(udc_line), "%s\n", udc_name);
+    (void)snprintf(udc_line, sizeof(udc_line), "%s\n", udc_name);
     if (!write_file_str(GADGET_DIR "/UDC", udc_line)) {
         teardown_gadget_dir();
         return false;

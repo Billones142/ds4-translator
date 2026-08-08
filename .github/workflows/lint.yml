@@ -29,3 +29,26 @@ jobs:
 
       - name: Lint (debug build, warnings-as-errors)
         run: make debug
+
+  clang-tidy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install clang-tidy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tidy
+
+      - name: Run clang-tidy (checks + WarningsAsErrors from .clang-tidy)
+        run: |
+          set -e
+          for f in src/*.cpp; do
+            echo "=== $f ==="
+            clang-tidy "$f" -- -std=c++17 -Isrc -DDS4_VERSION=\"ci\"
+          done
+          for f in src/*.c; do
+            echo "=== $f ==="
+            clang-tidy "$f" -- -Isrc -DDS4_VERSION=\"ci\"
+          done
