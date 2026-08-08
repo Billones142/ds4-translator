@@ -1513,7 +1513,7 @@ int main(int argc, char* argv[]) {
                         if (write(client_fd, header.c_str(), header.size()) >= 0) {
                             for (const auto& ev : test_event_log) {
                                 std::string msg = "EVENT " + ev + "\n";
-                                (void)write(client_fd, msg.c_str(), msg.size());
+                                if (write(client_fd, msg.c_str(), msg.size()) < 0) break; // dead fd; later ticks will drop it
                             }
                             test_subscribers.push_back(client_fd);
                         } else {
@@ -1521,7 +1521,9 @@ int main(int argc, char* argv[]) {
                         }
                     }
                     if (!keep_open) {
-                        (void)write(client_fd, response.c_str(), response.size());
+                        if (write(client_fd, response.c_str(), response.size()) < 0) {
+                            // client already gone; nothing to do but close below
+                        }
                         close(client_fd);
                     }
                 }
