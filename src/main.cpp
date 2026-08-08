@@ -219,9 +219,12 @@ struct SyntheticState {
 };
 SyntheticState synth_state;
 
-// Scan /dev/ for physical DualShock 4
+// Scan /dev/ for physical DualShock 4. USB is always preferred over
+// Bluetooth when both are present -- a full scan is needed for this (unlike
+// the old early-return-on-Bluetooth version) since which one appears first
+// in directory_iterator() order isn't guaranteed.
 std::string find_physical_ds4(bool& out_is_bluetooth) {
-    std::string found_name = "";
+    std::string usb_match, bt_match;
     for (const auto& entry : fs::directory_iterator("/dev")) {
         std::string name = entry.path().filename().string();
         if (name.rfind("hidraw", 0) == 0) {
@@ -232,12 +235,9 @@ std::string find_physical_ds4(bool& out_is_bluetooth) {
                 if (ioctl(fd, HIDIOCGRAWINFO, &info) >= 0) {
                     if (info.vendor == 0x054c && (info.product == 0x05c4 || info.product == 0x09cc)) {
                         if (info.bustype == 0x05) { // BUS_BLUETOOTH
-                            close(fd);
-                            out_is_bluetooth = true;
-                            return name;
+                            bt_match = name;
                         } else {
-                            found_name = name;
-                            out_is_bluetooth = false;
+                            usb_match = name;
                         }
                     }
                 }
@@ -245,7 +245,15 @@ std::string find_physical_ds4(bool& out_is_bluetooth) {
             }
         }
     }
-    return found_name;
+    if (!usb_match.empty()) {
+        out_is_bluetooth = false;
+        return usb_match;
+    }
+    if (!bt_match.empty()) {
+        out_is_bluetooth = true;
+        return bt_match;
+    }
+    return "";
 }
 
 // Find event nodes for a hidraw device
@@ -315,6 +323,108 @@ static void background_delayed_udevadm_trigger() {
     } else if (pid > 0) {
         int status;
         waitpid(pid, &status, 0);
+    }
+}
+
+// Opens dev_name's /dev/hidraw node and (unless for_type == TYPE_NONE)
+// restricts + grabs it and its event/js siblings, exactly like a fresh
+// physical-controller connect. Used both for that initial connect and for
+// a Bluetooth->USB hot-swap, so the newly-active interface is hidden
+// *before* the old one is ever released -- no window where neither or
+// both are exposed. Returns the opened hidraw fd (-1 on failure); on
+// success fills out_path/out_orig_mode/out_hidden_nodes.
+int open_and_hide_physical(const std::string& dev_name, ControllerType for_type,
+                            std::string& out_path, mode_t& out_orig_mode,
+                            std::vector<PhysicalNode>& out_hidden_nodes) {
+    out_path = "/dev/" + dev_name;
+    int fd = open(out_path.c_str(), O_RDWR | O_NONBLOCK);
+    if (fd < 0) {
+        return -1;
+    }
+
+    // TYPE_NONE is a fully hands-off passthrough mode: the physical
+    // controller is left completely untouched (no hidraw/event hiding, no
+    // battery hiding) so other apps see the exact same real device they
+    // would without this daemon running at all. Every other type
+    // (TYPE_HIDDEN included) hides it, same as before.
+    if (for_type != TYPE_NONE) {
+        // Restrict physical hidraw node to 0600 so unprivileged games ignore it
+        struct stat phy_st;
+        if (fstat(fd, &phy_st) == 0) {
+            out_orig_mode = phy_st.st_mode & 0777;
+        }
+        chmod(out_path.c_str(), 0600);
+        // A stale ACL from systemd-logind's "uaccess" tag (granted before this
+        // daemon's udev rule could strip it, e.g. if the controller connected
+        // before /run/ds4-translator.sock existed) grants the active user rw
+        // access regardless of the 0600 mode bits above, so it must be cleared
+        // explicitly or unprivileged games can still open the node directly.
+        run_no_shell("setfacl", {"-b", out_path.c_str()});
+
+        // Grab and hide input events (event and js nodes)
+        std::vector<std::string> event_paths = get_event_nodes(dev_name);
+        for (const auto& ev_path : event_paths) {
+            PhysicalNode node;
+            node.path = ev_path;
+            node.fd = -1;
+            node.orig_mode = 0660;
+            node.is_grabbed = false;
+
+            struct stat node_st;
+            if (stat(ev_path.c_str(), &node_st) == 0) {
+                node.orig_mode = node_st.st_mode & 0777;
+            }
+
+            // EVIOCGRAB only blocks input *delivery* to other readers; it does
+            // NOT stop them from opening the node and querying its name/caps
+            // via EVIOCGNAME/EVIOCGBIT. That alone is enough for the browser
+            // Gamepad API / SDL to list the physical pad as a second, dead
+            // controller. Root-only 0600 (mirroring the hidraw fix) actually
+            // keeps other processes from opening it at all.
+            chmod(ev_path.c_str(), 0600);
+
+            // We only grab event nodes, not js nodes (EVIOCGRAB is only for evdev)
+            if (ev_path.find("event") != std::string::npos) {
+                int ev_fd = open(ev_path.c_str(), O_RDONLY | O_NONBLOCK);
+                if (ev_fd >= 0) {
+                    if (ioctl(ev_fd, EVIOCGRAB, 1) >= 0) {
+                        node.fd = ev_fd;
+                        node.is_grabbed = true;
+                        std::cout << "Successfully grabbed and hid event node: " << ev_path << std::endl;
+                    } else {
+                        std::cerr << "Warning: Failed to grab event node " << ev_path << ": " << strerror(errno) << std::endl;
+                        close(ev_fd);
+                    }
+                }
+            } else {
+                std::cout << "Successfully hid joystick node: " << ev_path << std::endl;
+            }
+            out_hidden_nodes.push_back(node);
+        }
+    } // for_type != TYPE_NONE
+
+    return fd;
+}
+
+// Releases a physical connection previously set up by open_and_hide_physical():
+// ungrabs/closes its event nodes, restores their and the hidraw node's
+// original permissions, and closes fd. Safe to call with fd < 0 or an
+// already-empty hidden_nodes (no-op in that case beyond the mode restore).
+void release_physical_connection(int fd, const std::string& path, mode_t orig_mode,
+                                  std::vector<PhysicalNode>& hidden_nodes) {
+    for (auto& node : hidden_nodes) {
+        if (node.is_grabbed && node.fd >= 0) {
+            ioctl(node.fd, EVIOCGRAB, 0);
+            close(node.fd);
+        }
+        chmod(node.path.c_str(), node.orig_mode);
+    }
+    hidden_nodes.clear();
+    if (fd >= 0) {
+        close(fd);
+    }
+    if (!path.empty()) {
+        chmod(path.c_str(), orig_mode);
     }
 }
 
@@ -984,6 +1094,17 @@ int main(int argc, char* argv[]) {
     std::string phy_path = "";
     mode_t orig_mode = 0660;
 
+    // The physical controller's *other* interface (Bluetooth, almost always)
+    // after a hot-swap to USB preempted it. Kept open, hidden and grabbed --
+    // just not polled for input -- so a) other apps can't grab it for raw
+    // double input while it's idle, and b) unplugging USB can revert to it
+    // instantly with no re-grab handshake and no disconnect grace period.
+    int shadow_fd = -1;
+    std::string shadow_name = "";
+    std::vector<PhysicalNode> shadow_hidden_nodes;
+    std::string shadow_path = "";
+    mode_t shadow_orig_mode = 0660;
+
     bool device_open = false;
 
     // True when the active backend's virtual device is fully set up and
@@ -1019,6 +1140,15 @@ int main(int argc, char* argv[]) {
 
     auto last_test_broadcast = std::chrono::steady_clock::now();
     constexpr auto TEST_BROADCAST_INTERVAL = std::chrono::milliseconds(33); // ~30Hz, plenty for a human-readable live view
+
+    // While connected over Bluetooth, periodically check whether a USB
+    // connection for the same controller has shown up, so plugging in a
+    // cable takes over immediately instead of waiting for the Bluetooth
+    // link to drop first (USB is always preferred, see find_physical_ds4()).
+    // Throttled well below the main loop's ~250Hz rate since each check
+    // means a full /dev scan + one ioctl per hidraw node.
+    auto last_usb_upgrade_check = std::chrono::steady_clock::now();
+    constexpr auto USB_UPGRADE_CHECK_INTERVAL = std::chrono::seconds(2);
 
     // A dropped physical connection (Bluetooth hiccup, brief unplug) used to
     // tear the virtual device down immediately, which is what actually made
@@ -1120,76 +1250,13 @@ int main(int argc, char* argv[]) {
                 
                 phy_name = name;
                 is_bluetooth = bt;
-                phy_path = "/dev/" + phy_name;
 
-                phy_fd = open(phy_path.c_str(), O_RDWR | O_NONBLOCK);
+                phy_fd = open_and_hide_physical(phy_name, target_type, phy_path, orig_mode, hidden_nodes);
                 if (phy_fd < 0) {
                     std::cerr << "Failed to open physical controller: " << strerror(errno) << std::endl;
                     phy_fd = -1;
                     phy_name = "";
                 } else {
-                    // TYPE_NONE is a fully hands-off passthrough mode: the
-                    // physical controller is left completely untouched (no
-                    // hidraw/event hiding, no battery hiding) so other apps
-                    // see the exact same real device they would without this
-                    // daemon running at all. Every other type (TYPE_HIDDEN
-                    // included) hides it, same as before.
-                    if (target_type != TYPE_NONE) {
-                        // Restrict physical hidraw node to 0600 so unprivileged games ignore it
-                        struct stat phy_st;
-                        if (fstat(phy_fd, &phy_st) == 0) {
-                            orig_mode = phy_st.st_mode & 0777;
-                        }
-                        chmod(phy_path.c_str(), 0600);
-                        // A stale ACL from systemd-logind's "uaccess" tag (granted before this
-                        // daemon's udev rule could strip it, e.g. if the controller connected
-                        // before /run/ds4-translator.sock existed) grants the active user rw
-                        // access regardless of the 0600 mode bits above, so it must be cleared
-                        // explicitly or unprivileged games can still open the node directly.
-                        run_no_shell("setfacl", {"-b", phy_path.c_str()});
-
-                        // Grab and hide input events (event and js nodes)
-                        std::vector<std::string> event_paths = get_event_nodes(phy_name);
-                        for (const auto& ev_path : event_paths) {
-                            PhysicalNode node;
-                            node.path = ev_path;
-                            node.fd = -1;
-                            node.orig_mode = 0660;
-                            node.is_grabbed = false;
-
-                            struct stat node_st;
-                            if (stat(ev_path.c_str(), &node_st) == 0) {
-                                node.orig_mode = node_st.st_mode & 0777;
-                            }
-
-                            // EVIOCGRAB only blocks input *delivery* to other readers; it does
-                            // NOT stop them from opening the node and querying its name/caps
-                            // via EVIOCGNAME/EVIOCGBIT. That alone is enough for the browser
-                            // Gamepad API / SDL to list the physical pad as a second, dead
-                            // controller. Root-only 0600 (mirroring the hidraw fix) actually
-                            // keeps other processes from opening it at all.
-                            chmod(ev_path.c_str(), 0600);
-
-                            // We only grab event nodes, not js nodes (EVIOCGRAB is only for evdev)
-                            if (ev_path.find("event") != std::string::npos) {
-                                int ev_fd = open(ev_path.c_str(), O_RDONLY | O_NONBLOCK);
-                                if (ev_fd >= 0) {
-                                    if (ioctl(ev_fd, EVIOCGRAB, 1) >= 0) {
-                                        node.fd = ev_fd;
-                                        node.is_grabbed = true;
-                                        std::cout << "Successfully grabbed and hid event node: " << ev_path << std::endl;
-                                    } else {
-                                        std::cerr << "Warning: Failed to grab event node " << ev_path << ": " << strerror(errno) << std::endl;
-                                        close(ev_fd);
-                                    }
-                                }
-                            } else {
-                                std::cout << "Successfully hid joystick node: " << ev_path << std::endl;
-                            }
-                            hidden_nodes.push_back(node);
-                        }
-                    } // target_type != TYPE_NONE
-
                     bool created = true;
                     bool reused_existing = false;
                     if (target_type == TYPE_NONE) {
@@ -1210,17 +1277,8 @@ int main(int argc, char* argv[]) {
                     }
 
                     if (!created) {
-                        for (auto& node : hidden_nodes) {
-                            if (node.is_grabbed && node.fd >= 0) {
-                                ioctl(node.fd, EVIOCGRAB, 0);
-                                close(node.fd);
-                            }
-                            chmod(node.path.c_str(), node.orig_mode);
-                        }
-                        hidden_nodes.clear();
-                        close(phy_fd);
+                        release_physical_connection(phy_fd, phy_path, orig_mode, hidden_nodes);
                         phy_fd = -1;
-                        chmod(phy_path.c_str(), orig_mode);
                         phy_name = "";
                         usleep(500000); // Sleep 500ms before retrying
                     } else {
@@ -1253,10 +1311,68 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
+        // Bluetooth is active; periodically check whether USB has shown up
+        // for the same controller and hot-swap to it without disturbing the
+        // virtual device. The old (Bluetooth) connection is kept open and
+        // hidden as a shadow rather than released, so no window opens where
+        // raw input from either interface is exposed to other apps, and
+        // unplugging USB later can revert to it instantly (see the
+        // disconnect handling below).
+        else if (phy_fd >= 0 && is_bluetooth && !standalone_virtual && !ignore_physical) {
+            auto now = std::chrono::steady_clock::now();
+            if (now - last_usb_upgrade_check >= USB_UPGRADE_CHECK_INTERVAL) {
+                last_usb_upgrade_check = now;
+                bool candidate_bt = true;
+                std::string candidate = find_physical_ds4(candidate_bt);
+                if (!candidate.empty() && !candidate_bt) {
+                    std::string new_path;
+                    mode_t new_orig_mode = 0660;
+                    std::vector<PhysicalNode> new_hidden_nodes;
+                    int new_fd = open_and_hide_physical(candidate, target_type, new_path, new_orig_mode, new_hidden_nodes);
+                    if (new_fd >= 0) {
+                        std::cout << "USB connection detected for physical controller; switching from Bluetooth to /dev/"
+                                  << candidate << std::endl;
+
+                        shadow_fd = phy_fd;
+                        shadow_name = phy_name;
+                        shadow_path = phy_path;
+                        shadow_orig_mode = orig_mode;
+                        shadow_hidden_nodes = std::move(hidden_nodes);
+
+                        phy_fd = new_fd;
+                        phy_name = candidate;
+                        phy_path = new_path;
+                        orig_mode = new_orig_mode;
+                        hidden_nodes = std::move(new_hidden_nodes);
+                        is_bluetooth = false;
+
+                        // Re-applies the last known LED color to the physical pad
+                        // over the new interface, since a real DS4 resets its LED
+                        // when a fresh interface takes over even though our
+                        // virtual device (and cur_r/cur_g/cur_b) didn't change.
+                        // See the analogous reconnect handling above for why this
+                        // is detached (Bluetooth writes can block for seconds
+                        // regardless of O_NONBLOCK).
+                        if (controller_type_emulates(target_type)) {
+                            int dup_fd = dup(phy_fd);
+                            if (dup_fd >= 0) {
+                                std::thread([fd = dup_fd, r = cur_r, g = cur_g, b = cur_b]() {
+                                    send_physical_output_report(fd, false, 0, 0, r, g, b);
+                                    close(fd);
+                                }).detach();
+                            }
+                        }
+                    } else {
+                        std::cerr << "Failed to open USB controller for hot-swap: " << strerror(errno) << std::endl;
+                    }
+                }
+            }
+        }
 
         // Build poll FD set
         pfds.clear();
         int phy_poll_idx = -1;
+        int shadow_poll_idx = -1;
         int uhid_poll_idx = -1;
         int server_poll_idx = -1;
 
@@ -1266,6 +1382,13 @@ int main(int argc, char* argv[]) {
             p.events = POLLIN;
             pfds.push_back(p);
             phy_poll_idx = static_cast<int>(pfds.size() - 1);
+        }
+        if (shadow_fd >= 0) {
+            struct pollfd p;
+            p.fd = shadow_fd;
+            p.events = POLLIN;
+            pfds.push_back(p);
+            shadow_poll_idx = static_cast<int>(pfds.size() - 1);
         }
         if (backend_type == BACKEND_FUNCTIONFS) {
             // EP0/OUT events handled by dedicated backend threads — no fd polling needed
@@ -1338,6 +1461,11 @@ int main(int argc, char* argv[]) {
                         response += "Device Open by Host: " + std::string((vdev_configured()) ? "Yes" : "No") + "\n";
                         response += "Standalone Virtual (no hardware): " + std::string(standalone_virtual ? "Yes" : "No") + "\n";
                         response += "Physical Auto-Scan Disabled (release-physical): " + std::string(ignore_physical ? "Yes" : "No") + "\n";
+                        if (phy_fd >= 0 && !is_bluetooth) {
+                            response += "Bluetooth Fallback if USB Disconnects: "
+                                + std::string(shadow_fd >= 0 ? "Yes (/dev/" + shadow_name + ", idle, instant switch)" : "No")
+                                + "\n";
+                        }
                         if (phy_disconnect_pending_destroy) {
                             auto remaining = std::chrono::duration_cast<std::chrono::seconds>(
                                 PHYSICAL_DISCONNECT_GRACE - (std::chrono::steady_clock::now() - phy_disconnect_time));
@@ -1379,18 +1507,15 @@ int main(int argc, char* argv[]) {
                             response = "OK: No physical controller was connected; auto-scan disabled.";
                         } else {
                             std::cout << "Releasing physical controller by IPC request..." << std::endl;
-                            for (auto& node : hidden_nodes) {
-                                if (node.is_grabbed && node.fd >= 0) {
-                                    ioctl(node.fd, EVIOCGRAB, 0);
-                                    close(node.fd);
-                                }
-                                chmod(node.path.c_str(), node.orig_mode);
-                            }
-                            hidden_nodes.clear();
-                            close(phy_fd);
+                            release_physical_connection(phy_fd, phy_path, orig_mode, hidden_nodes);
                             phy_fd = -1;
-                            chmod(phy_path.c_str(), orig_mode);
                             phy_name = "";
+                            if (shadow_fd >= 0) {
+                                release_physical_connection(shadow_fd, shadow_path, shadow_orig_mode, shadow_hidden_nodes);
+                                shadow_fd = -1;
+                                shadow_name = "";
+                                shadow_path = "";
+                            }
 
                             if (vdev_configured()) {
                                 emit_neutral_report(target_type);
@@ -1595,18 +1720,19 @@ int main(int argc, char* argv[]) {
             if (phy_fd >= 0) {
                 std::cout << "Releasing physical controller grab..." << std::endl;
                 disconnected_phy_name = phy_name;
-                for (auto& node : hidden_nodes) {
-                    if (node.is_grabbed && node.fd >= 0) {
-                        ioctl(node.fd, EVIOCGRAB, 0);
-                        close(node.fd);
-                    }
-                    chmod(node.path.c_str(), node.orig_mode);
-                }
-                hidden_nodes.clear();
-                close(phy_fd);
+                release_physical_connection(phy_fd, phy_path, orig_mode, hidden_nodes);
                 phy_fd = -1;
-                chmod(phy_path.c_str(), orig_mode);
                 phy_name = "";
+            }
+            // A held Bluetooth shadow doesn't carry over a type/backend
+            // change cleanly (the new type/backend's connect path expects to
+            // do its own open_and_hide_physical()), so release it too and
+            // let the auto-scan block above rediscover it fresh.
+            if (shadow_fd >= 0) {
+                release_physical_connection(shadow_fd, shadow_path, shadow_orig_mode, shadow_hidden_nodes);
+                shadow_fd = -1;
+                shadow_name = "";
+                shadow_path = "";
             }
 
             if (target_type == TYPE_NONE) {
@@ -1653,21 +1779,61 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // A shadowed Bluetooth connection itself disappeared (e.g. unpaired
+        // or out of range) while USB was active. It was never driving the
+        // virtual device, so this is just cleanup -- no grace period, no
+        // effect on the live USB connection.
+        if (shadow_poll_idx >= 0 && (pfds[shadow_poll_idx].revents & (POLLERR | POLLHUP))) {
+            std::cout << "Shadowed Bluetooth connection dropped." << std::endl;
+            release_physical_connection(shadow_fd, shadow_path, shadow_orig_mode, shadow_hidden_nodes);
+            shadow_fd = -1;
+            shadow_name = "";
+            shadow_path = "";
+        } else if (shadow_poll_idx >= 0 && (pfds[shadow_poll_idx].revents & POLLIN)) {
+            // Drain and discard -- nobody's using this interface right now,
+            // but the kernel-side read buffer still needs emptying so it
+            // doesn't fill up while idle.
+            uint8_t discard_buf[128];
+            ssize_t n = read(shadow_fd, discard_buf, sizeof(discard_buf));
+            (void)n;
+        }
+
         // Handle physical controller connection dropped
         if (phy_poll_idx >= 0 && (pfds[phy_poll_idx].revents & (POLLERR | POLLHUP))) {
             std::cout << "Physical controller connection dropped." << std::endl;
-            for (auto& node : hidden_nodes) {
-                if (node.is_grabbed && node.fd >= 0) {
-                    ioctl(node.fd, EVIOCGRAB, 0);
-                    close(node.fd);
-                }
-                chmod(node.path.c_str(), node.orig_mode);
-            }
-            hidden_nodes.clear();
-            close(phy_fd);
+            release_physical_connection(phy_fd, phy_path, orig_mode, hidden_nodes);
             phy_fd = -1;
-            chmod(phy_path.c_str(), orig_mode);
             phy_name = "";
+
+            if (shadow_fd >= 0) {
+                // The active (USB) side is gone, but the previously-active
+                // interface (Bluetooth) is still held open and hidden --
+                // promote it straight back to active. Zero gap: no grace
+                // period, virtual device never notices.
+                std::cout << "Reverting to shadowed Bluetooth connection: /dev/" << shadow_name << std::endl;
+                phy_fd = shadow_fd;
+                phy_name = shadow_name;
+                phy_path = shadow_path;
+                orig_mode = shadow_orig_mode;
+                hidden_nodes = std::move(shadow_hidden_nodes);
+                is_bluetooth = true;
+
+                shadow_fd = -1;
+                shadow_name = "";
+                shadow_path = "";
+                shadow_hidden_nodes.clear();
+
+                if (controller_type_emulates(target_type)) {
+                    int dup_fd = dup(phy_fd);
+                    if (dup_fd >= 0) {
+                        std::thread([fd = dup_fd, r = cur_r, g = cur_g, b = cur_b]() {
+                            send_physical_output_report(fd, true, 0, 0, r, g, b);
+                            close(fd);
+                        }).detach();
+                    }
+                }
+                continue;
+            }
 
             // Don't tear the virtual device down yet — clear its input state
             // so nothing looks stuck "held" during the grace window, but
@@ -2011,15 +2177,11 @@ int main(int argc, char* argv[]) {
     // Clean up physical controller if active
     if (phy_fd >= 0) {
         std::cout << "Releasing physical controller grab..." << std::endl;
-        for (auto& node : hidden_nodes) {
-            if (node.is_grabbed && node.fd >= 0) {
-                ioctl(node.fd, EVIOCGRAB, 0);
-                close(node.fd);
-            }
-            chmod(node.path.c_str(), node.orig_mode);
-        }
-        close(phy_fd);
-        chmod(phy_path.c_str(), orig_mode);
+        release_physical_connection(phy_fd, phy_path, orig_mode, hidden_nodes);
+    }
+    if (shadow_fd >= 0) {
+        std::cout << "Releasing shadowed Bluetooth connection..." << std::endl;
+        release_physical_connection(shadow_fd, shadow_path, shadow_orig_mode, shadow_hidden_nodes);
     }
 
     // Destroy virtual controller
