@@ -34,13 +34,10 @@ TARGET_DAEMON = $(BUILD_DIR)/ds4-translator
 TARGET_CTL    = $(BUILD_DIR)/ds4-ctl
 TARGET_SPOOF  = $(BUILD_DIR)/libudev-sony-spoof.so
 TARGET_SPOOF32 = $(BUILD_DIR)/libudev-sony-spoof32.so
-TARGET_INTERCEPT   = $(BUILD_DIR)/libds4-intercept.so
-TARGET_INTERCEPT32 = $(BUILD_DIR)/libds4-intercept32.so
 
 DAEMON_SRC = src/main.cpp src/functionfs-backend.c
 CTL_SRC    = src/ctl.cpp
 SPOOF_SRC  = src/udev-spoof.c
-INTERCEPT_SRC = src/intercept.c
 
 DAEMON_OBJ = $(BUILD_DIR)/main.o $(BUILD_DIR)/functionfs-backend.o
 CTL_OBJ    = $(BUILD_DIR)/ctl.o
@@ -71,14 +68,6 @@ $(TARGET_SPOOF): $(SPOOF_SRC) | $(BUILD_DIR)
 $(TARGET_SPOOF32): $(SPOOF_SRC) | $(BUILD_DIR)
 	$(CC) -m32 -O3 -fPIC -shared -o $@ $< -ldl
 
-# Diagnostic intercept library (opt-in, not built by default)
-intercept: $(TARGET_INTERCEPT) $(TARGET_INTERCEPT32)
-
-$(TARGET_INTERCEPT): $(INTERCEPT_SRC) | $(BUILD_DIR)
-	$(CC) -O3 -fPIC -shared -o $@ $< -ldl -lpthread
-
-$(TARGET_INTERCEPT32): $(INTERCEPT_SRC) | $(BUILD_DIR)
-	$(CC) -m32 -O3 -fPIC -shared -o $@ $< -ldl -lpthread
 
 $(BUILD_DIR)/%.o: src/%.cpp | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
@@ -123,4 +112,4 @@ uninstall:
 	udevadm trigger
 	systemctl daemon-reload
 
-.PHONY: all debug clean install uninstall intercept
+.PHONY: all debug clean install uninstall
