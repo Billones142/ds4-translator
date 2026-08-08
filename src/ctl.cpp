@@ -190,7 +190,7 @@ static const CommandSpec kCommands[] = {
     {"version",          nullptr},
     {"status",           nullptr},
     {"set-type",         "ds4 dualsense none hidden"},
-    {"set-backend",      "ds4 dualsense uhid functionfs"},
+    {"set-backend",      nullptr}, // position-aware, special-cased in --complete-args below
     {"create-virtual",   "ds4 dualsense"},
     {"destroy-virtual",  nullptr},
     {"virtual",          "ds4 dualsense --auto"},
@@ -719,6 +719,18 @@ int main(int argc, char* argv[]) {
         std::string target = argv[2];
         if (target == "tap") {
             std::cout << button_names_joined() << std::endl;
+        } else if (target == "set-backend") {
+            // Position-aware (unlike every other command here): argv[3], if
+            // present, is the controller word already typed -- offer
+            // ds4/dualsense first, then uhid/functionfs once one of those is
+            // picked. argv[3:] wasn't passed at all until
+            // ds4-ctl-completion.bash started forwarding every prior word
+            // instead of just the command name.
+            if (argc <= 3) {
+                std::cout << "ds4 dualsense" << std::endl;
+            } else if (argc == 4) {
+                std::cout << "uhid functionfs" << std::endl;
+            }
         } else if (const CommandSpec *spec = find_command(target)) {
             if (spec->arg_completions) std::cout << spec->arg_completions << std::endl;
         }
