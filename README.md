@@ -17,6 +17,7 @@ It includes an IPC runtime control program (`ds4-ctl`) that allows users to chan
 - **Rumble & LED Passthrough**: Translates force-feedback rumble and lightbar colors from games back to the physical DualShock 4 controller.
 - **Battery Status Passthrough**: Forwards the physical controller's real charge level and cable/charging state to the virtual device (translated to DualSense's status format when emulating one), instead of always reporting fully charged.
 - **Bluetooth Support**: Parses both minimal USB and extended Bluetooth input reports from the physical DualShock 4, computing output report CRC32 checksums as required by the Sony Bluetooth HID specification.
+- **USB Priority / Live Hot-Swap**: If a controller already connected over Bluetooth is then plugged in via USB, the daemon automatically switches to the USB connection (lower latency, no battery drain) without dropping the virtual device. The kernel's `hid-playstation` driver normally refuses to bind the USB side while the same controller is already bound over Bluetooth, so the daemon briefly unbinds/rebinds the driver to let USB take over. Unplugging the USB cable automatically hands the controller back to Bluetooth.
 - **Systemd Integration**: Includes a systemd service file to run the translator as a root-level service.
 
 ## Prerequisites
