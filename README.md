@@ -26,12 +26,13 @@ Ensure that the User-space HID (`uhid`) kernel module is loaded:
 sudo modprobe uhid
 ```
 
-The default `uhid` backend needs nothing else. The experimental `gadget` and
-`hidg` backends (see [Backend Selection](#backend-selection-experimental)
-below) additionally need `raw_gadget`/`dummy_hcd` (gadget) or `libcomposite`
-plus a mounted `configfs` (hidg, `/sys/kernel/config`, mounted by default on
-most distros) — `ds4-translator.service` already loads all of these at
-startup regardless of which backend ends up active.
+The default `uhid` backend needs nothing else. The `functionfs` backend
+(see [Backend Selection](#backend-selection) below — it's the default for
+DS4 emulation) additionally needs `dummy_hcd` and `libcomposite` plus a
+mounted `configfs` (`/sys/kernel/config`, mounted by default on most
+distros) — `ds4-translator.service` already loads these (plus `usb_f_fs`,
+on kernels where it isn't built in) at startup regardless of which backend
+ends up active.
 
 ## Installation
 
@@ -69,6 +70,9 @@ Example Output:
 Physical Controller: /dev/hidraw1
 Connection Type: Bluetooth
 Virtual Emulation: DualShock 4
+Active Backend: functionfs
+DS4 Backend: functionfs
+DualSense Backend: uhid
 Device Open by Host: Yes
 ```
 
@@ -82,24 +86,33 @@ Device Open by Host: Yes
   ds4-ctl set-type ds4
   ```
 
-### Backend Selection (experimental)
+### Backend Selection
 
 By default the virtual controller is created via `/dev/uhid`, which injects
 directly into the kernel's HID subsystem without a real USB enumeration
-handshake. Two alternative backends are available that instead create a
-genuinely enumerated USB device (via `dummy_hcd`), for testing whether that
-distinction matters to any particular game's controller detection:
+handshake. `functionfs` is an alternative backend that instead creates a
+genuinely enumerated USB device (via `dummy_hcd`), and is confirmed to fix
+DS4 emulation not being detected at all in some Wine/Proton titles under
+`uhid` — DualSense emulation never showed that issue on either backend.
+
+DS4 and DualSense each have their own independent backend, defaulting to
+what's confirmed to actually work for each:
 
 ```bash
-ds4-ctl set-backend uhid     # default, stable
-ds4-ctl set-backend gadget   # raw_gadget + dummy_hcd, hand-rolled USB enumeration
-ds4-ctl set-backend hidg     # configfs + kernel's f_hid gadget function
+ds4-ctl set-backend ds4 functionfs        # default for ds4
+ds4-ctl set-backend ds4 uhid              # not recommended -- known DS4 detection issue in some titles
+ds4-ctl set-backend dualsense uhid        # default for dualsense
+ds4-ctl set-backend dualsense functionfs  # also works, just not the default
 ```
 
-Like `set-type`, this takes effect immediately (recreating the virtual
-device) and persists across restarts. Both `gadget` and `hidg` are
-experimental and have not been verified end-to-end against real hardware —
-see Known Issues below.
+This takes effect immediately if that controller type is the one currently
+active (recreating the virtual device); otherwise it's just persisted for
+the next time `ds4-ctl set-type <that type>` is used. Both persist across
+restarts.
+
+`functionfs` is verified end-to-end: kernel's `hid-playstation` driver binds
+to it, creates `hidraw`/input/Motion Sensors/Touchpad nodes, and Wine/Proton
+titles that never detected the `uhid` DS4 pick it up correctly.
 
 ## Uninstalling
 
@@ -110,16 +123,8 @@ sudo make uninstall
 
 ## Known Issues
 
-- **`gadget`/`hidg` backends are experimental and unverified**: Both create a
-  real enumerated USB device instead of a UHID virtual device, but neither
-  has been confirmed working end-to-end (Steam/browser detection, in-game
-  input) against real hardware. `hidg` in particular does not answer
-  GET_REPORT feature-report requests (calibration/pairing info) on kernels
-  without newer `f_hid` support — see `docs/how-it-works.md`. If either
-  backend fails to create a device at all, `ds4-ctl set-backend uhid` reverts
-  to the known-working default.
-- **Emulated DS4 not detected in some Wine/Proton games (confirmed: Satisfactory)**: Not limited to the standalone/no-hardware virtual controller — even physical-passthrough DS4 emulation fails to be detected at all in affected titles, no matter the configuration. The same physical hardware emulated as a **DualSense** (`ds4-ctl set-type dualsense`) works correctly in the same game, so if the emulated DS4 isn't detected, try switching type as a workaround. The root cause hasn't been identified — the HID report descriptor is byte-for-byte identical to real hardware, raw button/axis state reaches Wine's DirectInput layer correctly (confirmed via `WINEDEBUG=+dinput` traces), and the virtual device streams a continuous report heartbeat matching real hardware's idle behavior, so it likely sits in the game/engine's own controller-recognition logic rather than this daemon — but the DS4-vs-DualSense split on identical input is itself unexplained. Treat DS4 emulation as best-effort per-game rather than guaranteed-working; DualSense emulation has not shown this issue in any title tested so far.
-- **Steam identifies the emulated controller as a different controller than the physical one**: Steam identifies a controller via a MAC/pairing-info HID feature report it reads directly from the device, not from udev properties, and the virtual device reports a fixed placeholder MAC rather than the physical controller's real one, so Steam treats it as a distinct device from the physical controller's own saved profile until Steam is restarted or the physical controller is disconnected and reconnected. Relaying the real MAC through was attempted twice and both times broke DS4 detection outright (see git history), so this is not being pursued further without a way to test against real hardware beyond what's available here — it's cosmetic (the controller still works, just isn't recognized as "the same" one) and considered lower priority than DS4 actually being detected at all.
+- **Emulated DS4 not detected in some Wine/Proton games — fixed by the `functionfs` backend**: `uhid` simply doesn't work for this: some titles (confirmed: Satisfactory) never detect a DS4 emulated through it, no matter the configuration, even in physical-passthrough mode — this was previously worked around by emulating a **DualSense** instead (`ds4-ctl set-type dualsense`), which never showed the issue. `functionfs` fixes it, most likely because it's the first backend to give the game a real USB enumeration handshake to detect. `ds4-ctl set-backend ds4 functionfs` (the default) is confirmed working end-to-end, including in titles that never detected the `uhid` DS4.
+- **Steam sometimes identifies the emulated controller as a different controller than the physical one**: Observed on both `uhid` and `functionfs`-emulated devices — Steam identifies a controller via a MAC/pairing-info HID feature report it reads directly from the device, not from udev properties, and the virtual device reports a fixed placeholder MAC rather than the physical controller's real one, so Steam treats it as a distinct device from the physical controller's own saved profile until Steam is restarted or the physical controller is disconnected and reconnected. Relaying the real MAC through was attempted twice and both times broke DS4 detection outright (see git history), so this is not being pursued further for now — it's cosmetic (the controller still works, just isn't recognized as "the same" one).
 - **"Bluetooth Authentication" popup when connecting via Bluetooth**: Only affects controllers paired over Bluetooth (not USB). Changing the emulation type (`ds4-ctl set-type ...`) releases and re-scans the physical controller, which briefly drops and re-establishes its Bluetooth HID connection — BlueZ can prompt for service authorization on that reconnect even for an already-paired, already-trusted device.
 
   <img src="assets/bluetooth-hid-authorization-prompt.png" alt="Bluetooth Authentication popup requesting authorization for the Human Interface Device Service" width="420">
@@ -132,3 +137,4 @@ sudo make uninstall
 - **IPC Architecture**: Single-threaded non-blocking poll loop manages physical input reports, uhid events, and UDS IPC configuration clients concurrently. This keeps the daemon responsive to configuration commands even when no physical controller is connected.
 - **Grabbing & Hiding**: By grabbing the event nodes and modifying the permissions of the `hidraw` node, the physical controller is completely hidden from user-space programs (preventing double inputs) while allowing the daemon (running as root) to continue reading raw inputs and writing output reports.
 - **CRC32 Algorithm**: Implementation of the custom IEEE 802.3 CRC32 algorithm used to authenticate PlayStation Bluetooth output reports.
+- **`functionfs`'s emulated device stays visible on purpose**: `72-ds4-translator-hide.rules` hides the *physical* controller by matching its real idVendor/idProduct, but `functionfs`'s emulated device deliberately shares those same IDs (impersonating real hardware) and would otherwise get caught by the same rule. A `DEVPATH!="/devices/platform/dummy_hcd.0/*"` guard on those stanzas excludes it, since real hardware never appears under that path.

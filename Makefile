@@ -16,7 +16,7 @@ CC  = gcc
 # not just warnings: `make` refuses to produce a binary until these are
 # clean, rather than letting them quietly ship.
 # -Wno-missing-field-initializers: this codebase's designated-initializer
-# structs (RawGadgetDevice, HidgDevice) deliberately list only the fields
+# structs (FunctionFSDevice) deliberately list only the fields
 # that need a non-zero starting value -- the C/C++ standard guarantees
 # every omitted field is zero/false/null-initialized, so warning on that is
 # a false positive here, not a real omission.
@@ -37,12 +37,12 @@ TARGET_SPOOF32 = $(BUILD_DIR)/libudev-sony-spoof32.so
 TARGET_INTERCEPT   = $(BUILD_DIR)/libds4-intercept.so
 TARGET_INTERCEPT32 = $(BUILD_DIR)/libds4-intercept32.so
 
-DAEMON_SRC = src/main.cpp src/raw-gadget-backend.c src/hidg-backend.c
+DAEMON_SRC = src/main.cpp src/functionfs-backend.c
 CTL_SRC    = src/ctl.cpp
 SPOOF_SRC  = src/udev-spoof.c
 INTERCEPT_SRC = src/intercept.c
 
-DAEMON_OBJ = $(BUILD_DIR)/main.o $(BUILD_DIR)/raw-gadget-backend.o $(BUILD_DIR)/hidg-backend.o
+DAEMON_OBJ = $(BUILD_DIR)/main.o $(BUILD_DIR)/functionfs-backend.o
 CTL_OBJ    = $(BUILD_DIR)/ctl.o
 
 PREFIX    = /usr/local

@@ -21,11 +21,8 @@ Changes the target virtual controller emulation type to a Sony DualSense.
 .B set-type none
 Disables virtual controller emulation.
 .TP
-.B set-backend uhid
-Changes the backend interface to `/dev/uhid` (requires daemon restart).
-.TP
-.B set-backend gadget
-Changes the backend interface to `/dev/raw-gadget` (requires daemon restart).
+.B set-backend <ds4|dualsense> <uhid|functionfs>
+Changes that controller type's virtual device backend. Takes effect immediately if that type is currently active, otherwise persists for the next time it's selected via set-type. Defaults: dualsense=uhid, ds4=functionfs (uhid is not reliably detected as a DS4 in some Wine/Proton titles; functionfs is).
 .TP
 .B help
 Shows basic usage and command synopsis.

@@ -31,18 +31,26 @@ TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="
 # match works regardless of which intermediate HID driver is in use, and it
 # still never matches the virtual UHID node since that has no USB ancestor
 # at all.
-TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="05c4", \
+#
+# DEVPATH!="/devices/platform/dummy_hcd.0/*": the functionfs backend
+# emulates a *genuinely enumerated* USB device with this exact same
+# idVendor/idProduct (impersonating real hardware is the whole point), bound
+# to dummy_hcd's virtual USB bus -- without this guard these ATTRS-only rules
+# also match and hide our own emulated controller right alongside the real
+# physical one, since idVendor/idProduct alone can't tell them apart. Real
+# hardware never appears under this DEVPATH, so excluding it is safe.
+TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="05c4", DEVPATH!="/devices/platform/dummy_hcd.0/*", \
   MODE="0600", OWNER="root", GROUP="root", TAG-="uaccess", TAG-="seat", ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_INPUT}="", \
   ENV{ID_BUS}="", ENV{ID_VENDOR_ID}="", ENV{ID_MODEL_ID}="", ENV{ID_MODEL}="", ENV{ID_VENDOR}=""
 
-TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="09cc", \
+TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="09cc", DEVPATH!="/devices/platform/dummy_hcd.0/*", \
   MODE="0600", OWNER="root", GROUP="root", TAG-="uaccess", TAG-="seat", ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_INPUT}="", \
   ENV{ID_BUS}="", ENV{ID_VENDOR_ID}="", ENV{ID_MODEL_ID}="", ENV{ID_MODEL}="", ENV{ID_VENDOR}=""
 
-TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="input", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="05c4", \
+TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="input", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="05c4", DEVPATH!="/devices/platform/dummy_hcd.0/*", \
   MODE="0600", OWNER="root", GROUP="root", TAG-="uaccess", TAG-="seat", ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_INPUT}=""
 
-TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="input", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="09cc", \
+TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="input", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="09cc", DEVPATH!="/devices/platform/dummy_hcd.0/*", \
   MODE="0600", OWNER="root", GROUP="root", TAG-="uaccess", TAG-="seat", ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_INPUT}=""
 
 # -----------------------------------------------------------------------------

@@ -21,8 +21,7 @@
 #include <sys/un.h>
 
 #include "descriptors.h"
-#include "raw-gadget-backend.h"
-#include "hidg-backend.h"
+#include "functionfs-backend.h"
 
 #ifndef DS4_VERSION
 #define DS4_VERSION "unknown"
@@ -441,42 +440,43 @@ ControllerType read_config(ControllerType default_type) {
 
 enum BackendType {
     BACKEND_UHID,
-    BACKEND_GADGET,
-    BACKEND_HIDG
+    BACKEND_FUNCTIONFS
 };
 
 const char* backend_type_name(BackendType backend) {
     switch (backend) {
-        case BACKEND_GADGET: return "raw-gadget";
-        case BACKEND_HIDG: return "hidg";
+        case BACKEND_FUNCTIONFS: return "functionfs";
         default: return "uhid";
     }
 }
 
 const char* backend_type_config_str(BackendType backend) {
     switch (backend) {
-        case BACKEND_GADGET: return "gadget";
-        case BACKEND_HIDG: return "hidg";
+        case BACKEND_FUNCTIONFS: return "functionfs";
         default: return "uhid";
     }
 }
 
-BackendType read_backend_config(BackendType default_backend) {
+// DS4 and DualSense each have their own independent backend setting --
+// uhid never reliably enumerates as a real USB device (confirmed to fail
+// DS4 detection in some Wine/Proton titles), while functionfs does and is
+// what actually fixed that; DualSense never showed the issue on either.
+// Defaults reflect that: ds4->functionfs, dualsense->uhid.
+BackendType read_backend_config(ControllerType type, BackendType default_backend) {
     std::ifstream f("/etc/ds4-translator.conf");
     if (!f.is_open()) {
         return default_backend;
     }
+    std::string key = (type == TYPE_DS4) ? "backend_ds4=" : "backend_dualsense=";
     std::string line;
     while (std::getline(f, line)) {
-        if (line.rfind("backend=", 0) == 0) {
-            std::string val = line.substr(8);
+        if (line.rfind(key, 0) == 0) {
+            std::string val = line.substr(key.size());
             while (!val.empty() && (val.back() == '\n' || val.back() == '\r' || val.back() == ' ')) {
                 val.pop_back();
             }
-            if (val == "gadget") {
-                return BACKEND_GADGET;
-            } else if (val == "hidg") {
-                return BACKEND_HIDG;
+            if (val == "functionfs") {
+                return BACKEND_FUNCTIONFS;
             } else if (val == "uhid") {
                 return BACKEND_UHID;
             }
@@ -485,10 +485,12 @@ BackendType read_backend_config(BackendType default_backend) {
     return default_backend;
 }
 
+// Currently-live backend, derived from backend_for_ds4/backend_for_dualsense
+// below based on whichever type is active -- not independently settable.
 BackendType backend_type = BACKEND_UHID;
-bool backend_explicitly_set = false;
-RawGadgetDevice virtual_gadget = { .fd = -1, .ep_in = -1, .ep_out = -1, .device_open = false, .target_type = 0, .eps_enabled = false, .ep_out_thread_spawned = false, .configured = false };
-HidgDevice virtual_hidg = { .fd = -1, .device_open = false, .configured = false, .target_type = 0, .out_thread_spawned = false, .in_thread_spawned = false, .pending_report_len = 0, .report_pending = false };
+BackendType backend_for_ds4 = BACKEND_FUNCTIONFS;
+BackendType backend_for_dualsense = BACKEND_UHID;
+FunctionFSDevice virtual_functionfs = { .ep0_fd = -1, .ep_in_fd = -1, .ep_out_fd = -1, .device_open = false, .configured = false, .target_type = 0, .out_thread_spawned = false, .in_thread_spawned = false, .pending_report_len = 0, .report_pending = false };
 
 extern "C" {
 int phy_fd = -1;
@@ -506,31 +508,24 @@ uint8_t sequence_number = 0;
 struct dualshock4_input_report_common last_virtual_common;
 bool last_virtual_valid = false;
 
-void write_config(ControllerType type, BackendType backend) {
+void write_config(ControllerType type, BackendType ds4_backend, BackendType dualsense_backend) {
     std::ofstream f("/etc/ds4-translator.conf");
     if (f.is_open()) {
         f << "type=" << controller_type_config_str(type) << "\n";
-        f << "backend=" << backend_type_config_str(backend) << "\n";
+        f << "backend_ds4=" << backend_type_config_str(ds4_backend) << "\n";
+        f << "backend_dualsense=" << backend_type_config_str(dualsense_backend) << "\n";
     } else {
         std::cerr << "Failed to write config file: /etc/ds4-translator.conf: " << strerror(errno) << std::endl;
     }
 }
 
 bool create_virtual_device(ControllerType type) {
-    if (backend_type == BACKEND_GADGET) {
-        if (raw_gadget_init(&virtual_gadget, type == TYPE_DS4 ? 1 : 2)) {
-            std::cout << "Virtual USB Controller created via Gadget." << std::endl;
+    if (backend_type == BACKEND_FUNCTIONFS) {
+        if (functionfs_init(&virtual_functionfs, type == TYPE_DS4 ? 1 : 2)) {
+            std::cout << "Virtual USB Controller created via FunctionFS." << std::endl;
             return true;
         } else {
-            std::cerr << "Failed to initialize Gadget backend. Falling back to UHID backend..." << std::endl;
-            backend_type = BACKEND_UHID;
-        }
-    } else if (backend_type == BACKEND_HIDG) {
-        if (hidg_init(&virtual_hidg, type == TYPE_DS4 ? 1 : 2)) {
-            std::cout << "Virtual USB Controller created via HIDG." << std::endl;
-            return true;
-        } else {
-            std::cerr << "Failed to initialize HIDG backend. Falling back to UHID backend..." << std::endl;
+            std::cerr << "Failed to initialize FunctionFS backend. Falling back to UHID backend..." << std::endl;
             backend_type = BACKEND_UHID;
         }
     }
@@ -588,11 +583,8 @@ bool create_virtual_device(ControllerType type) {
 }
 
 void destroy_virtual_device() {
-    if (backend_type == BACKEND_GADGET) {
-        raw_gadget_close(&virtual_gadget);
-        usleep(200000); // Give kernel time to unbind dummy_udc.0
-    } else if (backend_type == BACKEND_HIDG) {
-        hidg_close(&virtual_hidg);
+    if (backend_type == BACKEND_FUNCTIONFS) {
+        functionfs_close(&virtual_functionfs);
         usleep(200000); // Give kernel time to unbind the gadget UDC
     } else {
         if (uhid_fd >= 0) {
@@ -759,10 +751,8 @@ void emit_input_report(ControllerType type, const struct dualshock4_input_report
         out_ds5->status[2] = 0x00;
     }
 
-    if (backend_type == BACKEND_GADGET) {
-        raw_gadget_send_input_report(&virtual_gadget, out_ev.u.input2.data, out_ev.u.input2.size);
-    } else if (backend_type == BACKEND_HIDG) {
-        hidg_send_input_report(&virtual_hidg, out_ev.u.input2.data, out_ev.u.input2.size);
+    if (backend_type == BACKEND_FUNCTIONFS) {
+        functionfs_send_input_report(&virtual_functionfs, out_ev.u.input2.data, out_ev.u.input2.size);
     } else {
         uhid_write(uhid_fd, out_ev);
     }
@@ -853,32 +843,12 @@ int main(int argc, char* argv[]) {
                 std::cerr << "Missing value for type option." << std::endl;
                 return 1;
             }
-        } else if (arg == "--backend" || arg == "-b") {
-            if (i + 1 < argc) {
-                std::string val = argv[++i];
-                if (val == "gadget") {
-                    backend_type = BACKEND_GADGET;
-                    backend_explicitly_set = true;
-                } else if (val == "hidg") {
-                    backend_type = BACKEND_HIDG;
-                    backend_explicitly_set = true;
-                } else if (val == "uhid") {
-                    backend_type = BACKEND_UHID;
-                    backend_explicitly_set = true;
-                } else {
-                    std::cerr << "Unknown backend: " << val << ". Supported: uhid, gadget, hidg" << std::endl;
-                    return 1;
-                }
-            } else {
-                std::cerr << "Missing value for backend option." << std::endl;
-                return 1;
-            }
         } else if (arg == "--help" || arg == "-h") {
             std::cout << "Usage: ds4-translator [options]" << std::endl;
             std::cout << "Options:" << std::endl;
             std::cout << "  -t, --type <ds4|dualsense|none|hidden>   Target virtual controller type (default: ds4)" << std::endl;
-            std::cout << "  -b, --backend <uhid|gadget|hidg>   Target backend type (default: last used, via config)" << std::endl;
             std::cout << "  -h, --help                  Show this help message" << std::endl;
+            std::cout << "Backend (uhid/functionfs) is config/set-backend only -- see 'ds4-ctl set-backend'." << std::endl;
             return 0;
         }
     }
@@ -887,9 +857,9 @@ int main(int argc, char* argv[]) {
         target_type = read_config(target_type);
     }
 
-    if (!backend_explicitly_set) {
-        backend_type = read_backend_config(BACKEND_UHID);
-    }
+    backend_for_ds4 = read_backend_config(TYPE_DS4, BACKEND_FUNCTIONFS);
+    backend_for_dualsense = read_backend_config(TYPE_DUALSENSE, BACKEND_UHID);
+    backend_type = (target_type == TYPE_DS4) ? backend_for_ds4 : backend_for_dualsense;
     std::cout << "Using " << backend_type_name(backend_type) << " backend." << std::endl;
 
     std::signal(SIGINT, signal_handler);
@@ -925,16 +895,14 @@ int main(int argc, char* argv[]) {
     // (UHID has no such concept of its own, so it reuses device_open, which
     // this function's UHID_OPEN/UHID_CLOSE handling below keeps in sync).
     auto vdev_configured = [&]() -> bool {
-        if (backend_type == BACKEND_GADGET) return virtual_gadget.configured;
-        if (backend_type == BACKEND_HIDG) return virtual_hidg.configured;
+        if (backend_type == BACKEND_FUNCTIONFS) return virtual_functionfs.configured;
         return device_open;
     };
     // Same as vdev_configured(), but for call sites that used to also check
-    // uhid_fd >= 0 alongside the UHID device_open flag (raw-gadget/hidg have
-    // no equivalent fd to check here -- their I/O runs on dedicated threads).
+    // uhid_fd >= 0 alongside the UHID device_open flag (functionfs has no
+    // equivalent fd to check here -- its I/O runs on dedicated threads).
     auto vdev_ready_for_io = [&]() -> bool {
-        if (backend_type == BACKEND_GADGET) return virtual_gadget.configured;
-        if (backend_type == BACKEND_HIDG) return virtual_hidg.configured;
+        if (backend_type == BACKEND_FUNCTIONFS) return virtual_functionfs.configured;
         return device_open && uhid_fd >= 0;
     };
 
@@ -1008,8 +976,7 @@ int main(int argc, char* argv[]) {
         if (test_subscribers.empty()) return;
         std::string line;
         if (controller_type_emulates(target_type)) {
-            bool vdev_exists = (backend_type == BACKEND_GADGET) ? virtual_gadget.device_open :
-                                (backend_type == BACKEND_HIDG) ? virtual_hidg.device_open : (uhid_fd >= 0);
+            bool vdev_exists = (backend_type == BACKEND_FUNCTIONFS) ? virtual_functionfs.device_open : (uhid_fd >= 0);
             if (vdev_exists && last_virtual_valid) {
                 char buf[160];
                 snprintf(buf, sizeof(buf), "STATE VIRTUAL %u %u %u %u %u %u %02x %02x %02x\n",
@@ -1201,7 +1168,7 @@ int main(int argc, char* argv[]) {
             pfds.push_back(p);
             phy_poll_idx = pfds.size() - 1;
         }
-        if (backend_type == BACKEND_GADGET || backend_type == BACKEND_HIDG) {
+        if (backend_type == BACKEND_FUNCTIONFS) {
             // EP0/OUT events handled by dedicated backend threads — no fd polling needed
         } else {
             if (uhid_fd >= 0) {
@@ -1267,6 +1234,8 @@ int main(int argc, char* argv[]) {
                         response += "Connection Type: " + std::string(phy_fd >= 0 ? (is_bluetooth ? "Bluetooth" : "USB") : "N/A") + "\n";
                         response += "Virtual Emulation: " + std::string(controller_type_name(target_type)) + "\n";
                         response += "Active Backend: " + std::string(backend_type_name(backend_type)) + "\n";
+                        response += "DS4 Backend: " + std::string(backend_type_name(backend_for_ds4)) + "\n";
+                        response += "DualSense Backend: " + std::string(backend_type_name(backend_for_dualsense)) + "\n";
                         response += "Device Open by Host: " + std::string((vdev_configured()) ? "Yes" : "No") + "\n";
                         response += "Standalone Virtual (no hardware): " + std::string(standalone_virtual ? "Yes" : "No") + "\n";
                         response += "Physical Auto-Scan Disabled (release-physical): " + std::string(ignore_physical ? "Yes" : "No") + "\n";
@@ -1281,7 +1250,7 @@ int main(int argc, char* argv[]) {
                             response = "Error: A physical controller is connected and already driving the virtual device.";
                         } else if (standalone_virtual) {
                             response = "Virtual controller already active.";
-                        } else if (uhid_fd >= 0 || virtual_gadget.configured) {
+                        } else if (vdev_configured()) {
                             response = "Error: A virtual device is already active.";
                         } else if (create_virtual_device(want)) {
                             standalone_virtual = true;
@@ -1367,8 +1336,14 @@ int main(int argc, char* argv[]) {
                         if (target_type != TYPE_DS4) {
                             pending_type_change = TYPE_DS4;
                             type_change_requested = true;
-                            write_config(TYPE_DS4, backend_type);
-                            response = "OK: Changing emulation type to DualShock 4...";
+                            // Switching type auto-applies that type's own configured
+                            // backend (ds4/dualsense each have an independent one --
+                            // see set-backend below).
+                            pending_backend_change = backend_for_ds4;
+                            backend_change_requested = true;
+                            write_config(TYPE_DS4, backend_for_ds4, backend_for_dualsense);
+                            response = "OK: Changing emulation type to DualShock 4 (backend: " +
+                                       std::string(backend_type_name(backend_for_ds4)) + ")...";
                         } else {
                             response = "Already set to DualShock 4";
                         }
@@ -1376,8 +1351,11 @@ int main(int argc, char* argv[]) {
                         if (target_type != TYPE_DUALSENSE) {
                             pending_type_change = TYPE_DUALSENSE;
                             type_change_requested = true;
-                            write_config(TYPE_DUALSENSE, backend_type);
-                            response = "OK: Changing emulation type to DualSense...";
+                            pending_backend_change = backend_for_dualsense;
+                            backend_change_requested = true;
+                            write_config(TYPE_DUALSENSE, backend_for_ds4, backend_for_dualsense);
+                            response = "OK: Changing emulation type to DualSense (backend: " +
+                                       std::string(backend_type_name(backend_for_dualsense)) + ")...";
                         } else {
                             response = "Already set to DualSense";
                         }
@@ -1385,7 +1363,7 @@ int main(int argc, char* argv[]) {
                         if (target_type != TYPE_NONE) {
                             pending_type_change = TYPE_NONE;
                             type_change_requested = true;
-                            write_config(TYPE_NONE, backend_type);
+                            write_config(TYPE_NONE, backend_for_ds4, backend_for_dualsense);
                             response = "OK: Changing emulation type to None (translation disabled, physical controller untouched)...";
                         } else {
                             response = "Already set to None";
@@ -1394,21 +1372,42 @@ int main(int argc, char* argv[]) {
                         if (target_type != TYPE_HIDDEN) {
                             pending_type_change = TYPE_HIDDEN;
                             type_change_requested = true;
-                            write_config(TYPE_HIDDEN, backend_type);
+                            write_config(TYPE_HIDDEN, backend_for_ds4, backend_for_dualsense);
                             response = "OK: Changing emulation type to Hidden (translation disabled, physical controller hidden)...";
                         } else {
                             response = "Already set to Hidden";
                         }
-                    } else if (cmd == "set-backend uhid" || cmd == "set-backend gadget" || cmd == "set-backend hidg") {
-                        BackendType want_backend = (cmd == "set-backend uhid") ? BACKEND_UHID :
-                                                    (cmd == "set-backend gadget") ? BACKEND_GADGET : BACKEND_HIDG;
-                        if (backend_type != want_backend) {
-                            pending_backend_change = want_backend;
-                            backend_change_requested = true;
-                            write_config(target_type, want_backend);
-                            response = "OK: Changing backend to " + std::string(backend_type_name(want_backend)) + "...";
+                    } else if (cmd == "set-backend ds4 uhid" || cmd == "set-backend ds4 functionfs") {
+                        BackendType want_backend = (cmd == "set-backend ds4 uhid") ? BACKEND_UHID : BACKEND_FUNCTIONFS;
+                        if (backend_for_ds4 != want_backend) {
+                            backend_for_ds4 = want_backend;
+                            write_config(target_type, backend_for_ds4, backend_for_dualsense);
+                            if (target_type == TYPE_DS4) {
+                                pending_backend_change = want_backend;
+                                backend_change_requested = true;
+                                response = "OK: Changing DS4 backend to " + std::string(backend_type_name(want_backend)) + "...";
+                            } else {
+                                response = "OK: DS4 backend set to " + std::string(backend_type_name(want_backend)) +
+                                            " (applies next time emulation type is switched to ds4)";
+                            }
                         } else {
-                            response = "Already using backend " + std::string(backend_type_name(want_backend));
+                            response = "DS4 already set to use backend " + std::string(backend_type_name(want_backend));
+                        }
+                    } else if (cmd == "set-backend dualsense uhid" || cmd == "set-backend dualsense functionfs") {
+                        BackendType want_backend = (cmd == "set-backend dualsense uhid") ? BACKEND_UHID : BACKEND_FUNCTIONFS;
+                        if (backend_for_dualsense != want_backend) {
+                            backend_for_dualsense = want_backend;
+                            write_config(target_type, backend_for_ds4, backend_for_dualsense);
+                            if (target_type == TYPE_DUALSENSE) {
+                                pending_backend_change = want_backend;
+                                backend_change_requested = true;
+                                response = "OK: Changing DualSense backend to " + std::string(backend_type_name(want_backend)) + "...";
+                            } else {
+                                response = "OK: DualSense backend set to " + std::string(backend_type_name(want_backend)) +
+                                            " (applies next time emulation type is switched to dualsense)";
+                            }
+                        } else {
+                            response = "DualSense already set to use backend " + std::string(backend_type_name(want_backend));
                         }
                     } else if (cmd == "test") {
                         // Turns this connection into a live push stream instead of a
@@ -1646,24 +1645,19 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Handle virtual controller state/queries from Kernel
+        // Handle virtual controller state/queries from Kernel. uhid_poll_idx
+        // is only ever set for the uhid backend (see the poll-setup gate
+        // above), so this is always the uhid device.
         if (uhid_poll_idx >= 0 && (pfds[uhid_poll_idx].revents & (POLLERR | POLLHUP))) {
-            if (backend_type == BACKEND_GADGET) {
-                std::cerr << "Gadget device dropped." << std::endl;
-                raw_gadget_close(&virtual_gadget);
-            } else {
-                std::cerr << "UHID device dropped." << std::endl;
-                close(uhid_fd);
-                uhid_fd = -1;
-            }
+            std::cerr << "UHID device dropped." << std::endl;
+            close(uhid_fd);
+            uhid_fd = -1;
             standalone_virtual = false;
             continue;
         }
 
         if (uhid_poll_idx >= 0 && (pfds[uhid_poll_idx].revents & POLLIN)) {
-            if (backend_type == BACKEND_GADGET) {
-                // EP0 events are handled by ep0_loop thread — nothing to do here
-            } else {
+            {
                 struct uhid_event kernel_ev;
                 ssize_t bytes_read = read(uhid_fd, &kernel_ev, sizeof(kernel_ev));
                 if (bytes_read < 0) {
@@ -1725,10 +1719,27 @@ int main(int argc, char* argv[]) {
                                 } else if (rnum == 0x31 || rnum == 0xa3) {
                                     reply_ev.u.get_report_reply.size = 49;
                                     reply_ev.u.get_report_reply.data[0] = rnum;
-                                    // DS4 HW/FW version & extended capabilities
-                                    reply_ev.u.get_report_reply.data[35] = 0x38;
+                                    // DS4 HW/FW version & extended capabilities.
+                                    // Layout reverse-engineered from real hardware
+                                    // (see senseshock's structs.h): report_id(1) +
+                                    // build_date[16] + build_time[16] +
+                                    // hw_version_major(2) + hw_version_minor(2) +
+                                    // fw_version_major(4) + fw_version_minor(2) +
+                                    // fw_series(2) + code_size(4). Some titles
+                                    // (e.g. Detroit: Become Human) sanity-check
+                                    // hw_version_major/fw_version_major and reject
+                                    // an all-zero value as not a real controller.
+                                    memcpy(&reply_ev.u.get_report_reply.data[1], "Mar 25 2016", 11);
+                                    memcpy(&reply_ev.u.get_report_reply.data[17], "12:00:00", 8);
+                                    reply_ev.u.get_report_reply.data[33] = 0x00; // hw_version_major low
+                                    reply_ev.u.get_report_reply.data[34] = 0x01; // hw_version_major high (0x0100)
+                                    reply_ev.u.get_report_reply.data[35] = 0x38; // hw_version_minor (captured)
                                     reply_ev.u.get_report_reply.data[36] = 0x54;
-                                    reply_ev.u.get_report_reply.data[41] = 0x33;
+                                    reply_ev.u.get_report_reply.data[37] = 0x01; // fw_version_major (0x00000001)
+                                    reply_ev.u.get_report_reply.data[38] = 0x00;
+                                    reply_ev.u.get_report_reply.data[39] = 0x00;
+                                    reply_ev.u.get_report_reply.data[40] = 0x00;
+                                    reply_ev.u.get_report_reply.data[41] = 0x33; // fw_version_minor (captured)
                                     reply_ev.u.get_report_reply.data[42] = 0x20;
                                 }
                             } else { // DualSense
