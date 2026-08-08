@@ -219,6 +219,31 @@ struct SyntheticState {
 };
 SyntheticState synth_state;
 
+// The daemon's own emulated device deliberately shares the physical
+// controller's exact vendor/product IDs (impersonating real hardware is the
+// whole point, so games/Steam/Wine treat it the same way) -- so a naive
+// vendor/product/bus scan for "the physical DS4" can match our own virtual
+// device instead of, or in addition to, real hardware. Mirrors the DEVPATH
+// guards in 72-ds4-translator-hide.rules, which had to solve the exact same
+// disambiguation problem for udev matching:
+// - functionfs backend: a genuinely enumerated USB gadget under dummy_hcd's
+//   virtual USB bus -- always identifiable by that devpath alone.
+// - uhid backend: registered under /devices/virtual/misc/uhid/*, always
+//   with bus forced to BUS_USB (see create2.bus below) -- but a real
+//   Bluetooth-paired physical controller is *also* bridged through the
+//   kernel's internal uhid mechanism and shows up under that same devpath
+//   prefix with its real bus, 0005. So under /uhid/, only a reported
+//   BUS_USB (0003) is ours; BUS_BLUETOOTH (0005) there is real hardware.
+static bool is_own_virtual_hidraw(const std::string& hidraw_name, uint32_t bustype) {
+    std::error_code ec;
+    fs::path resolved = fs::canonical("/sys/class/hidraw/" + hidraw_name + "/device", ec);
+    if (ec) return false;
+    std::string devpath = resolved.string();
+    if (devpath.find("dummy_hcd") != std::string::npos) return true;
+    if (bustype != 0x05 && devpath.find("/devices/virtual/misc/uhid/") != std::string::npos) return true;
+    return false;
+}
+
 // Scan /dev/ for physical DualShock 4. USB is always preferred over
 // Bluetooth when both are present -- a full scan is needed for this (unlike
 // the old early-return-on-Bluetooth version) since which one appears first
@@ -233,7 +258,8 @@ std::string find_physical_ds4(bool& out_is_bluetooth) {
             if (fd >= 0) {
                 struct hidraw_devinfo info;
                 if (ioctl(fd, HIDIOCGRAWINFO, &info) >= 0) {
-                    if (info.vendor == 0x054c && (info.product == 0x05c4 || info.product == 0x09cc)) {
+                    if (info.vendor == 0x054c && (info.product == 0x05c4 || info.product == 0x09cc) &&
+                        !is_own_virtual_hidraw(name, info.bustype)) {
                         if (info.bustype == 0x05) { // BUS_BLUETOOTH
                             bt_match = name;
                         } else {
