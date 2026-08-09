@@ -1,4 +1,5 @@
-#pragma once
+#ifndef HID_UNBIND_DETECT_H
+#define HID_UNBIND_DETECT_H
 
 // HID-bus-level detection for the default full-unbind hide method (see
 // TODO.md's last item, and src/usb-hid-transport.h for the transport
@@ -77,3 +78,5 @@ bool hid_id_unbind(const std::string& hid_id);
 // matches against libusb's device list rather than sysfs paths. Returns
 // false if the string doesn't parse.
 bool parse_hid_id(const std::string& hid_id, unsigned& bus, unsigned& vendor, unsigned& product);
+
+#endif // HID_UNBIND_DETECT_H

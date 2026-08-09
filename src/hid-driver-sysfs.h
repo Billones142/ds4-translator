@@ -1,4 +1,5 @@
-#pragma once
+#ifndef HID_DRIVER_SYSFS_H
+#define HID_DRIVER_SYSFS_H
 
 #include <string>
 
@@ -9,3 +10,5 @@
 // reuses the exact same sysfs-write primitive the legacy hot-swap path
 // already relies on, instead of duplicating it).
 void write_hid_driver_sysfs(const char* action, const std::string& hid_id);
+
+#endif // HID_DRIVER_SYSFS_H

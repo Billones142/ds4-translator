@@ -1,4 +1,5 @@
-#pragma once
+#ifndef USB_HID_TRANSPORT_H
+#define USB_HID_TRANSPORT_H
 
 // Raw USB interrupt-transfer transport for the default full-unbind hide
 // method (see hid-unbind-detect.h). Once the kernel HID driver has
@@ -60,3 +61,5 @@ void usb_hid_transport_start(int fd);
 // wasn't opened by usb_hid_transport_open(), this just closes it like a
 // plain fd would.
 void usb_hid_transport_close(int fd);
+
+#endif // USB_HID_TRANSPORT_H
