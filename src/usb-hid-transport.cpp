@@ -110,7 +110,11 @@ void pump_thread_fn(TransportState* t) {
         int transferred = 0;
         int rc = libusb_interrupt_transfer(t->handle, t->ep_in, in_buf, sizeof(in_buf), &transferred, 8);
         if (rc == LIBUSB_SUCCESS && transferred > 0) {
-            write(t->sv[0], in_buf, (size_t)transferred);
+            if (write(t->sv[0], in_buf, (size_t)transferred) < 0) {
+                // Peer end closed (main thread already tore down its side) --
+                // nothing left to deliver this report to; stop pumping.
+                break;
+            }
         } else if (rc == LIBUSB_ERROR_NO_DEVICE || rc == LIBUSB_ERROR_IO) {
             std::cerr << "hid-unbind: USB transport lost the device (" << libusb_error_name(rc) << ")" << std::endl;
             break;
