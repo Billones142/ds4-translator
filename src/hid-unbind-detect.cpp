@@ -41,9 +41,11 @@ int hid_uevent_monitor_open() {
 // translate to, see main.cpp's create2.product) -- but against the
 // uevent's HID_ID= environment field, which the kernel formats with 8
 // hex digits per component (e.g. "0003:0000054C:000005C4") rather than
-// the 4-digit form used in sysfs directory names.
+// the 4-digit form used in sysfs directory names. Bus 0003 (USB) and
+// 0005 (Bluetooth) both match -- see hid-unbind-detect.h for why they're
+// handled so differently once matched.
 static bool hid_id_env_matches_ds4(const std::string& val) {
-    if (val.rfind("0003:", 0) != 0) return false; // Phase A: USB bus only
+    if (val.rfind("0003:", 0) != 0 && val.rfind("0005:", 0) != 0) return false;
     if (val.find("0000054C") == std::string::npos && val.find("0000054c") == std::string::npos) return false;
     return val.find("000005C4") != std::string::npos || val.find("000005c4") != std::string::npos ||
            val.find("000009CC") != std::string::npos || val.find("000009cc") != std::string::npos;
@@ -83,6 +85,27 @@ bool hid_uevent_monitor_read(int fd, std::string& out_hid_id) {
     if (action != "add" || devpath.empty() || hid_id_env.empty()) return false;
     if (!hid_id_env_matches_ds4(hid_id_env)) return false;
 
+    // Exclude this daemon's own virtual device -- see hid_bus_scan_existing()
+    // and find_usb_ds4_hid_id()/is_own_virtual_hidraw() in main.cpp for the
+    // full rationale. This matters *far* more here than for the directory
+    // scan: creating the FunctionFS or uhid virtual gadget (same VID/PID by
+    // design) fires its own genuine "add" uevent, and with no phy_fd yet
+    // claimed for a Bluetooth-unbind-hidden connection (which never gets one
+    // at all -- see open_and_hide_physical_unbind() in main.cpp), the
+    // top-of-loop auto-scan runs every single iteration and would grab that
+    // self-uevent immediately, unbind and libusb-claim the daemon's own
+    // virtual USB gadget out from under the FunctionFS backend actively
+    // serving it, and wedge the daemon hard enough to need SIGKILL --
+    // confirmed live. Bus 0003 is forced for both backends (functionfs is
+    // real bus 0003 hardware under dummy_hcd; uhid backend forces it in
+    // create2.bus), so unlike hid_id_env_matches_ds4()'s bus 0003-or-0005
+    // gate, only 0003 needs the uhid-devpath exclusion -- a bus 0005 hid_id
+    // under /devices/virtual/misc/uhid/* is a real Bluetooth controller
+    // bridged by bluetoothd's own userspace HID handling, not us.
+    bool is_bus_0003 = hid_id_env.rfind("0003:", 0) == 0;
+    if (devpath.find("dummy_hcd") != std::string::npos) return false;
+    if (is_bus_0003 && devpath.find("/devices/virtual/misc/uhid/") != std::string::npos) return false;
+
     size_t slash = devpath.find_last_of('/');
     out_hid_id = (slash == std::string::npos) ? devpath : devpath.substr(slash + 1);
     return !out_hid_id.empty();
@@ -93,7 +116,9 @@ std::string hid_bus_scan_existing() {
     for (const auto& entry : fs::directory_iterator("/sys/bus/hid/devices", ec)) {
         std::string id = entry.path().filename().string();
         if (id.rfind("0003:054C:05C4.", 0) != 0 &&
-            id.rfind("0003:054C:09CC.", 0) != 0) {
+            id.rfind("0003:054C:09CC.", 0) != 0 &&
+            id.rfind("0005:054C:05C4.", 0) != 0 &&
+            id.rfind("0005:054C:09CC.", 0) != 0) {
             continue;
         }
         fs::path resolved = fs::canonical(entry.path(), ec);
@@ -101,10 +126,27 @@ std::string hid_bus_scan_existing() {
         // Exclude this daemon's own virtual device -- see
         // find_usb_ds4_hid_id()'s comment in main.cpp for the full
         // rationale (functionfs backend lives under dummy_hcd, uhid
-        // backend registers under /devices/virtual/misc/uhid/*).
+        // backend registers under /devices/virtual/misc/uhid/* with bus
+        // forced to BUS_USB). Bus 0005 is never excluded on the uhid check
+        // -- a *real* Bluetooth controller also legitimately lives under
+        // /devices/virtual/misc/uhid/* whenever bluetoothd bridges it via
+        // its own userspace uhid (UserspaceHID=true, the BlueZ default --
+        // confirmed live on this system), so that devpath alone can't
+        // distinguish "our virtual device" from "the real Bluetooth
+        // controller" the way it can for bus 0003. Mirrors
+        // is_own_virtual_hidraw()'s identical bus-aware check in main.cpp.
         std::string devpath = resolved.string();
         if (devpath.find("dummy_hcd") != std::string::npos) continue;
-        if (devpath.find("/devices/virtual/misc/uhid/") != std::string::npos) continue;
+        if (id.rfind("0003:", 0) == 0 && devpath.find("/devices/virtual/misc/uhid/") != std::string::npos) continue;
+        // Already unbound -- either a USB device already claimed via
+        // libusb (tracked by phy_fd being valid, so this scan wouldn't
+        // even run for it) or a Bluetooth connection this method has
+        // deliberately left hidden-and-unreadable. Either way, nothing
+        // to do; re-surfacing it as "newly found" would either be a
+        // no-op (USB) or spin forever re-logging the same Bluetooth
+        // device every poll iteration (see open_and_hide_physical_unbind()
+        // in main.cpp for the Bluetooth side of this).
+        if (!fs::exists(entry.path() / "driver", ec)) continue;
         return id;
     }
     return "";

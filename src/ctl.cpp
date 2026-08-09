@@ -51,11 +51,13 @@ void print_usage() {
     std::cout << "                                   dualsense types, or the raw physical controller for" << std::endl;
     std::cout << "                                   none/hidden (LED/rumble aren't observable for none)." << std::endl;
     std::cout << "  set-hide-method <legacy|unbind>  Change how the physical controller is hidden from other" << std::endl;
-    std::cout << "                                   apps (applies on the next physical (re)connection). legacy" << std::endl;
-    std::cout << "                                   is chmod/setfacl/EVIOCGRAB (default); unbind fully unbinds" << std::endl;
-    std::cout << "                                   the kernel HID driver instead, so no hidraw/input node" << std::endl;
-    std::cout << "                                   exists at all -- experimental, USB only, requires a daemon" << std::endl;
-    std::cout << "                                   built with EXPERIMENTAL_UNBIND=1, no-op otherwise." << std::endl;
+    std::cout << "                                   apps (applies on the next physical (re)connection). unbind" << std::endl;
+    std::cout << "                                   (default) fully unbinds the kernel HID driver, so no" << std::endl;
+    std::cout << "                                   hidraw/input node exists at all (USB: still readable via" << std::endl;
+    std::cout << "                                   libusb; Bluetooth: hidden but no live translation while" << std::endl;
+    std::cout << "                                   hidden). legacy is the older chmod/setfacl/EVIOCGRAB" << std::endl;
+    std::cout << "                                   method -- node exists but permission-blocked, keeps live" << std::endl;
+    std::cout << "                                   translation over Bluetooth." << std::endl;
 }
 
 // Connect to the daemon's Unix socket, send one command, return its response.

@@ -29,6 +29,7 @@ extern int phy_fd;
 extern bool is_bluetooth;
 extern uint8_t cur_motor_left, cur_motor_right;
 extern uint8_t cur_r, cur_g, cur_b;
+extern bool g_suppress_next_led_update; // see its doc comment in main.cpp
 extern void send_physical_output_report(int fd, bool bluetooth, uint8_t motor_left, uint8_t motor_right, uint8_t r, uint8_t g, uint8_t b);
 
 #define GADGET_DIR "/sys/kernel/config/usb_gadget/ds4translatorffs"
@@ -447,10 +448,14 @@ static void* out_loop(void *arg) {
                     update = true;
                 }
                 if (flags & 0x02) {
-                    r = data[6];
-                    g = data[7];
-                    b = data[8];
-                    update = true;
+                    if (g_suppress_next_led_update) {
+                        g_suppress_next_led_update = false;
+                    } else {
+                        r = data[6];
+                        g = data[7];
+                        b = data[8];
+                        update = true;
+                    }
                 }
             }
         } else { // DualSense
@@ -466,10 +471,14 @@ static void* out_loop(void *arg) {
                     update = true;
                 }
                 if (vf1 & 0x04) {
-                    r = data[45];
-                    g = data[46];
-                    b = data[47];
-                    update = true;
+                    if (g_suppress_next_led_update) {
+                        g_suppress_next_led_update = false;
+                    } else {
+                        r = data[45];
+                        g = data[46];
+                        b = data[47];
+                        update = true;
+                    }
                 }
             }
         }

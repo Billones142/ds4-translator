@@ -1,7 +1,7 @@
 #pragma once
 
-// Raw USB interrupt-transfer transport for the experimental full-unbind
-// hide method (see hid-unbind-detect.h). Once the kernel HID driver has
+// Raw USB interrupt-transfer transport for the default full-unbind hide
+// method (see hid-unbind-detect.h). Once the kernel HID driver has
 // been unbound via sysfs, no /dev/hidraw node exists for anyone --
 // including this daemon -- so reading/writing reports has to bypass the
 // kernel driver entirely via libusb instead.

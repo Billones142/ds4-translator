@@ -26,40 +26,35 @@ STRICT_WARNINGS = -Wall -Wextra -Werror -Wshadow -Wformat=2 -Wformat-security \
 
 BUILD_DIR = build
 
-# EXPERIMENTAL_UNBIND=1 opts into the hid-unbind-hide branch's alternative
-# hide method (full HID-driver unbind + libusb raw-interrupt transport,
-# see src/usb-hid-transport.* and src/hid-unbind-detect.*) instead of the
-# default chmod/setfacl/EVIOCGRAB method. Off by default: plain `make`
-# never touches libusb and produces the exact same binary as main, so this
-# stays fully inert unless a build deliberately opts in.
-EXPERIMENTAL_CXXFLAGS :=
-EXPERIMENTAL_LDFLAGS  :=
-EXPERIMENTAL_SRC      :=
-EXPERIMENTAL_OBJ      :=
-ifdef EXPERIMENTAL_UNBIND
-  ifeq ($(shell pkg-config --exists libusb-1.0 && echo yes),)
-    $(error EXPERIMENTAL_UNBIND=1 requires the libusb-1.0 development package (pkg-config libusb-1.0 not found))
-  endif
-  EXPERIMENTAL_CXXFLAGS := -DDS4_UNBIND_HIDE_EXPERIMENTAL $(shell pkg-config --cflags libusb-1.0)
-  EXPERIMENTAL_LDFLAGS  := $(shell pkg-config --libs libusb-1.0)
-  EXPERIMENTAL_SRC      := src/hid-unbind-detect.cpp src/usb-hid-transport.cpp
-  EXPERIMENTAL_OBJ      := $(BUILD_DIR)/hid-unbind-detect.o $(BUILD_DIR)/usb-hid-transport.o
+# Full HID-driver unbind + libusb raw-interrupt transport (see
+# src/usb-hid-transport.* and src/hid-unbind-detect.*), the hide method
+# that leaves no hidraw/input node for the physical controller at all
+# (USB: fully readable via libusb; Bluetooth: driver unbind only, no live
+# translation while hidden -- see set-hide-method). No longer gated behind
+# a separate build flag: it's part of every build, same as the legacy
+# chmod/setfacl/EVIOCGRAB method, and is the default hide_method.
+ifeq ($(shell pkg-config --exists libusb-1.0 && echo yes),)
+  $(error libusb-1.0 development package required (pkg-config libusb-1.0 not found))
 endif
+UNBIND_CXXFLAGS := $(shell pkg-config --cflags libusb-1.0)
+UNBIND_LDFLAGS  := $(shell pkg-config --libs libusb-1.0)
+UNBIND_SRC      := src/hid-unbind-detect.cpp src/usb-hid-transport.cpp
+UNBIND_OBJ      := $(BUILD_DIR)/hid-unbind-detect.o $(BUILD_DIR)/usb-hid-transport.o
 
-CXXFLAGS = -O3 $(STRICT_WARNINGS) -std=c++17 -DDS4_VERSION=\"$(VERSION)\" $(EXPERIMENTAL_CXXFLAGS)
-CFLAGS   = -O3 $(STRICT_WARNINGS) -DDS4_VERSION=\"$(VERSION)\" $(EXPERIMENTAL_CXXFLAGS)
-LDFLAGS  = -lpthread $(EXPERIMENTAL_LDFLAGS)
+CXXFLAGS = -O3 $(STRICT_WARNINGS) -std=c++17 -DDS4_VERSION=\"$(VERSION)\" $(UNBIND_CXXFLAGS)
+CFLAGS   = -O3 $(STRICT_WARNINGS) -DDS4_VERSION=\"$(VERSION)\" $(UNBIND_CXXFLAGS)
+LDFLAGS  = -lpthread $(UNBIND_LDFLAGS)
 
 TARGET_DAEMON = $(BUILD_DIR)/ds4-translator
 TARGET_CTL    = $(BUILD_DIR)/ds4-ctl
 TARGET_SPOOF  = $(BUILD_DIR)/libudev-sony-spoof.so
 TARGET_SPOOF32 = $(BUILD_DIR)/libudev-sony-spoof32.so
 
-DAEMON_SRC = src/main.cpp src/functionfs-backend.c $(EXPERIMENTAL_SRC)
+DAEMON_SRC = src/main.cpp src/functionfs-backend.c $(UNBIND_SRC)
 CTL_SRC    = src/ctl.cpp
 SPOOF_SRC  = src/udev-spoof.c
 
-DAEMON_OBJ = $(BUILD_DIR)/main.o $(BUILD_DIR)/functionfs-backend.o $(EXPERIMENTAL_OBJ)
+DAEMON_OBJ = $(BUILD_DIR)/main.o $(BUILD_DIR)/functionfs-backend.o $(UNBIND_OBJ)
 CTL_OBJ    = $(BUILD_DIR)/ctl.o
 
 PREFIX    = /usr/local
@@ -69,8 +64,8 @@ SYSTEMDDIR = /etc/systemd/system
 all: $(TARGET_DAEMON) $(TARGET_CTL) $(TARGET_SPOOF) $(TARGET_SPOOF32)
 
 # Debug build: no optimisation, debug symbols, DS4_DEBUG enabled
-debug: CXXFLAGS = -O0 -g $(STRICT_WARNINGS) -std=c++17 -DDS4_DEBUG -DDS4_VERSION=\"$(VERSION)\" $(EXPERIMENTAL_CXXFLAGS)
-debug: CFLAGS   = -O0 -g $(STRICT_WARNINGS) -DDS4_DEBUG -DDS4_VERSION=\"$(VERSION)\" $(EXPERIMENTAL_CXXFLAGS)
+debug: CXXFLAGS = -O0 -g $(STRICT_WARNINGS) -std=c++17 -DDS4_DEBUG -DDS4_VERSION=\"$(VERSION)\" $(UNBIND_CXXFLAGS)
+debug: CFLAGS   = -O0 -g $(STRICT_WARNINGS) -DDS4_DEBUG -DDS4_VERSION=\"$(VERSION)\" $(UNBIND_CXXFLAGS)
 debug: clean all
 
 $(BUILD_DIR):
@@ -103,6 +98,7 @@ install: all
 	install -D -m 755 $(TARGET_CTL) $(DESTDIR)$(BINDIR)/$(notdir $(TARGET_CTL))
 	install -D -m 755 $(TARGET_SPOOF) $(DESTDIR)/usr/lib/$(notdir $(TARGET_SPOOF))
 	install -D -m 755 $(TARGET_SPOOF32) $(DESTDIR)/usr/lib32/$(notdir $(TARGET_SPOOF32))
+	install -D -m 755 rebind-unbound-controllers.sh $(DESTDIR)$(BINDIR)/rebind-unbound-controllers.sh
 	install -D -m 644 ds4-translator.service $(DESTDIR)$(SYSTEMDDIR)/ds4-translator.service
 	install -D -m 644 72-ds4-translator-hide.rules $(DESTDIR)/etc/udev/rules.d/72-ds4-translator-hide.rules
 	install -D -m 644 ds4-ctl.1 $(DESTDIR)/usr/share/man/man1/ds4-ctl.1
@@ -123,6 +119,7 @@ uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/$(notdir $(TARGET_CTL))
 	rm -f $(DESTDIR)/usr/lib/$(notdir $(TARGET_SPOOF))
 	rm -f $(DESTDIR)/usr/lib32/$(notdir $(TARGET_SPOOF32))
+	rm -f $(DESTDIR)$(BINDIR)/rebind-unbound-controllers.sh
 	rm -f $(DESTDIR)$(SYSTEMDDIR)/ds4-translator.service
 	rm -f $(DESTDIR)/etc/udev/rules.d/72-ds4-translator-hide.rules
 	rm -f $(DESTDIR)/usr/share/man/man1/ds4-ctl.1

@@ -1,17 +1,31 @@
 #pragma once
 
-// HID-bus-level detection for the experimental full-unbind hide method
-// (see TODO.md's last item, and src/usb-hid-transport.h for the transport
-// side). Generalizes the sysfs-scan idea find_usb_ds4_hid_id() in main.cpp
-// already uses for the Bluetooth-blocks-USB corner case into the primary
-// detection path for this method: watch /sys/bus/hid/devices "add" events
-// at the HID-bus level, before hid-playstation ever creates a hidraw node,
-// so the controller can be unbound before any other app can see it --
-// rather than existing-but-permission-blocked like the default method.
+// HID-bus-level detection for the default full-unbind hide method (see
+// TODO.md's last item, and src/usb-hid-transport.h for the transport
+// side; the alternative chmod/setfacl/EVIOCGRAB method lives in
+// open_and_hide_physical() in main.cpp, selectable via `ds4-ctl
+// set-hide-method legacy`). Generalizes the sysfs-scan idea
+// find_usb_ds4_hid_id() in main.cpp already uses for the
+// Bluetooth-blocks-USB corner case into the primary detection path for
+// this method: watch /sys/bus/hid/devices "add" events at the HID-bus
+// level, before hid-playstation ever creates a hidraw node, so the
+// controller can be unbound before any other app can see it -- rather
+// than existing-but-permission-blocked like the legacy method.
 //
-// Phase A (this branch) is USB-only: only bus 0003 (USB) hid_ids are
-// matched. Bluetooth (bus 0005) is left for a follow-up branch (see
-// TODO.md item 13/16 on the bluetoothd input-plugin race).
+// Both bus 0003 (USB) and bus 0005 (Bluetooth) hid_ids are matched here.
+// USB gets a real replacement transport (see usb-hid-transport.h): unbind,
+// then claim the raw interface via libusb so this daemon can still read
+// it. Bluetooth does not -- on this system's BlueZ config (UserspaceHID
+// default true), bluetoothd owns the actual L2CAP session itself,
+// independently of which kernel driver (if any) is bound to the resulting
+// hid_device; taking that session over requires bluetoothd to fully
+// disconnect the device's ACL link (confirmed live -- there is no partial/
+// profile-only teardown that leaves the link up), which is a materially
+// worse trade than this method's USB side. Per explicit testing/decision,
+// Bluetooth only gets the sysfs unbind: the controller stays connected and
+// is completely invisible to every other app, but this daemon can't read
+// it either while it's in that state (see open_and_hide_physical_unbind()
+// in main.cpp).
 
 #include <string>
 
@@ -30,20 +44,24 @@ int hid_uevent_monitor_open();
 // previously returned by hid_uevent_monitor_open(). Returns true and
 // fills out_hid_id (e.g. "0003:054C:05C4.0042") only for an ACTION=add
 // SUBSYSTEM=hid event whose HID_ID matches a physical (non-virtual)
-// DualShock4/DualSense over USB. Any other uevent (remove, change,
-// other subsystem, unmatched HID_ID) returns false -- the datagram is
-// always consumed either way, so a non-matching event doesn't spin
-// poll(). Safe to call again immediately if more than one event is
-// queued; the next poll() wakeup (level-triggered) will pick up
+// DualShock4/DualSense over USB or Bluetooth. Any other uevent (remove,
+// change, other subsystem, unmatched HID_ID) returns false -- the
+// datagram is always consumed either way, so a non-matching event
+// doesn't spin poll(). Safe to call again immediately if more than one
+// event is queued; the next poll() wakeup (level-triggered) will pick up
 // anything left unread this pass.
 bool hid_uevent_monitor_read(int fd, std::string& out_hid_id);
 
-// One-time synchronous startup scan of /sys/bus/hid/devices for a
-// physical USB DS4/DualSense hid_device that's already registered
-// before the daemon starts watching uevents (i.e. whose "add" event
-// already fired before hid_uevent_monitor_open() was called). Excludes
-// this daemon's own virtual device the same way find_usb_ds4_hid_id()
-// in main.cpp does. Returns "" if none found.
+// Synchronous scan of /sys/bus/hid/devices for a physical USB or
+// Bluetooth DS4/DualSense hid_device that's currently bound to a driver
+// (i.e. still needs unbinding -- an already-unbound entry is either
+// mid-USB-transport already or a Bluetooth connection this method has
+// deliberately left hidden-and-unreadable, neither of which this should
+// re-surface as "newly found"). Also used as the startup fallback for
+// devices whose "add" event already fired before
+// hid_uevent_monitor_open() was called. Excludes this daemon's own
+// virtual device the same way find_usb_ds4_hid_id() in main.cpp does.
+// Returns "" if none found.
 std::string hid_bus_scan_existing();
 
 // Unbinds a hid_device (by its sysfs id) from its currently-bound kernel
