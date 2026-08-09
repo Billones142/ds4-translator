@@ -50,6 +50,14 @@ void print_usage() {
     std::cout << "                                   commands sent to it. Shows the virtual device for ds4/" << std::endl;
     std::cout << "                                   dualsense types, or the raw physical controller for" << std::endl;
     std::cout << "                                   none/hidden (LED/rumble aren't observable for none)." << std::endl;
+    std::cout << "  set-hide-method <legacy|unbind>  Change how the physical controller is hidden from other" << std::endl;
+    std::cout << "                                   apps (applies on the next physical (re)connection). unbind" << std::endl;
+    std::cout << "                                   (default) fully unbinds the kernel HID driver, so no" << std::endl;
+    std::cout << "                                   hidraw/input node exists at all (USB: still readable via" << std::endl;
+    std::cout << "                                   libusb; Bluetooth: hidden but no live translation while" << std::endl;
+    std::cout << "                                   hidden). legacy is the older chmod/setfacl/EVIOCGRAB" << std::endl;
+    std::cout << "                                   method -- node exists but permission-blocked, keeps live" << std::endl;
+    std::cout << "                                   translation over Bluetooth." << std::endl;
 }
 
 // Connect to the daemon's Unix socket, send one command, return its response.
@@ -198,6 +206,7 @@ static const CommandSpec kCommands[] = {
     {"resume-physical",  nullptr},
     {"tap",              nullptr},
     {"test",             nullptr},
+    {"set-hide-method",  "legacy unbind"},
 };
 
 static const CommandSpec* find_command(const std::string& name) {
@@ -805,6 +814,17 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         full_cmd += " " + type;
+    } else if (cmd == "set-hide-method") {
+        if (argc < 3) {
+            std::cerr << "Error: set-hide-method requires " << spec->arg_completions << std::endl;
+            return 1;
+        }
+        std::string method = argv[2];
+        if (!is_in_list(method, spec->arg_completions)) {
+            std::cerr << "Error: Invalid hide method. Supported: " << spec->arg_completions << std::endl;
+            return 1;
+        }
+        full_cmd += " " + method;
     }
     // status/destroy-virtual/release-physical/resume-physical take no args;
     // full_cmd is already just the command name.
