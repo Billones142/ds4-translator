@@ -1,0 +1,61 @@
+#pragma once
+
+// HID-bus-level detection for the experimental full-unbind hide method
+// (see TODO.md's last item, and src/usb-hid-transport.h for the transport
+// side). Generalizes the sysfs-scan idea find_usb_ds4_hid_id() in main.cpp
+// already uses for the Bluetooth-blocks-USB corner case into the primary
+// detection path for this method: watch /sys/bus/hid/devices "add" events
+// at the HID-bus level, before hid-playstation ever creates a hidraw node,
+// so the controller can be unbound before any other app can see it --
+// rather than existing-but-permission-blocked like the default method.
+//
+// Phase A (this branch) is USB-only: only bus 0003 (USB) hid_ids are
+// matched. Bluetooth (bus 0005) is left for a follow-up branch (see
+// TODO.md item 13/16 on the bluetoothd input-plugin race).
+
+#include <string>
+
+// Opens a NETLINK_KOBJECT_UEVENT socket bound to the kernel's raw uevent
+// multicast group (group 1 -- the same "kobject_uevent" broadcast udevd
+// itself listens to, but consumed directly here so this works even if
+// udev decides not to react in time). Requires root (already assumed --
+// the daemon already writes to sysfs bind/unbind files). Returns a
+// pollable, non-blocking fd suitable for the main poll() set, or -1 on
+// failure (caller should fall back to the legacy hide method entirely,
+// since without this there's no way to catch a hidraw-less device before
+// another app could theoretically race it).
+int hid_uevent_monitor_open();
+
+// Reads and parses exactly one pending uevent datagram from a monitor fd
+// previously returned by hid_uevent_monitor_open(). Returns true and
+// fills out_hid_id (e.g. "0003:054C:05C4.0042") only for an ACTION=add
+// SUBSYSTEM=hid event whose HID_ID matches a physical (non-virtual)
+// DualShock4/DualSense over USB. Any other uevent (remove, change,
+// other subsystem, unmatched HID_ID) returns false -- the datagram is
+// always consumed either way, so a non-matching event doesn't spin
+// poll(). Safe to call again immediately if more than one event is
+// queued; the next poll() wakeup (level-triggered) will pick up
+// anything left unread this pass.
+bool hid_uevent_monitor_read(int fd, std::string& out_hid_id);
+
+// One-time synchronous startup scan of /sys/bus/hid/devices for a
+// physical USB DS4/DualSense hid_device that's already registered
+// before the daemon starts watching uevents (i.e. whose "add" event
+// already fired before hid_uevent_monitor_open() was called). Excludes
+// this daemon's own virtual device the same way find_usb_ds4_hid_id()
+// in main.cpp does. Returns "" if none found.
+std::string hid_bus_scan_existing();
+
+// Unbinds a hid_device (by its sysfs id) from its currently-bound kernel
+// driver via sysfs, so no hidraw/input node is ever created for it. Thin
+// wrapper around write_hid_driver_sysfs() (hid-driver-sysfs.h) -- kept as
+// a separate name so call sites read as "unbind in order to hide" rather
+// than the generic sysfs primitive shared with the legacy hot-swap path.
+bool hid_id_unbind(const std::string& hid_id);
+
+// Parses a sysfs hid_id of the form "BBBB:VVVV:PPPP.NNNN"
+// (bus:vendor:product.instance, all hex) into numeric bus/vendor/product.
+// Used to get a plain vid/pid pair for usb_hid_transport_open(), which
+// matches against libusb's device list rather than sysfs paths. Returns
+// false if the string doesn't parse.
+bool parse_hid_id(const std::string& hid_id, unsigned& bus, unsigned& vendor, unsigned& product);

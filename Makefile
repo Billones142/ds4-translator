@@ -24,22 +24,42 @@ STRICT_WARNINGS = -Wall -Wextra -Werror -Wshadow -Wformat=2 -Wformat-security \
                    -Wnull-dereference -Wpointer-arith -Wcast-align -Wundef -Wwrite-strings \
                    -Wno-missing-field-initializers
 
-CXXFLAGS = -O3 $(STRICT_WARNINGS) -std=c++17 -DDS4_VERSION=\"$(VERSION)\"
-CFLAGS   = -O3 $(STRICT_WARNINGS) -DDS4_VERSION=\"$(VERSION)\"
-LDFLAGS  = -lpthread
-
 BUILD_DIR = build
+
+# EXPERIMENTAL_UNBIND=1 opts into the hid-unbind-hide branch's alternative
+# hide method (full HID-driver unbind + libusb raw-interrupt transport,
+# see src/usb-hid-transport.* and src/hid-unbind-detect.*) instead of the
+# default chmod/setfacl/EVIOCGRAB method. Off by default: plain `make`
+# never touches libusb and produces the exact same binary as main, so this
+# stays fully inert unless a build deliberately opts in.
+EXPERIMENTAL_CXXFLAGS :=
+EXPERIMENTAL_LDFLAGS  :=
+EXPERIMENTAL_SRC      :=
+EXPERIMENTAL_OBJ      :=
+ifdef EXPERIMENTAL_UNBIND
+  ifeq ($(shell pkg-config --exists libusb-1.0 && echo yes),)
+    $(error EXPERIMENTAL_UNBIND=1 requires the libusb-1.0 development package (pkg-config libusb-1.0 not found))
+  endif
+  EXPERIMENTAL_CXXFLAGS := -DDS4_UNBIND_HIDE_EXPERIMENTAL $(shell pkg-config --cflags libusb-1.0)
+  EXPERIMENTAL_LDFLAGS  := $(shell pkg-config --libs libusb-1.0)
+  EXPERIMENTAL_SRC      := src/hid-unbind-detect.cpp src/usb-hid-transport.cpp
+  EXPERIMENTAL_OBJ      := $(BUILD_DIR)/hid-unbind-detect.o $(BUILD_DIR)/usb-hid-transport.o
+endif
+
+CXXFLAGS = -O3 $(STRICT_WARNINGS) -std=c++17 -DDS4_VERSION=\"$(VERSION)\" $(EXPERIMENTAL_CXXFLAGS)
+CFLAGS   = -O3 $(STRICT_WARNINGS) -DDS4_VERSION=\"$(VERSION)\" $(EXPERIMENTAL_CXXFLAGS)
+LDFLAGS  = -lpthread $(EXPERIMENTAL_LDFLAGS)
 
 TARGET_DAEMON = $(BUILD_DIR)/ds4-translator
 TARGET_CTL    = $(BUILD_DIR)/ds4-ctl
 TARGET_SPOOF  = $(BUILD_DIR)/libudev-sony-spoof.so
 TARGET_SPOOF32 = $(BUILD_DIR)/libudev-sony-spoof32.so
 
-DAEMON_SRC = src/main.cpp src/functionfs-backend.c
+DAEMON_SRC = src/main.cpp src/functionfs-backend.c $(EXPERIMENTAL_SRC)
 CTL_SRC    = src/ctl.cpp
 SPOOF_SRC  = src/udev-spoof.c
 
-DAEMON_OBJ = $(BUILD_DIR)/main.o $(BUILD_DIR)/functionfs-backend.o
+DAEMON_OBJ = $(BUILD_DIR)/main.o $(BUILD_DIR)/functionfs-backend.o $(EXPERIMENTAL_OBJ)
 CTL_OBJ    = $(BUILD_DIR)/ctl.o
 
 PREFIX    = /usr/local
@@ -49,8 +69,8 @@ SYSTEMDDIR = /etc/systemd/system
 all: $(TARGET_DAEMON) $(TARGET_CTL) $(TARGET_SPOOF) $(TARGET_SPOOF32)
 
 # Debug build: no optimisation, debug symbols, DS4_DEBUG enabled
-debug: CXXFLAGS = -O0 -g $(STRICT_WARNINGS) -std=c++17 -DDS4_DEBUG -DDS4_VERSION=\"$(VERSION)\"
-debug: CFLAGS   = -O0 -g $(STRICT_WARNINGS) -DDS4_DEBUG -DDS4_VERSION=\"$(VERSION)\"
+debug: CXXFLAGS = -O0 -g $(STRICT_WARNINGS) -std=c++17 -DDS4_DEBUG -DDS4_VERSION=\"$(VERSION)\" $(EXPERIMENTAL_CXXFLAGS)
+debug: CFLAGS   = -O0 -g $(STRICT_WARNINGS) -DDS4_DEBUG -DDS4_VERSION=\"$(VERSION)\" $(EXPERIMENTAL_CXXFLAGS)
 debug: clean all
 
 $(BUILD_DIR):
