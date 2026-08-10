@@ -7,51 +7,105 @@ Standalone, **not** wired into the daemon. Goal: confirm a HID-BPF
 ever see it, while still delivering every report to this tool via a ring
 buffer -- before committing to the real `src/hid-bpf-transport.*` integration.
 
-`probe.bpf.c` currently won't compile as-is: it depends on two things this
-repo doesn't vendor yet, listed below. That's expected for this stage --
-`vmlinux.h` not found and `HID_DEVICE`/`BPF_MAP_TYPE_RINGBUF`/etc undeclared
-are the missing-header errors, not a bug in the source.
+## KNOWN DANGEROUS: do not touch `hid_rdesc_fixup` on this device
+
+An earlier version of `probe.bpf.c` also implemented `hid_rdesc_fixup`,
+zeroing the report descriptor down to a single byte to suppress evdev/js
+node creation in addition to swallowing reports. Tested live against a
+real Bluetooth DS4 (kernel 7.1.6-1-cachyos) on 2026-08-10: the kernel
+logged `playstation ...: unknown main item tag 0x0` on reprobe (the
+parser choking on the mangled descriptor), then crashed on the DS4's
+very next input report:
+
+```
+BUG: kernel NULL pointer dereference, address: 0000000000000010
+Oops: 0002 [#1] SMP PTI
+RIP: 0010:memcpy_orig+0x29/0x130
+Call Trace:
+ dispatch_hid_bpf_device_event+0xd9/0x170
+ __hid_input_report+0xad/0x280
+ hid_safe_input_report+0x14/0x20
+ uhid_char_write+0x316/0x6f0 [uhid]
+ ...
+note: bluetoothd[847] exited with irqs disabled
+```
+
+The oops happened inside the *kernel's own* HID-BPF dispatch code (not
+this program's logic), most likely because the dispatcher precomputes
+buffer/size bookkeeping from the probed descriptor and got a bogus
+value from the 1-byte descriptor. It didn't panic the machine, but it
+left `bluetoothd` wedged in unkillable D-state -- `systemctl restart
+bluetooth` hung indefinitely, and the adapter was gone from D-Bus
+(`bluetoothctl` reporting "No default controller available") until a
+reboot.
+
+The current `probe.bpf.c` only implements `hid_device_event` and does
+**not** touch `hid_rdesc_fixup`. hidraw/evdev nodes for the device stay
+visible with this version (just carrying no data, since every report is
+swallowed into the ring buffer instead) -- weaker hiding than the
+original Phase 1 goal, but doesn't crash the kernel. If a real fix needs
+descriptor suppression too, it needs a fundamentally different approach
+(e.g. a *valid*, minimal-but-parseable descriptor rather than a
+truncated garbage one) and must be re-tested this carefully, ideally
+against a kernel with `panic_on_oops=0` and a way to recover without a
+full reboot, before ever running near a device anyone depends on.
 
 ## Prerequisites (this machine)
 
 Already confirmed present: kernel 7.1.6-1-cachyos, `CONFIG_HID_BPF=y`,
-`/sys/kernel/btf/vmlinux`, `clang`, `libbpf` 1.7.0 (pacman).
+`/sys/kernel/btf/vmlinux`, `clang`, `libbpf` 1.7.0 (pacman), `bpftool`
+(pacman `bpf` package), `udev-hid-bpf` (pacman `udev-hid-bpf` package).
 
-Still needed:
+## Headers
 
-```sh
-sudo pacman -S bpf            # provides bpftool, for vmlinux.h
-sudo pacman -S udev-hid-bpf   # the loader CLI (attaches struct_ops by
-                               # HID_DEVICE() match, no hand-rolled
-                               # attach code needed for this spike)
-```
-
-## Missing headers
-
-`probe.bpf.c` includes `hid_bpf.h` and `hid_bpf_helpers.h` for the
-`HID_BPF_CONFIG`/`HID_DEVICE`/`HID_BPF_OPS`/`hid_bpf_get_data` macros and
-kfunc declarations. These aren't packaged standalone anywhere -- every
-HID-BPF fix (including udev-hid-bpf's own bundled fixes) vendors its own
-copy from the udev-hid-bpf source tree's `src/bpf/` directory. Grab them
-from there (e.g. `github.com/bentiss/udev-hid-bpf`, `src/bpf/hid_bpf.h`
-and `src/bpf/hid_bpf_helpers.h`) and drop them in this directory next to
-`probe.bpf.c` before building.
+`hid_bpf.h`, `hid_bpf_helpers.h`, and `hid_report_descriptor_helpers.h`
+in this directory are vendored verbatim from udev-hid-bpf
+(`gitlab.freedesktop.org/libevdev/udev-hid-bpf`, `src/bpf/`) -- not
+packaged standalone anywhere, every HID-BPF fix vendors its own copy.
+`vmlinux.h` is machine-generated (see Build below) and **not** committed
+-- it's ~160k lines, regenerate it locally instead.
 
 ## Build
 
 ```sh
 bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
-clang -O2 -g -target bpf -D__TARGET_ARCH_x86 \
-    -I. -c probe.bpf.c -o probe.bpf.o
-gcc -O2 -Wall -Wextra $(pkg-config --cflags libbpf) \
-    probe.c -o probe $(pkg-config --libs libbpf)
 ```
+
+Note: redirect stdout only. `bpftool` prints an informational
+`skipping /sys/kernel/btf/vmlinux (will be loaded as base)` line to
+**stderr** -- if you redirect `2>&1` into the same file it lands as
+line 1 of `vmlinux.h` and breaks the build with a nonsensical `unknown
+type name 'skipping'` error.
+
+```sh
+clang -O2 -g -target bpf -D__TARGET_ARCH_x86 -I. -c probe.bpf.c -o probe.bpf.o
+gcc -O2 -Wall -Wextra -DWITH_GZFILEOP probe.c -o probe -lbpf
+```
+
+(`-DWITH_GZFILEOP` matches this system's `pkg-config --cflags libbpf`
+output -- check yours with that command rather than assuming.)
 
 ## Load and test (needs a real DS4 paired over Bluetooth)
 
 ```sh
-sudo udev-hid-bpf add /sys/bus/hid/devices/0005:054C:*.* probe.bpf.o
-./probe
+sudo udev-hid-bpf --verbose add /sys/bus/hid/devices/<hid_id> probe.bpf.o
+```
+
+`<hid_id>` is the exact sysfs entry, e.g. `0005:054C:05C4.002F` (find it
+with `ls /sys/bus/hid/devices/ | grep -i 054c`) -- confirmed the loader
+does *not* accept a glob here (`0005:054C:*.*` fails with `Invalid
+syspath`), unlike what an earlier version of this doc assumed.
+
+The loader prints the ring buffer's actual pin path on success, e.g.:
+
+```
+libbpf: DEBUG Successfully pinned map at /sys/fs/bpf/hid/0005_054C_05C4_002F/probe_bpf/ds4_reports
+```
+
+Then, as root (the pinned bpffs object isn't readable otherwise):
+
+```sh
+sudo ./probe /sys/fs/bpf/hid/<hid_id_with_underscores>/probe_bpf/ds4_reports
 ```
 
 While `probe` is running, in separate terminals:
@@ -67,12 +121,29 @@ While `probe` is running, in separate terminals:
   `hid_device_event` is inbound-only, so this should be unaffected, but
   needs confirming against real hardware, not assumed.
 
+To confirm the hook is actually firing (struct_ops programs don't show
+`run_cnt` in `bpftool prog show` even with
+`sysctl -w kernel.bpf_stats_enabled=1`), add a temporary
+`bpf_printk(...)` call inside `ds4_probe_swallow_event` and watch
+`sudo cat /sys/kernel/tracing/trace_pipe`.
+
 ## Unload
 
 ```sh
-sudo udev-hid-bpf remove /sys/bus/hid/devices/0005:054C:*.*
-sudo rm -f /sys/fs/bpf/ds4_reports
+sudo udev-hid-bpf remove /sys/bus/hid/devices/<hid_id>
 ```
 
-Record the outcome (pass/fail on each of the three checks above) back into
-the plan file before starting Phase 2 integration work.
+## Status (2026-08-10)
+
+Descriptor-suppression half of the mechanism (`hid_rdesc_fixup`)
+crashed the kernel on first real-hardware test -- see the warning above.
+Struck from `probe.bpf.c`. The report-swallow-and-mirror half
+(`hid_device_event` + ringbuf) has **not yet been successfully verified
+end-to-end** against real hardware -- the crash happened before that
+path got exercised. Next step: retest with the current
+`hid_rdesc_fixup`-free version once Bluetooth is recovered (reboot
+required after the crash -- `bluetoothd` was left in unkillable
+D-state).
+
+Record the outcome (pass/fail on each of the three checks above) back
+into the plan file before starting Phase 2 integration work.

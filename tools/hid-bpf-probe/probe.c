@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //
-// Phase 1 spike consumer: reads the ring buffer probe.bpf.c pins at
-// /sys/fs/bpf/ds4_reports and dumps every mirrored DS4 report to
-// stdout. Does not load or attach the BPF program itself -- run
-// `udev-hid-bpf` against probe.bpf.o first (see README.md), then run
-// this once the pinned map exists.
+// Phase 1 spike consumer: reads the ring buffer probe.bpf.c's ds4_reports
+// map, pinned by udev-hid-bpf's own loader (not by probe.bpf.c -- see its
+// comment on the map definition) at
+// /sys/fs/bpf/hid/<hid_id_with_underscores>/probe_bpf/ds4_reports, and
+// dumps every mirrored DS4 report to stdout. Does not load or attach the
+// BPF program itself -- run `udev-hid-bpf add` against probe.bpf.o first
+// (see README.md), then run this with that pin path as argv[1].
 
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
@@ -16,7 +18,6 @@
 #include <unistd.h>
 
 #define MAX_REPORT_LEN 78
-#define PIN_PATH "/sys/fs/bpf/ds4_reports"
 
 static volatile sig_atomic_t g_stop;
 
@@ -39,12 +40,21 @@ static int on_report(void *ctx, void *data, size_t data_sz) {
     return 0;
 }
 
-int main(void) {
-    int map_fd = bpf_obj_get(PIN_PATH);
+int main(int argc, char **argv) {
+    if (argc != 2) {
+        fprintf(stderr, "usage: %s <pin-path-to-ds4_reports-map>\n"
+                         "  e.g. /sys/fs/bpf/hid/0005_054C_05C4_002F/probe_bpf/ds4_reports\n"
+                         "  (see README.md -- udev-hid-bpf's own loader picks this path)\n",
+                argv[0]);
+        return 1;
+    }
+    const char *pin_path = argv[1];
+
+    int map_fd = bpf_obj_get(pin_path);
     if (map_fd < 0) {
         fprintf(stderr, "probe: bpf_obj_get(%s) failed: %s\n"
                          "probe: is probe.bpf.o loaded via udev-hid-bpf yet? see README.md\n",
-                PIN_PATH, strerror(errno));
+                pin_path, strerror(errno));
         return 1;
     }
 
@@ -55,7 +65,7 @@ int main(void) {
     }
 
     signal(SIGINT, on_sigint);
-    fprintf(stderr, "probe: watching %s, ctrl-c to stop\n", PIN_PATH);
+    fprintf(stderr, "probe: watching %s, ctrl-c to stop\n", pin_path);
 
     while (!g_stop) {
         int err = ring_buffer__poll(rb, 200 /* ms */);
