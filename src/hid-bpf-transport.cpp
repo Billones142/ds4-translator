@@ -115,6 +115,7 @@ int on_ringbuf_report(void* ctx, void* data, size_t data_sz) {
 
 void pump_thread_fn(TransportState* t) {
     uint8_t out_buf[kMaxReportSize];
+    int liveness_check_counter = 0;
 
     while (!t->stop_flag.load(std::memory_order_relaxed)) {
         // Outbound: forward at most one pending LED/rumble write per
@@ -143,6 +144,32 @@ void pump_thread_fn(TransportState* t) {
         if (err < 0 && err != -EINTR) {
             std::cerr << "hid-bpf: ring_buffer__poll: " << strerror(-err) << std::endl;
             break;
+        }
+
+        // Unlike libusb (which surfaces LIBUSB_ERROR_NO_DEVICE the moment
+        // the physical device disappears), ring_buffer__poll() has no
+        // analogous "the underlying hid_device is gone" error -- if
+        // bluetoothd tears down and recreates the uhid session (a real
+        // BT reconnect/re-pair cycle, or the controller simply dropping
+        // and coming back), the kernel destroys this hid_device (and
+        // with it, this struct_ops attachment and its ring buffer), and
+        // this call just goes quietly silent forever: zero events, zero
+        // errors. Confirmed live (2026-08-10) that this leaves phy_fd
+        // looking permanently healthy days after the hid_id it was
+        // opened against no longer exists in sysfs at all -- a fresh,
+        // completely unmanaged hid_device shows up in its place with no
+        // hiding applied to it whatsoever. Check roughly once a second
+        // (~125 iterations at the 8ms poll granularity above) rather
+        // than every iteration, since this is just a liveness check, not
+        // the hot path.
+        if (++liveness_check_counter >= 125) {
+            liveness_check_counter = 0;
+            std::error_code ec;
+            if (!fs::exists(t->sysfs_path, ec)) {
+                std::cerr << "hid-bpf: " << t->sysfs_path << " no longer exists "
+                             "(physical controller disconnected or bluetoothd recreated the session)" << std::endl;
+                break;
+            }
         }
     }
 
