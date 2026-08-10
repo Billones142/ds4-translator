@@ -156,13 +156,15 @@ all):
 - `udev-hid-bpf remove` cleanly detached the program; hidraw
   immediately resumed delivering normal reports afterward -- confirms
   clean teardown with the driver never having been touched.
-- **Not yet tested:** outbound LED/rumble while the program is
-  attached. `hid_device_event` is documented as inbound-only and the
-  program never touches `hid_hw_request`/`hid_hw_output_report`, so
-  this is expected to be unaffected, but that's not yet confirmed
-  against real hardware the way the above three are.
+- Outbound LED/rumble confirmed working while the program was attached:
+  wrote a real Bluetooth output report (report ID 0x11, byte-for-byte
+  matching `send_physical_output_report()`'s bluetooth branch in
+  src/main.cpp) straight to hidraw6 -- controller lit up green and
+  rumbled, visually confirmed. `hid_device_event` being inbound-only
+  held up in practice, not just in theory.
 
-Go/no-go for Phase 2: **go**, pending the LED/rumble check above.
+Go/no-go for Phase 2: **go**. All four checks (inbound mirror, hidraw
+silence, evdev silence, outbound LED/rumble) pass on real hardware.
 
 Record the outcome (pass/fail on each of the three checks above) back
 into the plan file before starting Phase 2 integration work.
