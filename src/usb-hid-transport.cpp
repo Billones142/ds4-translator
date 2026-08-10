@@ -32,6 +32,8 @@ struct TransportState {
     std::thread pump_thread;
     std::atomic<bool> stop_flag{false};
     std::string hid_id;
+    uint8_t bus_number = 0;
+    uint8_t device_address = 0;
 };
 
 std::mutex g_registry_mutex;
@@ -83,9 +85,27 @@ bool find_hid_interface(libusb_device* dev, int& out_interface, uint8_t& out_ep_
     return found;
 }
 
+// Checks whether t's target device is still present by bus/address --
+// see pump_thread_fn's use for why this exists alongside the transfer
+// error codes below.
+bool device_still_present(TransportState* t) {
+    libusb_device** list = nullptr;
+    ssize_t count = libusb_get_device_list(t->ctx, &list);
+    bool found = false;
+    for (ssize_t i = 0; i < count && !found; ++i) {
+        if (libusb_get_bus_number(list[i]) == t->bus_number &&
+            libusb_get_device_address(list[i]) == t->device_address) {
+            found = true;
+        }
+    }
+    libusb_free_device_list(list, 1);
+    return found;
+}
+
 void pump_thread_fn(TransportState* t) {
     uint8_t in_buf[kMaxReportSize];
     uint8_t out_buf[kMaxReportSize];
+    int liveness_check_counter = 0;
 
     while (!t->stop_flag.load(std::memory_order_relaxed)) {
         // Outbound: forward at most one pending report per iteration --
@@ -120,6 +140,31 @@ void pump_thread_fn(TransportState* t) {
             break;
         }
         // LIBUSB_ERROR_TIMEOUT is the expected steady-state case -- loop.
+
+        // Belt-and-suspenders beyond the transfer error codes above:
+        // confirmed live (2026-08-10) that a real physical disconnect
+        // doesn't always surface as LIBUSB_ERROR_NO_DEVICE/IO from
+        // libusb_interrupt_transfer() here -- across several rapid
+        // unplug/replug cycles, this loop kept silently returning
+        // LIBUSB_ERROR_TIMEOUT forever against a long-gone device
+        // instead, with the pump thread (and therefore phy_fd, from
+        // main.cpp's side) never noticing anything was wrong. That left
+        // this daemon's own auto-scan permanently blocked from ever
+        // claiming any of the fresh device instances that kept
+        // appearing during the same test, since it only ever runs while
+        // phy_fd < 0. Check roughly once a second (~125 iterations at
+        // the 8ms poll granularity above) whether the exact bus/address
+        // this transport opened is still enumerated at all.
+        if (++liveness_check_counter >= 125) {
+            liveness_check_counter = 0;
+            if (!device_still_present(t)) {
+                std::cerr << "hid-unbind: USB device bus " << (unsigned)t->bus_number
+                          << " addr " << (unsigned)t->device_address
+                          << " no longer enumerated (interrupt transfers kept timing out "
+                             "instead of erroring)" << std::endl;
+                break;
+            }
+        }
     }
 
     shutdown(t->sv[0], SHUT_RDWR);
@@ -155,8 +200,11 @@ int usb_hid_transport_open(const std::string& hid_id, uint16_t vid, uint16_t pid
     bool have_endpoints = target && find_hid_interface(target, interface_number, ep_in, ep_out);
 
     libusb_device_handle* handle = nullptr;
+    uint8_t target_bus = 0, target_addr = 0;
     if (target && have_endpoints) {
         libusb_open(target, &handle);
+        target_bus = libusb_get_bus_number(target);
+        target_addr = libusb_get_device_address(target);
     }
     libusb_free_device_list(list, 1);
 
@@ -268,6 +316,8 @@ int usb_hid_transport_open(const std::string& hid_id, uint16_t vid, uint16_t pid
     t->ep_out = ep_out;
     t->sv[0] = sv[0];
     t->sv[1] = sv[1];
+    t->bus_number = target_bus;
+    t->device_address = target_addr;
     // Pump thread is started separately by usb_hid_transport_start() --
     // see its doc comment for why the interface is claimed here but left
     // idle until the caller says so.
