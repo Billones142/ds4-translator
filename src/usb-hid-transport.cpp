@@ -141,6 +141,28 @@ void pump_thread_fn(TransportState* t) {
         }
         // LIBUSB_ERROR_TIMEOUT is the expected steady-state case -- loop.
 
+        // Second, distinct belt-and-suspenders check: usb_hid_transport_open()
+        // only verifies the claim held via libusb_kernel_driver_active()
+        // *once*, ~300ms after claiming -- confirmed live (2026-08-10,
+        // repeatedly, 100% reproduction) that this one-time check always
+        // passes (no kernel driver active yet), but the kernel's usbhid
+        // driver re-claims the interface *later* in the session anyway,
+        // with the device still fully enumerated the whole time (so the
+        // device_still_present() check above never fires either -- this
+        // isn't a disconnect, the device never left). No corresponding
+        // libusb_interrupt_transfer() error was ever observed at the
+        // moment of reclaim in any test. The only way to catch this is
+        // to keep asking the same question throughout the session, not
+        // just once at open time.
+        if (liveness_check_counter == 60) { // offset from the disconnect check below so they don't both land on the same tick
+            int active_rc = libusb_kernel_driver_active(t->handle, t->interface_number);
+            if (active_rc == 1) {
+                std::cerr << "hid-unbind: interface " << t->interface_number
+                          << " was reclaimed by the kernel's usbhid driver mid-session" << std::endl;
+                break;
+            }
+        }
+
         // Belt-and-suspenders beyond the transfer error codes above:
         // confirmed live (2026-08-10) that a real physical disconnect
         // doesn't always surface as LIBUSB_ERROR_NO_DEVICE/IO from
