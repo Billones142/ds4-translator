@@ -10,24 +10,40 @@
 // To keep the rest of main.cpp (report parsing at read() time, output
 // report building, the poll()-driven main loop, disconnect-via-POLLHUP
 // handling) completely unaware of which transport is active, this hands
-// back an ordinary fd from a blocking AF_UNIX SOCK_DGRAM socketpair: a
+// back an ordinary fd from a blocking AF_UNIX SOCK_SEQPACKET socketpair: a
 // dedicated background thread shuttles raw HID reports between that
 // socket and libusb interrupt transfers, one HID report per
-// read()/write() (SOCK_DGRAM preserves message boundaries, matching
-// hidraw's per-read()-one-report framing). The fd returned here behaves
-// like a hidraw fd in every way that matters to the caller: pollable,
-// POLLIN when a report is available, write()-able with output reports,
-// and closes/EOFs like a real disconnect if the USB device goes away.
+// read()/write() (SOCK_SEQPACKET preserves message boundaries like
+// SOCK_DGRAM, matching hidraw's per-read()-one-report framing, but --
+// unlike SOCK_DGRAM, confirmed live 2026-08-10 -- is connection-oriented
+// enough that closing one end actually delivers POLLHUP/EOF to the
+// other. SOCK_DGRAM here silently never signals the peer at all when
+// the pump thread closes its end after losing the device: poll() just
+// keeps timing out on phy_fd forever, revents always 0, no disconnect
+// ever detected -- confirmed with a standalone reproduction after this
+// exact symptom (physical unplug detected internally, logged, but
+// main.cpp's disconnect handling never firing) showed up live). The fd
+// returned here behaves like a hidraw fd in every way that matters to
+// the caller: pollable, POLLIN when a report is available, write()-able
+// with output reports, and closes/EOFs like a real disconnect if the
+// USB device goes away.
 
 #include <cstdint>
 #include <string>
 
 // Unbinds-then-opens is the caller's job (see hid_id_unbind() in
 // hid-unbind-detect.h) -- this only takes over from there: finds the
-// libusb device matching vid/pid and claims its HID interface. hid_id is
-// kept only so a failed/closed transport can fall back to re-binding the
-// exact same sysfs device via write_hid_driver_sysfs("bind", hid_id),
-// never leaving the controller ownerless.
+// libusb device matching vid/pid and claims its HID interface, retrying
+// a few times with a settling delay if the kernel's own usbhid driver
+// reclaims the interface right out from under a freshly-successful claim
+// (confirmed live, 2026-08-10 -- happens specifically on the BT->USB
+// hot-swap path, while hid-playstation's own kernel-side probe retry for
+// this device is still in flight from the "duplicate MAC" conflict with
+// Bluetooth; see the retry loop's comment in the .cpp for the full
+// mechanism). hid_id is kept only so a failed/closed transport can fall
+// back to re-binding the exact same sysfs device via
+// write_hid_driver_sysfs("bind", hid_id), never leaving the controller
+// ownerless.
 //
 // Deliberately does NOT start pulling reports yet -- see
 // usb_hid_transport_start(). Returns a pollable fd on success (not yet

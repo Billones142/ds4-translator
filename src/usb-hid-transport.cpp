@@ -169,17 +169,70 @@ int usb_hid_transport_open(const std::string& hid_id, uint16_t vid, uint16_t pid
         return -1;
     }
 
-    // Belt-and-suspenders: the sysfs unbind the caller already did should
-    // have released the kernel driver, but detach explicitly too in case
-    // something re-bound it in the meantime. LIBUSB_ERROR_NOT_FOUND (no
-    // kernel driver active) is expected and not an error here.
-    int detach_rc = libusb_detach_kernel_driver(handle, interface_number);
-    if (detach_rc != 0 && detach_rc != LIBUSB_ERROR_NOT_FOUND && detach_rc != LIBUSB_ERROR_NOT_SUPPORTED) {
-        std::cerr << "hid-unbind: libusb_detach_kernel_driver: " << libusb_error_name(detach_rc) << std::endl;
+    // The caller's HID-bus sysfs unbind (hid_id_unbind()) only detaches
+    // the high-level driver (hid-playstation) from the hid_device it
+    // creates -- it's a completely separate kernel binding from the
+    // low-level "usbhid" driver that owns the raw USB *interface* and is
+    // what actually creates that hid_device in the first place.
+    // libusb_detach_kernel_driver() is what detaches usbhid specifically.
+    //
+    // On the BT->USB hot-swap path (see the "USB connection detected"
+    // block in main.cpp), hid-playstation's own kernel-side probe retry
+    // for this exact device can still be in flight here (it was failing
+    // with -EEXIST -- "Duplicate device found for MAC address" -- while
+    // Bluetooth held the MAC, and the kernel keeps retrying on its own
+    // schedule once that clears). If that retry's *first* step --
+    // usbhid re-claiming the raw interface -- lands between our detach
+    // and our claim below, libusb_claim_interface() can still report
+    // success (we got it first) while usbhid's own claim is still queued
+    // right behind us and takes the interface back moments later, with
+    // no libusb error at that moment to catch it -- confirmed live
+    // (2026-08-10): our claim looked fine, then usbhid silently owned
+    // the interface again with no error ever surfacing, only detectable
+    // by directly asking libusb whether a kernel driver is active again
+    // afterward. A plain USB-only connection (no prior Bluetooth bind
+    // racing against it) never hits this -- retry a few times with a
+    // settling delay rather than trying to out-guess the kernel's own
+    // retry timing.
+    constexpr int kMaxClaimAttempts = 4;
+    bool claimed = false;
+    for (int attempt = 1; attempt <= kMaxClaimAttempts && !claimed; ++attempt) {
+        // LIBUSB_ERROR_NOT_FOUND (no kernel driver active) is expected
+        // and not an error here.
+        int detach_rc = libusb_detach_kernel_driver(handle, interface_number);
+        if (detach_rc != 0 && detach_rc != LIBUSB_ERROR_NOT_FOUND && detach_rc != LIBUSB_ERROR_NOT_SUPPORTED) {
+            std::cerr << "hid-unbind: libusb_detach_kernel_driver: " << libusb_error_name(detach_rc)
+                      << " (attempt " << attempt << ")" << std::endl;
+        }
+
+        if (libusb_claim_interface(handle, interface_number) != 0) {
+            std::cerr << "hid-unbind: libusb_claim_interface failed for interface " << interface_number
+                      << " (attempt " << attempt << ")" << std::endl;
+            usleep(200000 * attempt);
+            continue;
+        }
+
+        // Give any in-flight kernel probe retry time to finish, then ask
+        // libusb directly whether a kernel driver (usbhid) is active on
+        // this interface again -- the one question sysfs alone can't
+        // answer reliably here, since hid_id_unbind() already made the
+        // *other* (HID-bus) layer look clean regardless.
+        usleep(300000);
+        int active_rc = libusb_kernel_driver_active(handle, interface_number);
+        if (active_rc == 0) {
+            claimed = true;
+            break;
+        }
+        std::cerr << "hid-unbind: interface " << interface_number
+                  << " was reclaimed by the kernel right after our claim (attempt "
+                  << attempt << "/" << kMaxClaimAttempts << "), retrying..." << std::endl;
+        libusb_release_interface(handle, interface_number);
+        usleep(200000 * attempt);
     }
 
-    if (libusb_claim_interface(handle, interface_number) != 0) {
-        std::cerr << "hid-unbind: libusb_claim_interface failed for interface " << interface_number << std::endl;
+    if (!claimed) {
+        std::cerr << "hid-unbind: giving up on interface " << interface_number
+                  << " after " << kMaxClaimAttempts << " attempts -- kernel keeps reclaiming it" << std::endl;
         libusb_close(handle);
         libusb_exit(t->ctx);
         delete t;
@@ -192,7 +245,11 @@ int usb_hid_transport_open(const std::string& hid_id, uint16_t vid, uint16_t pid
               << " ep_out=0x" << (unsigned)ep_out << std::dec << std::endl;
 
     int sv[2];
-    if (socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) != 0) {
+    // SOCK_SEQPACKET, not SOCK_DGRAM -- see usb-hid-transport.h's doc
+    // comment: SOCK_DGRAM here never delivers POLLHUP/EOF to the peer
+    // when this end closes (confirmed live), leaving phy_fd looking
+    // permanently healthy after the device is actually gone.
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv) != 0) {
         std::cerr << "hid-unbind: socketpair failed: " << strerror(errno) << std::endl;
         libusb_release_interface(handle, interface_number);
         libusb_close(handle);

@@ -13,20 +13,21 @@
 // controller can be unbound before any other app can see it -- rather
 // than existing-but-permission-blocked like the legacy method.
 //
-// Both bus 0003 (USB) and bus 0005 (Bluetooth) hid_ids are matched here.
-// USB gets a real replacement transport (see usb-hid-transport.h): unbind,
-// then claim the raw interface via libusb so this daemon can still read
-// it. Bluetooth does not -- on this system's BlueZ config (UserspaceHID
-// default true), bluetoothd owns the actual L2CAP session itself,
-// independently of which kernel driver (if any) is bound to the resulting
-// hid_device; taking that session over requires bluetoothd to fully
-// disconnect the device's ACL link (confirmed live -- there is no partial/
-// profile-only teardown that leaves the link up), which is a materially
-// worse trade than this method's USB side. Per explicit testing/decision,
-// Bluetooth only gets the sysfs unbind: the controller stays connected and
-// is completely invisible to every other app, but this daemon can't read
-// it either while it's in that state (see open_and_hide_physical_unbind()
-// in main.cpp).
+// Both bus 0003 (USB) and bus 0005 (Bluetooth) hid_ids are matched here,
+// and both get a real replacement transport so this daemon can keep
+// reading a fully-hidden controller -- see open_and_hide_physical_unbind()
+// in main.cpp. USB: unbind, then claim the raw interface via libusb (see
+// usb-hid-transport.h). Bluetooth can't use the same trick -- on this
+// system's BlueZ config (UserspaceHID default true), bluetoothd owns the
+// actual L2CAP session itself, independently of which kernel driver (if
+// any) is bound to the resulting hid_device; taking that session over
+// requires bluetoothd to fully disconnect the device's ACL link (confirmed
+// live -- there is no partial/profile-only teardown that leaves the link
+// up), a materially worse trade than this method's USB side. So Bluetooth
+// leaves the kernel driver bound (hidraw/input nodes for the physical
+// controller keep existing) and instead uses a HID-BPF program to
+// intercept every report before it reaches them, mirroring it to this
+// daemon instead -- see hid-bpf-transport.h.
 
 #include <string>
 

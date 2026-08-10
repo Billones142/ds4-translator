@@ -9,6 +9,10 @@ VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || cat VERSI
 CXX = g++
 CC  = gcc
 
+PREFIX    = /usr/local
+BINDIR    = $(PREFIX)/bin
+SYSTEMDDIR = /etc/systemd/system
+
 # This project talks to the kernel through raw ioctls, configfs, and manual
 # struct-packed HID reports -- exactly the code where an unnoticed implicit
 # conversion, shadowed variable, or format-string slip turns into a silent
@@ -41,9 +45,31 @@ UNBIND_LDFLAGS  := $(shell pkg-config --libs libusb-1.0)
 UNBIND_SRC      := src/hid-unbind-detect.cpp src/usb-hid-transport.cpp
 UNBIND_OBJ      := $(BUILD_DIR)/hid-unbind-detect.o $(BUILD_DIR)/usb-hid-transport.o
 
-CXXFLAGS = -O3 $(STRICT_WARNINGS) -std=c++17 -DDS4_VERSION=\"$(VERSION)\" $(UNBIND_CXXFLAGS)
+# HID-BPF replacement transport for the unbind hide method's Bluetooth
+# side (see src/hid-bpf-transport.h and src/hid-bpf/hid-bpf-transport.bpf.c)
+# -- USB's libusb transport above has no Bluetooth equivalent, so this
+# fills that gap instead of leaving Bluetooth unbind-hidden-but-unreadable.
+# Same dependency tier as libusb-1.0: hard build requirement, not optional.
+ifeq ($(shell pkg-config --exists libbpf && echo yes),)
+  $(error libbpf development package required (pkg-config libbpf not found))
+endif
+ifeq ($(shell command -v bpftool 2>/dev/null),)
+  $(error bpftool not found (needed to generate vmlinux.h for the HID-BPF transport) -- try the "bpf" package)
+endif
+ifeq ($(shell command -v clang 2>/dev/null),)
+  $(error clang not found (needed to compile src/hid-bpf/hid-bpf-transport.bpf.c))
+endif
+HIDBPF_CXXFLAGS := $(shell pkg-config --cflags libbpf)
+HIDBPF_LDFLAGS  := $(shell pkg-config --libs libbpf)
+HIDBPF_SRC      := src/hid-bpf-transport.cpp
+HIDBPF_OBJ      := $(BUILD_DIR)/hid-bpf-transport.o
+HIDBPF_BPF_OBJ  := $(BUILD_DIR)/hid-bpf-transport.bpf.o
+HIDBPF_INSTALL_PATH := $(PREFIX)/lib/ds4-translator/hid-bpf-transport.bpf.o
+
+CXXFLAGS = -O3 $(STRICT_WARNINGS) -std=c++17 -DDS4_VERSION=\"$(VERSION)\" \
+           -DHID_BPF_OBJ_PATH=\"$(HIDBPF_INSTALL_PATH)\" $(UNBIND_CXXFLAGS) $(HIDBPF_CXXFLAGS)
 CFLAGS   = -O3 $(STRICT_WARNINGS) -DDS4_VERSION=\"$(VERSION)\" $(UNBIND_CXXFLAGS)
-LDFLAGS  = -lpthread $(UNBIND_LDFLAGS)
+LDFLAGS  = -lpthread $(UNBIND_LDFLAGS) $(HIDBPF_LDFLAGS)
 
 TARGET_DAEMON = $(BUILD_DIR)/ds4-translator
 TARGET_CTL    = $(BUILD_DIR)/ds4-ctl
@@ -54,17 +80,14 @@ DAEMON_SRC = src/main.cpp src/functionfs-backend.c $(UNBIND_SRC)
 CTL_SRC    = src/ctl.cpp
 SPOOF_SRC  = src/udev-spoof.c
 
-DAEMON_OBJ = $(BUILD_DIR)/main.o $(BUILD_DIR)/functionfs-backend.o $(UNBIND_OBJ)
+DAEMON_OBJ = $(BUILD_DIR)/main.o $(BUILD_DIR)/functionfs-backend.o $(UNBIND_OBJ) $(HIDBPF_OBJ)
 CTL_OBJ    = $(BUILD_DIR)/ctl.o
 
-PREFIX    = /usr/local
-BINDIR    = $(PREFIX)/bin
-SYSTEMDDIR = /etc/systemd/system
-
-all: $(TARGET_DAEMON) $(TARGET_CTL) $(TARGET_SPOOF) $(TARGET_SPOOF32)
+all: $(TARGET_DAEMON) $(TARGET_CTL) $(TARGET_SPOOF) $(TARGET_SPOOF32) $(HIDBPF_BPF_OBJ)
 
 # Debug build: no optimisation, debug symbols, DS4_DEBUG enabled
-debug: CXXFLAGS = -O0 -g $(STRICT_WARNINGS) -std=c++17 -DDS4_DEBUG -DDS4_VERSION=\"$(VERSION)\" $(UNBIND_CXXFLAGS)
+debug: CXXFLAGS = -O0 -g $(STRICT_WARNINGS) -std=c++17 -DDS4_DEBUG -DDS4_VERSION=\"$(VERSION)\" \
+                  -DHID_BPF_OBJ_PATH=\"$(HIDBPF_INSTALL_PATH)\" $(UNBIND_CXXFLAGS) $(HIDBPF_CXXFLAGS)
 debug: CFLAGS   = -O0 -g $(STRICT_WARNINGS) -DDS4_DEBUG -DDS4_VERSION=\"$(VERSION)\" $(UNBIND_CXXFLAGS)
 debug: clean all
 
@@ -90,6 +113,24 @@ $(BUILD_DIR)/%.o: src/%.cpp | $(BUILD_DIR)
 $(BUILD_DIR)/%.o: src/%.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+# Machine-generated (kernel BTF -> C types) for the HID-BPF transport's
+# CO-RE relocations -- deliberately not tracked in git (huge, and only
+# needed at build time; libbpf resolves actual field offsets against
+# whatever kernel BTF is present on the machine that *loads* the
+# program, not this one, so building here and running elsewhere is
+# fine as long as that machine also exposes /sys/kernel/btf/vmlinux).
+$(BUILD_DIR)/vmlinux.h: | $(BUILD_DIR)
+	bpftool btf dump file /sys/kernel/btf/vmlinux format c > $@
+
+# clang (not $(CC)/$(CXX)) targeting the BPF backend directly -- this is
+# not a native object file. -D__TARGET_ARCH_x86 hardcodes this project's
+# only tested/supported arch, same as the rest of the build.
+$(HIDBPF_BPF_OBJ): src/hid-bpf/hid-bpf-transport.bpf.c src/hid-bpf/hid_bpf.h \
+                   src/hid-bpf/hid_bpf_helpers.h src/hid-bpf/hid_report_descriptor_helpers.h \
+                   $(BUILD_DIR)/vmlinux.h | $(BUILD_DIR)
+	clang -O2 -g -target bpf -D__TARGET_ARCH_x86 \
+	    -I $(BUILD_DIR) -I src/hid-bpf -c $< -o $@
+
 clean:
 	rm -rf $(BUILD_DIR)
 
@@ -104,6 +145,7 @@ install: all
 	install -D -m 644 ds4-ctl.1 $(DESTDIR)/usr/share/man/man1/ds4-ctl.1
 	install -D -m 644 ds4-ctl-completion.bash $(DESTDIR)/usr/share/bash-completion/completions/ds4-ctl
 	install -D -m 644 dummy_hcd.conf $(DESTDIR)/etc/modprobe.d/dummy_hcd.conf
+	install -D -m 644 $(HIDBPF_BPF_OBJ) $(DESTDIR)$(HIDBPF_INSTALL_PATH)
 	udevadm control --reload-rules
 	udevadm trigger
 	systemctl daemon-reload
@@ -125,6 +167,7 @@ uninstall:
 	rm -f $(DESTDIR)/usr/share/man/man1/ds4-ctl.1
 	rm -f $(DESTDIR)/usr/share/bash-completion/completions/ds4-ctl
 	rm -f $(DESTDIR)/etc/modprobe.d/dummy_hcd.conf
+	rm -f $(DESTDIR)$(HIDBPF_INSTALL_PATH)
 	udevadm control --reload-rules
 	udevadm trigger
 	systemctl daemon-reload
