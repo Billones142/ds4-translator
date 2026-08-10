@@ -137,13 +137,32 @@ sudo udev-hid-bpf remove /sys/bus/hid/devices/<hid_id>
 
 Descriptor-suppression half of the mechanism (`hid_rdesc_fixup`)
 crashed the kernel on first real-hardware test -- see the warning above.
-Struck from `probe.bpf.c`. The report-swallow-and-mirror half
-(`hid_device_event` + ringbuf) has **not yet been successfully verified
-end-to-end** against real hardware -- the crash happened before that
-path got exercised. Next step: retest with the current
-`hid_rdesc_fixup`-free version once Bluetooth is recovered (reboot
-required after the crash -- `bluetoothd` was left in unkillable
-D-state).
+Struck from `probe.bpf.c`.
+
+The report-swallow-and-mirror half (`hid_device_event` + ringbuf) is
+**verified working end-to-end** against a real Bluetooth DS4
+(`0005:054C:05C4.0008`, same kernel, post-reboot), with the daemon's own
+driver still normally bound throughout (no sysfs unbind involved at
+all):
+
+- `./probe` received a continuous stream of real 78-byte report-ID-0x11
+  reports while the controller was moved/pressed -- confirms the
+  ringbuf mirror path.
+- `dd if=/dev/hidraw6` and `dd if=/dev/input/event31` (this device's
+  hidraw and evdev nodes) both blocked for the full 8s test window with
+  **zero bytes read**, in the same window `probe` was actively
+  receiving data -- confirms every other consumer of this hid_device is
+  fully blind, no permission-window race, no unbind needed.
+- `udev-hid-bpf remove` cleanly detached the program; hidraw
+  immediately resumed delivering normal reports afterward -- confirms
+  clean teardown with the driver never having been touched.
+- **Not yet tested:** outbound LED/rumble while the program is
+  attached. `hid_device_event` is documented as inbound-only and the
+  program never touches `hid_hw_request`/`hid_hw_output_report`, so
+  this is expected to be unaffected, but that's not yet confirmed
+  against real hardware the way the above three are.
+
+Go/no-go for Phase 2: **go**, pending the LED/rumble check above.
 
 Record the outcome (pass/fail on each of the three checks above) back
 into the plan file before starting Phase 2 integration work.
