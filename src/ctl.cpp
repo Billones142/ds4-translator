@@ -33,6 +33,14 @@ void print_usage() {
     std::cout << "                                   dualsense=uhid, ds4=functionfs -- uhid never reliably" << std::endl;
     std::cout << "                                   enumerates as a real USB device, which some Wine/Proton" << std::endl;
     std::cout << "                                   titles need to detect DS4 emulation; functionfs does." << std::endl;
+    std::cout << "  set-name <ds4|dualsense> <name>  Override the controller name/product string reported to" << std::endl;
+    std::cout << "                                   the OS (recreates the device if that type is currently" << std::endl;
+    std::cout << "                                   active -- brief input interruption -- otherwise just" << std::endl;
+    std::cout << "                                   persists for later). Max 63 bytes, no newlines." << std::endl;
+    std::cout << "  set-name <ds4|dualsense> --reset Restore the default Sony name for that controller type" << std::endl;
+    std::cout << "                                   NOTE: vendor ID stays Sony's regardless -- some games/" << std::endl;
+    std::cout << "                                   drivers cross-check name against vendor ID, so a custom" << std::endl;
+    std::cout << "                                   name may raise compatibility suspicion in those cases." << std::endl;
     std::cout << "  create-virtual <ds4|dualsense>   Create a standalone virtual controller, no physical pad needed" << std::endl;
     std::cout << "  destroy-virtual                  Destroy the standalone virtual controller" << std::endl;
     std::cout << "  virtual [ds4|dualsense] [--auto] Create (if needed) a standalone virtual controller and open" << std::endl;
@@ -199,6 +207,7 @@ static const CommandSpec kCommands[] = {
     {"status",           nullptr},
     {"set-type",         "ds4 dualsense none hidden"},
     {"set-backend",      nullptr}, // position-aware, special-cased in --complete-args below
+    {"set-name",         nullptr}, // position-aware (ds4|dualsense, then free-text name), special-cased below
     {"create-virtual",   "ds4 dualsense"},
     {"destroy-virtual",  nullptr},
     {"virtual",          "ds4 dualsense --auto"},
@@ -744,6 +753,14 @@ int main(int argc, char* argv[]) {
             } else if (argc == 4) {
                 std::cout << "uhid functionfs" << std::endl;
             }
+        } else if (target == "set-name") {
+            // Same shape as set-backend for the first argument; the second
+            // is a free-text name, so there's nothing useful to complete.
+            if (argc <= 3) {
+                std::cout << "ds4 dualsense" << std::endl;
+            } else if (argc == 4) {
+                std::cout << "--reset" << std::endl;
+            }
         } else if (const CommandSpec *spec = find_command(target)) {
             if (spec->arg_completions) std::cout << spec->arg_completions << std::endl;
         }
@@ -755,6 +772,50 @@ int main(int argc, char* argv[]) {
         std::cerr << "Error: Unknown command '" << cmd << "'" << std::endl;
         print_usage();
         return 1;
+    }
+
+    if (cmd == "set-name") {
+        // Free-text name argument (may contain spaces), unlike every other
+        // command here -- handled as its own early-return branch rather than
+        // joining the generic full_cmd path below, which assumes single-
+        // token arguments.
+        if (argc < 4) {
+            std::cerr << "Error: set-name requires <ds4|dualsense> <name> (or --reset)" << std::endl;
+            return 1;
+        }
+        std::string ctrl = argv[2];
+        if (ctrl != "ds4" && ctrl != "dualsense") {
+            std::cerr << "Error: Invalid controller type. Supported: ds4 dualsense" << std::endl;
+            return 1;
+        }
+        std::string name_arg;
+        if (std::string(argv[3]) == "--reset") {
+            name_arg = "--reset";
+        } else {
+            for (int i = 3; i < argc; ++i) {
+                if (i > 3) name_arg += " ";
+                name_arg += argv[i];
+            }
+            if (name_arg.find('\n') != std::string::npos || name_arg.find('\r') != std::string::npos) {
+                std::cerr << "Error: name cannot contain newline characters." << std::endl;
+                return 1;
+            }
+            if (name_arg.size() > 63) {
+                std::cerr << "Error: name too long (" << name_arg.size() << " bytes, max 63)." << std::endl;
+                return 1;
+            }
+        }
+        std::cerr << "Warning: changing the controller name recreates the virtual device if that type is "
+                      "currently active -- any app/game reading it will see a brief input interruption."
+                   << std::endl;
+        std::string response;
+        if (!send_command("set-name " + ctrl + " " + name_arg, response)) {
+            std::cerr << response << std::endl;
+            print_daemon_unreachable_help();
+            return 1;
+        }
+        std::cout << response << std::endl;
+        return 0;
     }
 
     if (cmd == "virtual") {

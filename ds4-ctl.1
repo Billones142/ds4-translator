@@ -24,6 +24,12 @@ Disables virtual controller emulation.
 .B set-backend <ds4|dualsense> <uhid|functionfs>
 Changes that controller type's virtual device backend. Takes effect immediately if that type is currently active, otherwise persists for the next time it's selected via set-type. Defaults: dualsense=uhid, ds4=functionfs (uhid is not reliably detected as a DS4 in some Wine/Proton titles; functionfs is).
 .TP
+.B set-name <ds4|dualsense> <name>
+Overrides the controller name/product string reported to the OS for that controller type (max 63 bytes, no newlines). Takes effect immediately (recreating the virtual device, with a brief input interruption) if that type is currently active, otherwise persists for the next time it's selected via set-type. The vendor ID stays Sony's regardless, so some games/drivers that cross-check name against vendor ID may treat a custom name with suspicion.
+.TP
+.B set-name <ds4|dualsense> --reset
+Restores the default Sony name for that controller type.
+.TP
 .B help
 Shows basic usage and command synopsis.
 .SH FILES

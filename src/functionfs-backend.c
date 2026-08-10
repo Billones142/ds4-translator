@@ -549,7 +549,7 @@ bool functionfs_send_input_report(struct FunctionFSDevice *dev, const uint8_t *d
     return true;
 }
 
-bool functionfs_init(struct FunctionFSDevice *dev, int target_type) {
+bool functionfs_init(struct FunctionFSDevice *dev, int target_type, const char *product_name) {
     dev->ep0_fd = -1;
     dev->ep_in_fd = -1;
     dev->ep_out_fd = -1;
@@ -580,7 +580,17 @@ bool functionfs_init(struct FunctionFSDevice *dev, int target_type) {
     ok = ok && make_dir(GADGET_DIR "/strings/0x409");
     ok = ok && write_file_str(GADGET_DIR "/strings/0x409/manufacturer",
                                is_ds4 ? "Sony Computer Entertainment\n" : "Sony Interactive Entertainment\n");
-    ok = ok && write_file_str(GADGET_DIR "/strings/0x409/product", "Wireless Controller\n");
+    {
+        // Real Sony DS4/DualSense USB descriptors use different product
+        // strings ("Wireless Controller" vs "DualSense Wireless
+        // Controller") -- caller passes a custom override (from ds4-ctl
+        // set-name) or NULL/empty to keep this default.
+        const char *default_product = is_ds4 ? "Wireless Controller" : "DualSense Wireless Controller";
+        const char *product = (product_name && product_name[0]) ? product_name : default_product;
+        char product_line[80];
+        (void)snprintf(product_line, sizeof(product_line), "%s\n", product);
+        ok = ok && write_file_str(GADGET_DIR "/strings/0x409/product", product_line);
+    }
     ok = ok && write_file_str(GADGET_DIR "/strings/0x409/serialnumber", "74:e7:d6:3a:47:e8\n");
 
     ok = ok && make_dir(GADGET_DIR "/configs/c.1");

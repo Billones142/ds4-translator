@@ -44,7 +44,10 @@ struct FunctionFSDevice {
     bool report_pending;
 };
 
-bool functionfs_init(struct FunctionFSDevice *dev, int target_type);
+// product_name: custom USB product string override, or NULL/empty to use the
+// built-in per-type default ("Wireless Controller" / "DualSense Wireless
+// Controller").
+bool functionfs_init(struct FunctionFSDevice *dev, int target_type, const char *product_name);
 void functionfs_close(struct FunctionFSDevice *dev);
 bool functionfs_send_input_report(struct FunctionFSDevice *dev, const uint8_t *data, size_t size);
 
