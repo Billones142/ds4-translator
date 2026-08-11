@@ -18,6 +18,25 @@
 #include "uhid-bpf-test-wrappers.h"
 #endif
 
+/*
+ * Upstream udev-hid-bpf leaves these kfunc prototypes for vmlinux.h to
+ * supply, since their build always targets a kernel with CONFIG_HID_BPF
+ * (and therefore these kfuncs) actually registered in its live BTF.
+ * vmlinux.h here is generated from *this build machine's* running
+ * kernel (see the Makefile's vmlinux.h rule) -- on a machine without
+ * HID_BPF enabled (e.g. CI runners, most non-HID_BPF-enabled distro
+ * kernels), the dump simply doesn't contain these two kfuncs and the
+ * compile fails on "call to undeclared function" (confirmed live,
+ * 2026-08-11, on a GitHub Actions runner). Declaring them explicitly
+ * makes the object buildable on any machine with libbpf/clang/bpftool
+ * and *some* kernel BTF present, matching what the Makefile's own
+ * vmlinux.h comment already promises. Signatures match the kernel's
+ * drivers/hid/bpf/hid_bpf_dispatch.c kfunc definitions exactly, so
+ * this changes nothing on a machine where vmlinux.h already had them.
+ */
+extern __u8 *hid_bpf_get_data(struct hid_bpf_ctx *ctx, unsigned int offset, const size_t __sz) __ksym;
+extern void hid_bpf_release_context(struct hid_bpf_ctx *ctx) __ksym;
+
 /* Compiler attributes */
 #ifndef __packed
 #define __packed __attribute__((packed))
