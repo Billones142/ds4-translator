@@ -52,12 +52,15 @@ void print_usage() {
     std::cout << "                                   none/hidden (LED/rumble aren't observable for none)." << std::endl;
     std::cout << "  set-hide-method <legacy|unbind>  Change how the physical controller is hidden from other" << std::endl;
     std::cout << "                                   apps (applies on the next physical (re)connection). unbind" << std::endl;
-    std::cout << "                                   (default) fully unbinds the kernel HID driver, so no" << std::endl;
-    std::cout << "                                   hidraw/input node exists at all (USB: still readable via" << std::endl;
-    std::cout << "                                   libusb; Bluetooth: hidden but no live translation while" << std::endl;
-    std::cout << "                                   hidden). legacy is the older chmod/setfacl/EVIOCGRAB" << std::endl;
-    std::cout << "                                   method -- node exists but permission-blocked, keeps live" << std::endl;
-    std::cout << "                                   translation over Bluetooth." << std::endl;
+    std::cout << "                                   (default) hides it before any other app can see it, with" << std::endl;
+    std::cout << "                                   live translation either way: USB fully unbinds the kernel" << std::endl;
+    std::cout << "                                   HID driver (no hidraw/input node exists at all) and reads" << std::endl;
+    std::cout << "                                   it via libusb instead; Bluetooth keeps the driver bound" << std::endl;
+    std::cout << "                                   (hidraw/input nodes still exist) but uses a HID-BPF" << std::endl;
+    std::cout << "                                   program to make every report invisible to them while" << std::endl;
+    std::cout << "                                   mirroring it to this daemon. legacy is the older" << std::endl;
+    std::cout << "                                   chmod/setfacl/EVIOCGRAB method -- node exists but" << std::endl;
+    std::cout << "                                   permission-blocked, for both USB and Bluetooth." << std::endl;
 }
 
 // Connect to the daemon's Unix socket, send one command, return its response.

@@ -30,6 +30,7 @@
 #include "hid-driver-sysfs.h"
 #include "hid-unbind-detect.h"
 #include "usb-hid-transport.h"
+#include "hid-bpf-transport.h"
 
 #ifndef DS4_VERSION
 #define DS4_VERSION "unknown"
@@ -406,15 +407,14 @@ HideMethod g_hide_method = HIDE_METHOD_UNBIND;
 // knows to tear down the libusb transport instead of chmod-restoring a
 // hidraw node that was never touched in the first place.
 bool g_phy_is_unbind_transport = false;
-// Set for the lifetime of a Bluetooth connection that's been sysfs-unbound
-// under HIDE_METHOD_UNBIND with no replacement transport (see
-// open_and_hide_physical_unbind()'s bus 0x0005 branch) -- phy_fd stays -1
-// the whole time this is true, since there is no fd to read. Every
-// release/rebind/shutdown site that already checks `phy_fd >= 0` to decide
-// whether there's a physical connection to give back needs a parallel
-// check against this flag, since this connection never has a valid fd for
-// that check to catch.
-bool g_phy_is_unbind_bt_hidden = false;
+// Same as g_phy_is_unbind_transport but for a Bluetooth connection opened
+// via hid_bpf_transport_open() (see hid-bpf-transport.h) instead of
+// usb_hid_transport_open() -- release_physical_connection() checks this
+// to tear down the HID-BPF transport instead. Bluetooth used to have no
+// replacement transport at all here (sysfs-unbind only, phy_fd stuck at
+// -1 forever -- see git history for that dead end), so unlike the USB
+// flag this one didn't exist until Bluetooth got a real transport too.
+bool g_phy_is_bpf_transport = false;
 // Persistent HID-bus uevent monitor fd (see hid-unbind-detect.h), added
 // to the main poll() set whenever HIDE_METHOD_UNBIND is active. -1 when
 // the method is legacy, or if opening the monitor failed (in which case
@@ -508,43 +508,98 @@ int open_and_hide_physical(const std::string& dev_name, ControllerType for_type,
 // Alternative to open_and_hide_physical(): given a hid_id
 // already found at the HID-bus level (see hid-unbind-detect.h -- by
 // definition this runs before any hidraw node for it may even exist),
-// unbinds the kernel driver via sysfs so no hidraw/input node is ever
-// created. For USB (bus 0003), then claims the raw interface with libusb
-// so this daemon can still talk to it -- see usb-hid-transport.h. For
-// Bluetooth (bus 0005), there is no replacement transport: on this
-// system's BlueZ config, bluetoothd owns the real L2CAP session itself
-// regardless of kernel driver binding, and taking it over requires
-// dropping the device's ACL link entirely (confirmed live testing -- no
-// partial teardown leaves the link up), a materially worse trade than
-// this method's USB side. Per explicit testing/decision, the accepted
-// tradeoff is: sysfs-unbind only, so the controller stays connected and
-// invisible to every other app, but this daemon can't read it either
-// while it's in that state. Callers must check g_phy_is_unbind_bt_hidden
-// after a -1 return: if set, this is that deliberate no-transport state,
-// not a failure needing the legacy-method fallback.
+// hides the controller from every other app while keeping a real
+// transport for this daemon. USB (bus 0003) unbinds the kernel driver
+// via sysfs so no hidraw/input node is ever created, then claims the raw
+// interface with libusb -- see usb-hid-transport.h. Bluetooth (bus 0005)
+// can't use the same trick: on this system's BlueZ config, bluetoothd
+// owns the real L2CAP session itself regardless of kernel driver
+// binding, and taking it over requires dropping the device's ACL link
+// entirely (confirmed live testing -- no partial teardown leaves the
+// link up), a materially worse trade than this method's USB side. So
+// Bluetooth leaves the kernel driver bound (hidraw/input nodes for the
+// physical controller keep existing) and instead attaches a HID-BPF
+// program that intercepts every report at the HID-core level before it
+// reaches hidraw/evdev/anything else, mirroring it to this daemon
+// instead -- see hid-bpf-transport.h. Confirmed live (2026-08-10) that
+// this leaves every other consumer of the device fully blind with zero
+// permission-window race, unlike this method's earlier sysfs-unbind-only
+// Bluetooth dead end (phy_fd stuck at -1 forever, no live translation --
+// see git history).
 //
-// On USB success, returns a pollable fd that behaves like a hidraw fd to
-// the rest of this file (see usb-hid-transport.h) -- sets
-// g_phy_is_unbind_transport so release_physical_connection() knows to
-// tear it down via usb_hid_transport_close() instead of chmod-restoring
-// nodes that were never touched. On USB failure, returns -1 having
-// already best-effort re-bound the kernel driver, so the caller can retry
-// via find_physical_ds4() + open_and_hide_physical() without the
-// controller having been left ownerless.
-int open_and_hide_physical_unbind(const std::string& hid_id) {
-    g_phy_is_unbind_bt_hidden = false;
-
+// On success (either bus), returns a pollable fd that behaves like a
+// hidraw fd to the rest of this file -- sets g_phy_is_unbind_transport
+// (USB) or g_phy_is_bpf_transport (Bluetooth) so
+// release_physical_connection() knows which teardown path to use instead
+// of chmod-restoring nodes that were never touched. On failure, returns
+// -1 having already best-effort undone anything it started (USB:
+// re-bound the kernel driver; Bluetooth: detached the BPF program), so
+// the caller can fall back to the legacy hide method for this connection
+// attempt without the controller having been left ownerless.
+//
+// out_hidden_nodes is only ever populated on the Bluetooth branch: the
+// BPF swallow alone stops duplicate *input* (hid-playstation never gets
+// a report to translate), but its evdev/joystick nodes still exist and
+// still enumerate since the driver stays bound -- confirmed live
+// (2026-08-10) that browsers/SDL query evdev capabilities directly and
+// list the physical pad as a second, frozen gamepad regardless of
+// whether any data ever arrives. Grabbing/chmod'ing those siblings here
+// reuses the exact same treatment open_and_hide_physical() already gives
+// the legacy method's event/js nodes (see its EVIOCGRAB/chmod loop) to
+// close that gap. The USB branch doesn't need this: unbinding the kernel
+// driver entirely means those nodes are never created in the first
+// place.
+int open_and_hide_physical_unbind(const std::string& hid_id, std::vector<PhysicalNode>& out_hidden_nodes) {
     unsigned bus = 0, vendor = 0, product = 0;
     if (!parse_hid_id(hid_id, bus, vendor, product)) {
         return -1;
     }
 
     if (bus == 0x0005) {
-        g_phy_is_unbind_bt_hidden = hid_id_unbind(hid_id);
-        if (!g_phy_is_unbind_bt_hidden) {
-            std::cerr << "hid-unbind: failed to unbind Bluetooth " << hid_id << std::endl;
+        std::string hidraw_name;
+        int fd = hid_bpf_transport_open(hid_id, hidraw_name);
+        if (fd < 0) {
+            std::cerr << "hid-bpf: Bluetooth transport open failed for " << hid_id << std::endl;
+            return -1;
         }
-        return -1;
+        g_phy_is_bpf_transport = true;
+
+        for (const auto& ev_path : get_event_nodes(hidraw_name)) {
+            PhysicalNode node;
+            node.path = ev_path;
+            node.fd = -1;
+            node.orig_mode = 0660;
+            node.is_grabbed = false;
+
+            struct stat node_st;
+            if (stat(ev_path.c_str(), &node_st) == 0) {
+                node.orig_mode = node_st.st_mode & 0777;
+            }
+
+            // See open_and_hide_physical()'s identical loop for why both
+            // steps matter: chmod alone stops other processes opening
+            // the node at all, but EVIOCGRAB is what stops delivery to
+            // anyone who already had it open before this ran.
+            chmod(ev_path.c_str(), 0600);
+            if (ev_path.find("event") != std::string::npos) {
+                int ev_fd = open(ev_path.c_str(), O_RDONLY | O_NONBLOCK);
+                if (ev_fd >= 0) {
+                    if (ioctl(ev_fd, EVIOCGRAB, 1) >= 0) {
+                        node.fd = ev_fd;
+                        node.is_grabbed = true;
+                        std::cout << "Successfully grabbed and hid event node: " << ev_path << std::endl;
+                    } else {
+                        std::cerr << "Warning: Failed to grab event node " << ev_path << ": " << strerror(errno) << std::endl;
+                        close(ev_fd);
+                    }
+                }
+            } else {
+                std::cout << "Successfully hid joystick node: " << ev_path << std::endl;
+            }
+            out_hidden_nodes.push_back(node);
+        }
+
+        return fd;
     }
 
     if (bus != 0x0003) {
@@ -557,6 +612,11 @@ int open_and_hide_physical_unbind(const std::string& hid_id) {
     }
     usleep(150000); // let the kernel fully tear down the old driver binding, same as rebind_physical_hid_driver()
 
+    // usb_hid_transport_open() has its own retry/verification loop for
+    // the BT->USB hot-swap race against hid-playstation's kernel-side
+    // probe retry (see its doc comment) -- hid_id_unbind() above only
+    // ever touches the HID-bus layer, so there's nothing more to verify
+    // at this level.
     int fd = usb_hid_transport_open(hid_id, (uint16_t)vendor, (uint16_t)product);
     if (fd < 0) {
         std::cerr << "hid-unbind: libusb transport open failed for " << hid_id << std::endl;
@@ -582,15 +642,22 @@ void release_physical_connection(int fd, const std::string& path, mode_t orig_mo
     }
     hidden_nodes.clear();
     // A connection opened via open_and_hide_physical_unbind() never
-    // touched hidraw permissions (there is no hidraw node) -- its fd is
-    // the socketpair end usb_hid_transport_open() returned, which needs
-    // usb_hid_transport_close()'s libusb teardown/kernel-driver-rebind,
-    // not a plain close()+chmod.
+    // touched hidraw permissions (there is no hidraw node on the USB
+    // side; the Bluetooth side leaves hidraw alone entirely, hiding it
+    // via HID-BPF instead) -- its fd is a socketpair end that needs its
+    // own transport's teardown, not a plain close()+chmod.
     if (g_phy_is_unbind_transport) {
         if (fd >= 0) {
             usb_hid_transport_close(fd);
         }
         g_phy_is_unbind_transport = false;
+        return;
+    }
+    if (g_phy_is_bpf_transport) {
+        if (fd >= 0) {
+            hid_bpf_transport_close(fd);
+        }
+        g_phy_is_bpf_transport = false;
         return;
     }
     if (fd >= 0) {
@@ -1330,7 +1397,7 @@ int main(int argc, char* argv[]) {
     g_hide_method = read_hide_method_config(HIDE_METHOD_UNBIND);
     if (g_hide_method == HIDE_METHOD_UNBIND) {
         std::cout << "Using full-unbind hide method (USB: real transport via libusb; "
-                      "Bluetooth: sysfs unbind only, no live translation while hidden -- see set-hide-method)." << std::endl;
+                      "Bluetooth: real transport via HID-BPF -- see set-hide-method)." << std::endl;
         g_hid_uevent_fd = hid_uevent_monitor_open();
         if (g_hid_uevent_fd < 0) {
             std::cerr << "hid-unbind: failed to open HID-bus uevent monitor; "
@@ -1581,14 +1648,17 @@ int main(int argc, char* argv[]) {
                 is_bluetooth = via_unbind ? via_unbind_is_bt : bt;
 
                 if (via_unbind) {
-                    phy_fd = open_and_hide_physical_unbind(name);
                     phy_path.clear();
                     orig_mode = 0;
                     hidden_nodes.clear();
-                    if (phy_fd < 0 && !g_phy_is_unbind_bt_hidden) {
-                        // Unbind method failed for this device -- fall back
-                        // to the legacy method for this connection attempt
-                        // rather than looping forever on the same hid_id.
+                    phy_fd = open_and_hide_physical_unbind(name, hidden_nodes);
+                    if (phy_fd < 0) {
+                        // Unbind method failed for this device (USB: sysfs
+                        // unbind or libusb claim failed; Bluetooth: HID-BPF
+                        // transport failed to load/attach, e.g. udev-hid-bpf
+                        // not installed) -- fall back to the legacy method
+                        // for this connection attempt rather than looping
+                        // forever on the same hid_id.
                         std::cerr << "hid-unbind: falling back to legacy hide method for this connection." << std::endl;
                         bool fb_bt = false;
                         std::string fb_name = find_physical_ds4(fb_bt);
@@ -1602,34 +1672,7 @@ int main(int argc, char* argv[]) {
                 {
                     phy_fd = open_and_hide_physical(phy_name, target_type, phy_path, orig_mode, hidden_nodes);
                 }
-                if (phy_fd < 0 && g_phy_is_unbind_bt_hidden) {
-                    // Deliberate: see open_and_hide_physical_unbind()'s bus
-                    // 0x0005 branch. phy_name/is_bluetooth stay set (for
-                    // status display and so hid_bus_scan_existing() doesn't
-                    // re-surface the same now-unbound hid_id as "newly
-                    // found" next iteration) but phy_fd stays -1 for good --
-                    // there is no transport to read from.
-                    std::cout << "Bluetooth physical controller hidden via driver unbind (" << phy_name
-                              << "). No live translation over this connection -- see set-hide-method." << std::endl;
-                    // Still create the emulated device for ds4/dualsense
-                    // types -- otherwise a target_type that emulates ends up
-                    // with *nothing* visible to games/Steam/browser at all
-                    // (neither the now-hidden physical nor any virtual
-                    // device), which is worse than the accepted "hidden but
-                    // unreadable" tradeoff was meant to be. It just stays
-                    // frozen at neutral forever, same as the existing
-                    // physical-disconnect grace window's un-driven virtual
-                    // device, since there's no physical read loop to ever
-                    // update it.
-                    if (controller_type_emulates(target_type) && !vdev_configured()) {
-                        if (create_virtual_device(target_type)) {
-                            emit_neutral_report(target_type);
-                            device_open = false;
-                            std::cout << "Emulated controller created (frozen -- no physical input available "
-                                         "while the Bluetooth connection is hidden this way)." << std::endl;
-                        }
-                    }
-                } else if (phy_fd < 0) {
+                if (phy_fd < 0) {
                     std::cerr << "Failed to open physical controller: " << strerror(errno) << std::endl;
                     phy_fd = -1;
                     phy_name = "";
@@ -1715,21 +1758,59 @@ int main(int argc, char* argv[]) {
                 last_usb_upgrade_check = now;
                 std::string usb_hid_id = find_usb_ds4_hid_id();
                 if (!usb_hid_id.empty()) {
-                    std::string bt_hid_id = hidraw_to_hid_id(phy_name);
+                    // Under the BPF transport, phy_name already *is* the
+                    // hid_id (see open_and_hide_physical_unbind()'s bus
+                    // 0x0005 branch) -- hidraw_to_hid_id() expects a
+                    // hidraw basename like "hidraw6" instead, which only
+                    // the legacy method's phy_name ever holds, so it
+                    // would silently resolve to "" and no-op this whole
+                    // upgrade for a BPF-transport connection.
+                    std::string bt_hid_id = g_phy_is_bpf_transport ? phy_name : hidraw_to_hid_id(phy_name);
                     if (!bt_hid_id.empty()) {
                         std::cout << "USB connection detected for physical controller (kernel refuses to bind "
                                      "it while Bluetooth holds the MAC); unbinding Bluetooth (" << bt_hid_id
                                   << ") so USB (" << usb_hid_id << ") can take over..." << std::endl;
+                        if (g_phy_is_bpf_transport) {
+                            // Unlike the legacy method's raw hidraw fd
+                            // (which naturally POLLHUPs once the driver
+                            // unbinds below), our BPF transport's fd is a
+                            // socketpair end that won't notice on its own
+                            // -- tear it down explicitly first so the
+                            // reconnect below starts from a clean
+                            // phy_fd < 0 state instead of a silently-dead
+                            // one that's never picked back up.
+                            release_physical_connection(phy_fd, phy_path, orig_mode, hidden_nodes);
+                            phy_fd = -1;
+                            phy_name = "";
+                            // Mirror the POLLHUP disconnect handler below
+                            // exactly (see its identical two lines): without
+                            // phy_disconnect_pending_destroy set, the
+                            // reconnect a moment later doesn't know to reuse
+                            // the still-live virtual device and calls
+                            // create_virtual_device() on top of it instead
+                            // -- confirmed live that this races the
+                            // just-claimed libusb interrupt transfer against
+                            // the resulting FunctionFS gadget rebind and
+                            // kills the USB port outright
+                            // (LIBUSB_ERROR_NO_DEVICE moments later).
+                            if (controller_type_emulates(target_type) && vdev_configured()) {
+                                emit_neutral_report(target_type);
+                                phy_disconnect_pending_destroy = true;
+                                phy_disconnect_time = std::chrono::steady_clock::now();
+                            }
+                        }
                         write_hid_driver_sysfs("unbind", bt_hid_id);
                         write_hid_driver_sysfs("bind", usb_hid_id);
                         suppressed_bt_hid_id = bt_hid_id;
-                        // Don't touch phy_fd/hidden_nodes here: the unbind
-                        // above tears hidraw down for real, which the
-                        // existing POLLHUP disconnect handling (below) picks
-                        // up on the very next poll() and routes through the
-                        // normal grace-period reconnect -- which now finds
-                        // the just-bound USB hidraw instead, since
-                        // find_physical_ds4() prefers USB.
+                        // For the legacy method (the g_phy_is_bpf_transport
+                        // branch above already released everything for the
+                        // BPF case): don't touch phy_fd/hidden_nodes here,
+                        // the unbind above tears hidraw down for real,
+                        // which the existing POLLHUP disconnect handling
+                        // (below) picks up on the very next poll() and
+                        // routes through the normal grace-period reconnect
+                        // -- which now finds the just-bound USB hidraw
+                        // instead, since find_physical_ds4() prefers USB.
                     }
                 }
             }
@@ -1832,17 +1913,16 @@ int main(int argc, char* argv[]) {
                     bool keep_open = false; // set by "test": ownership of client_fd moves to test_subscribers
                     if (cmd == "status") {
                         std::string phy_display = phy_name.empty() ? "None" :
-                            ((g_phy_is_unbind_transport || g_phy_is_unbind_bt_hidden) ? phy_name : ("/dev/" + phy_name));
+                            ((g_phy_is_unbind_transport || g_phy_is_bpf_transport) ? phy_name : ("/dev/" + phy_name));
                         response = "Physical Controller: " + phy_display + "\n";
                         response += "Connection Type: " + std::string(
-                            g_phy_is_unbind_bt_hidden ? "Bluetooth (unbind-hidden, no live translation)" :
-                            (phy_fd >= 0 ? (is_bluetooth ? "Bluetooth" : "USB") : "N/A")) + "\n";
+                            phy_fd >= 0 ? (is_bluetooth ? "Bluetooth" : "USB") : "N/A") + "\n";
                         response += "Virtual Emulation: " + std::string(controller_type_name(target_type)) + "\n";
                         response += "Active Backend: " + std::string(backend_type_name(backend_type)) + "\n";
                         response += "DS4 Backend: " + std::string(backend_type_name(backend_for_ds4)) + "\n";
                         response += "DualSense Backend: " + std::string(backend_type_name(backend_for_dualsense)) + "\n";
                         response += "Hide Method: " + std::string(hide_method_config_str(g_hide_method)) +
-                            (g_phy_is_unbind_transport ? " (active on current connection)" : "") + "\n";
+                            ((g_phy_is_unbind_transport || g_phy_is_bpf_transport) ? " (active on current connection)" : "") + "\n";
                         response += "Device Open by Host: " + std::string((vdev_configured()) ? "Yes" : "No") + "\n";
                         response += "Standalone Virtual (no hardware): " + std::string(standalone_virtual ? "Yes" : "No") + "\n";
                         response += "Physical Auto-Scan Disabled (release-physical): " + std::string(ignore_physical ? "Yes" : "No") + "\n";
@@ -1887,14 +1967,7 @@ int main(int argc, char* argv[]) {
                             response = "OK: Standalone virtual controller destroyed.";
                         }
                     } else if (cmd == "release-physical") {
-                        if (phy_fd < 0 && g_phy_is_unbind_bt_hidden) {
-                            std::cout << "Rebinding Bluetooth physical controller by IPC request (was unbind-hidden)..." << std::endl;
-                            write_hid_driver_sysfs("bind", phy_name);
-                            g_phy_is_unbind_bt_hidden = false;
-                            phy_name = "";
-                            ignore_physical = true;
-                            response = "OK: Bluetooth physical controller rebound and auto-scan disabled. Use resume-physical when done.";
-                        } else if (phy_fd < 0) {
+                        if (phy_fd < 0) {
                             ignore_physical = true;
                             response = "OK: No physical controller was connected; auto-scan disabled.";
                         } else {
@@ -2156,20 +2229,6 @@ int main(int argc, char* argv[]) {
                 disconnected_phy_name = phy_name;
                 release_physical_connection(phy_fd, phy_path, orig_mode, hidden_nodes);
                 phy_fd = -1;
-                phy_name = "";
-            } else if (g_phy_is_unbind_bt_hidden) {
-                // phy_fd is never valid for this state (see
-                // open_and_hide_physical_unbind()'s bus 0x0005 branch), so
-                // the phy_fd-gated release above never runs for it -- rebind
-                // explicitly here instead, same as every other
-                // release/shutdown site that checks phy_fd. Unconditional on
-                // every type/backend change (not just transitions away from
-                // hiding), matching how the phy_fd branch above always
-                // releases and lets the auto-scan block below rediscover and
-                // re-hide fresh under the new target_type if it still hides.
-                std::cout << "Rebinding Bluetooth physical controller (was unbind-hidden)..." << std::endl;
-                write_hid_driver_sysfs("bind", phy_name);
-                g_phy_is_unbind_bt_hidden = false;
                 phy_name = "";
             }
             restore_suppressed_bluetooth();
@@ -2625,10 +2684,6 @@ int main(int argc, char* argv[]) {
     if (phy_fd >= 0) {
         std::cout << "Releasing physical controller grab..." << std::endl;
         release_physical_connection(phy_fd, phy_path, orig_mode, hidden_nodes);
-    } else if (g_phy_is_unbind_bt_hidden) {
-        std::cout << "Rebinding Bluetooth physical controller (was unbind-hidden)..." << std::endl;
-        write_hid_driver_sysfs("bind", phy_name);
-        g_phy_is_unbind_bt_hidden = false;
     }
     restore_suppressed_bluetooth();
     if (g_hid_uevent_fd >= 0) {
