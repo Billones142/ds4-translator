@@ -24,7 +24,12 @@ jobs:
           # 32-bit libudev-sony-spoof32.so target alongside the 64-bit one.
           # libusb-1.0-0-dev is required unconditionally by the Makefile
           # now (the default hide method's USB transport, src/usb-hid-transport.cpp).
-          sudo apt-get install -y build-essential gcc-multilib g++-multilib libusb-1.0-0-dev pkg-config
+          # libbpf-dev/bpftool/clang are required unconditionally too (hard
+          # $(error ...) gates in the Makefile) -- the HID-BPF Bluetooth
+          # transport (src/hid-bpf-transport.cpp) needs libbpf headers to
+          # even parse, bpftool to generate vmlinux.h, and clang to compile
+          # the BPF object itself.
+          sudo apt-get install -y build-essential gcc-multilib g++-multilib libusb-1.0-0-dev libbpf-dev bpftool clang pkg-config
 
       - name: Lint (release build, warnings-as-errors)
         run: make all
@@ -43,15 +48,18 @@ jobs:
           sudo apt-get update
           # libusb-1.0-0-dev: src/usb-hid-transport.cpp needs its header
           # to parse at all, same as the actual build (see Makefile).
-          sudo apt-get install -y clang-tidy libusb-1.0-0-dev pkg-config
+          # libbpf-dev: src/hid-bpf-transport.cpp needs <bpf/bpf.h> and
+          # <bpf/libbpf.h> to parse, same reason.
+          sudo apt-get install -y clang-tidy libusb-1.0-0-dev libbpf-dev pkg-config
 
       - name: Run clang-tidy (checks + WarningsAsErrors from .clang-tidy)
         run: |
           set -e
           LIBUSB_CFLAGS=$(pkg-config --cflags libusb-1.0)
+          LIBBPF_CFLAGS=$(pkg-config --cflags libbpf)
           for f in src/*.cpp; do
             echo "=== $f ==="
-            clang-tidy "$f" -- -std=c++17 -Isrc $LIBUSB_CFLAGS -DDS4_VERSION=\"ci\"
+            clang-tidy "$f" -- -std=c++17 -Isrc $LIBUSB_CFLAGS $LIBBPF_CFLAGS -DDS4_VERSION=\"ci\"
           done
           for f in src/*.c; do
             echo "=== $f ==="
