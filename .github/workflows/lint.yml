@@ -29,7 +29,9 @@ jobs:
           # transport (src/hid-bpf-transport.cpp) needs libbpf headers to
           # even parse, bpftool to generate vmlinux.h, and clang to compile
           # the BPF object itself.
-          sudo apt-get install -y build-essential gcc-multilib g++-multilib libusb-1.0-0-dev libbpf-dev bpftool clang pkg-config
+          # "bpftool" is a virtual package on Ubuntu -- the real binary
+          # comes from linux-tools-common + linux-tools-generic.
+          sudo apt-get install -y build-essential gcc-multilib g++-multilib libusb-1.0-0-dev libbpf-dev linux-tools-common linux-tools-generic clang pkg-config
 
       - name: Lint (release build, warnings-as-errors)
         run: make all
