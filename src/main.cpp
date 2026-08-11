@@ -975,11 +975,38 @@ BackendType read_backend_config(ControllerType type, BackendType default_backend
     return default_backend;
 }
 
+// Custom controller-name override (ds4-ctl set-name), mirrors
+// read_backend_config() above. Empty return means "no override configured"
+// -- callers fall back to their own backend-specific default name.
+std::string read_name_config(ControllerType type) {
+    std::ifstream f("/etc/ds4-translator.conf");
+    if (!f.is_open()) {
+        return "";
+    }
+    std::string key = (type == TYPE_DS4) ? "name_ds4=" : "name_dualsense=";
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.rfind(key, 0) == 0) {
+            std::string val = line.substr(key.size());
+            while (!val.empty() && (val.back() == '\n' || val.back() == '\r')) {
+                val.pop_back();
+            }
+            return val;
+        }
+    }
+    return "";
+}
+
 // Currently-live backend, derived from backend_for_ds4/backend_for_dualsense
 // below based on whichever type is active -- not independently settable.
 BackendType backend_type = BACKEND_UHID;
 BackendType backend_for_ds4 = BACKEND_FUNCTIONFS;
 BackendType backend_for_dualsense = BACKEND_UHID;
+// Custom name overrides for the reported controller name, empty = use each
+// backend's own hardcoded default. Independent per type, same as the
+// backend_for_* pair above.
+std::string g_name_ds4;
+std::string g_name_dualsense;
 FunctionFSDevice virtual_functionfs = { .ep0_fd = -1, .ep_in_fd = -1, .ep_out_fd = -1, .device_open = false, .configured = false, .target_type = 0, .out_thread_spawned = false, .in_thread_spawned = false, .pending_report_len = 0, .report_pending = false };
 
 extern "C" {
@@ -1021,7 +1048,8 @@ bool last_virtual_valid = false;
 // only main()'s poll loop writes this.
 bool g_has_test_subscribers = false;
 
-void write_config(ControllerType type, BackendType ds4_backend, BackendType dualsense_backend) {
+void write_config(ControllerType type, BackendType ds4_backend, BackendType dualsense_backend,
+                   const std::string& name_ds4, const std::string& name_dualsense) {
     std::ofstream f("/etc/ds4-translator.conf");
     if (f.is_open()) {
         f << "type=" << controller_type_config_str(type) << "\n";
@@ -1032,14 +1060,23 @@ void write_config(ControllerType type, BackendType ds4_backend, BackendType dual
         // persisting whatever hide method is currently active without
         // needing to be touched.
         f << "hide_method=" << hide_method_config_str(g_hide_method) << "\n";
+        // Omitted entirely (rather than written empty) when unset, so a
+        // hand-edited config file with no name_* line behaves identically
+        // to one that was never touched by set-name.
+        if (!name_ds4.empty()) f << "name_ds4=" << name_ds4 << "\n";
+        if (!name_dualsense.empty()) f << "name_dualsense=" << name_dualsense << "\n";
     } else {
         std::cerr << "Failed to write config file: /etc/ds4-translator.conf: " << strerror(errno) << std::endl;
     }
 }
 
 bool create_virtual_device(ControllerType type) {
+    // Empty means "no override" -- each backend below falls back to its own
+    // default name in that case.
+    const std::string& custom_name = (type == TYPE_DS4) ? g_name_ds4 : g_name_dualsense;
+
     if (backend_type == BACKEND_FUNCTIONFS) {
-        if (functionfs_init(&virtual_functionfs, type == TYPE_DS4 ? 1 : 2)) {
+        if (functionfs_init(&virtual_functionfs, type == TYPE_DS4 ? 1 : 2, custom_name.c_str())) {
             std::cout << "Virtual USB Controller created via FunctionFS." << std::endl;
             g_suppress_next_led_update = true;
             return true;
@@ -1059,9 +1096,10 @@ bool create_virtual_device(ControllerType type) {
         struct uhid_event ev;
         memset(&ev, 0, sizeof(ev));
         ev.type = UHID_CREATE2;
-        
+
         if (type == TYPE_DS4) {
-            strncpy((char*)ev.u.create2.name, "Sony Computer Entertainment Wireless Controller", sizeof(ev.u.create2.name));
+            const char *name = custom_name.empty() ? "Sony Computer Entertainment Wireless Controller" : custom_name.c_str();
+            strncpy((char*)ev.u.create2.name, name, sizeof(ev.u.create2.name));
             strncpy((char*)ev.u.create2.uniq, "74:e7:d6:3a:47:e8", sizeof(ev.u.create2.uniq));
             ev.u.create2.rd_size = sizeof(ds4_usb_rdesc);
             memcpy(ev.u.create2.rd_data, ds4_usb_rdesc, sizeof(ds4_usb_rdesc));
@@ -1071,7 +1109,8 @@ bool create_virtual_device(ControllerType type) {
             ev.u.create2.version = 0x8111;
             ev.u.create2.country = 0;
         } else {
-            strncpy((char*)ev.u.create2.name, "Sony Interactive Entertainment DualSense Wireless Controller", sizeof(ev.u.create2.name));
+            const char *name = custom_name.empty() ? "Sony Interactive Entertainment DualSense Wireless Controller" : custom_name.c_str();
+            strncpy((char*)ev.u.create2.name, name, sizeof(ev.u.create2.name));
             strncpy((char*)ev.u.create2.uniq, "74:e7:d6:3a:47:e8", sizeof(ev.u.create2.uniq));
             ev.u.create2.rd_size = sizeof(dualsense_usb_rdesc);
             memcpy(ev.u.create2.rd_data, dualsense_usb_rdesc, sizeof(dualsense_usb_rdesc));
@@ -1394,6 +1433,14 @@ int main(int argc, char* argv[]) {
     backend_type = (target_type == TYPE_DS4) ? backend_for_ds4 : backend_for_dualsense;
     std::cout << "Using " << backend_type_name(backend_type) << " backend." << std::endl;
 
+    g_name_ds4 = read_name_config(TYPE_DS4);
+    g_name_dualsense = read_name_config(TYPE_DUALSENSE);
+    if (!g_name_ds4.empty() || !g_name_dualsense.empty()) {
+        std::cout << "Custom controller name override active (DS4: \""
+                  << (g_name_ds4.empty() ? "default" : g_name_ds4) << "\", DualSense: \""
+                  << (g_name_dualsense.empty() ? "default" : g_name_dualsense) << "\")." << std::endl;
+    }
+
     g_hide_method = read_hide_method_config(HIDE_METHOD_UNBIND);
     if (g_hide_method == HIDE_METHOD_UNBIND) {
         std::cout << "Using full-unbind hide method (USB: real transport via libusb; "
@@ -1519,6 +1566,9 @@ int main(int argc, char* argv[]) {
     ControllerType pending_type_change = target_type;
     bool backend_change_requested = false;
     BackendType pending_backend_change = backend_type;
+    // set-name recreates the active virtual device in place (no type/
+    // backend/physical-connection change involved), see its handling below.
+    bool name_change_requested = false;
 
     // `ds4-ctl test` live-monitor state. Subscriber fds get a periodic
     // STATE line (whatever the active source — virtual device or raw
@@ -1921,6 +1971,10 @@ int main(int argc, char* argv[]) {
                         response += "Active Backend: " + std::string(backend_type_name(backend_type)) + "\n";
                         response += "DS4 Backend: " + std::string(backend_type_name(backend_for_ds4)) + "\n";
                         response += "DualSense Backend: " + std::string(backend_type_name(backend_for_dualsense)) + "\n";
+                        response += "DS4 Name: " + (g_name_ds4.empty() ?
+                            "Sony Computer Entertainment Wireless Controller (default)" : g_name_ds4) + "\n";
+                        response += "DualSense Name: " + (g_name_dualsense.empty() ?
+                            "Sony Interactive Entertainment DualSense Wireless Controller (default)" : g_name_dualsense) + "\n";
                         response += "Hide Method: " + std::string(hide_method_config_str(g_hide_method)) +
                             ((g_phy_is_unbind_transport || g_phy_is_bpf_transport) ? " (active on current connection)" : "") + "\n";
                         response += "Device Open by Host: " + std::string((vdev_configured()) ? "Yes" : "No") + "\n";
@@ -2039,7 +2093,7 @@ int main(int argc, char* argv[]) {
                             // see set-backend below).
                             pending_backend_change = backend_for_ds4;
                             backend_change_requested = true;
-                            write_config(TYPE_DS4, backend_for_ds4, backend_for_dualsense);
+                            write_config(TYPE_DS4, backend_for_ds4, backend_for_dualsense, g_name_ds4, g_name_dualsense);
                             response = "OK: Changing emulation type to DualShock 4 (backend: " +
                                        std::string(backend_type_name(backend_for_ds4)) + ")...";
                         } else {
@@ -2051,7 +2105,7 @@ int main(int argc, char* argv[]) {
                             type_change_requested = true;
                             pending_backend_change = backend_for_dualsense;
                             backend_change_requested = true;
-                            write_config(TYPE_DUALSENSE, backend_for_ds4, backend_for_dualsense);
+                            write_config(TYPE_DUALSENSE, backend_for_ds4, backend_for_dualsense, g_name_ds4, g_name_dualsense);
                             response = "OK: Changing emulation type to DualSense (backend: " +
                                        std::string(backend_type_name(backend_for_dualsense)) + ")...";
                         } else {
@@ -2061,7 +2115,7 @@ int main(int argc, char* argv[]) {
                         if (target_type != TYPE_NONE) {
                             pending_type_change = TYPE_NONE;
                             type_change_requested = true;
-                            write_config(TYPE_NONE, backend_for_ds4, backend_for_dualsense);
+                            write_config(TYPE_NONE, backend_for_ds4, backend_for_dualsense, g_name_ds4, g_name_dualsense);
                             response = "OK: Changing emulation type to None (translation disabled, physical controller untouched)...";
                         } else {
                             response = "Already set to None";
@@ -2070,7 +2124,7 @@ int main(int argc, char* argv[]) {
                         if (target_type != TYPE_HIDDEN) {
                             pending_type_change = TYPE_HIDDEN;
                             type_change_requested = true;
-                            write_config(TYPE_HIDDEN, backend_for_ds4, backend_for_dualsense);
+                            write_config(TYPE_HIDDEN, backend_for_ds4, backend_for_dualsense, g_name_ds4, g_name_dualsense);
                             response = "OK: Changing emulation type to Hidden (translation disabled, physical controller hidden)...";
                         } else {
                             response = "Already set to Hidden";
@@ -2079,7 +2133,7 @@ int main(int argc, char* argv[]) {
                         BackendType want_backend = (cmd == "set-backend ds4 uhid") ? BACKEND_UHID : BACKEND_FUNCTIONFS;
                         if (backend_for_ds4 != want_backend) {
                             backend_for_ds4 = want_backend;
-                            write_config(target_type, backend_for_ds4, backend_for_dualsense);
+                            write_config(target_type, backend_for_ds4, backend_for_dualsense, g_name_ds4, g_name_dualsense);
                             if (target_type == TYPE_DS4) {
                                 pending_backend_change = want_backend;
                                 backend_change_requested = true;
@@ -2095,7 +2149,7 @@ int main(int argc, char* argv[]) {
                         BackendType want_backend = (cmd == "set-backend dualsense uhid") ? BACKEND_UHID : BACKEND_FUNCTIONFS;
                         if (backend_for_dualsense != want_backend) {
                             backend_for_dualsense = want_backend;
-                            write_config(target_type, backend_for_ds4, backend_for_dualsense);
+                            write_config(target_type, backend_for_ds4, backend_for_dualsense, g_name_ds4, g_name_dualsense);
                             if (target_type == TYPE_DUALSENSE) {
                                 pending_backend_change = want_backend;
                                 backend_change_requested = true;
@@ -2106,6 +2160,44 @@ int main(int argc, char* argv[]) {
                             }
                         } else {
                             response = "DualSense already set to use backend " + std::string(backend_type_name(want_backend));
+                        }
+                    } else if (cmd.rfind("set-name ds4 ", 0) == 0 || cmd.rfind("set-name dualsense ", 0) == 0) {
+                        bool is_ds4 = cmd.rfind("set-name ds4 ", 0) == 0;
+                        std::string prefix = is_ds4 ? "set-name ds4 " : "set-name dualsense ";
+                        std::string new_name = cmd.substr(prefix.size());
+                        if (new_name == "--reset") new_name.clear();
+
+                        // Socket is world-writable (see chmod 0666 above) so any
+                        // local process can reach this, not just ds4-ctl -- these
+                        // two checks are the real enforcement point, not just a
+                        // convenience mirrored client-side. A newline would
+                        // corrupt the line-delimited config file; the length cap
+                        // matches the smaller of the UHID name[128] buffer and a
+                        // conservative USB string-descriptor limit.
+                        if (new_name.find('\n') != std::string::npos || new_name.find('\r') != std::string::npos) {
+                            response = "Error: name cannot contain newline characters.";
+                        } else if (new_name.size() > 63) {
+                            response = "Error: name too long (max 63 bytes).";
+                        } else {
+                            std::string &target_name = is_ds4 ? g_name_ds4 : g_name_dualsense;
+                            const char *default_name = is_ds4 ? "Sony Computer Entertainment Wireless Controller"
+                                                               : "Sony Interactive Entertainment DualSense Wireless Controller";
+                            std::string effective_name = new_name.empty() ? default_name : new_name;
+                            if (target_name == new_name) {
+                                response = std::string(is_ds4 ? "DS4" : "DualSense") + " name already set to \"" + effective_name + "\"";
+                            } else {
+                                target_name = new_name;
+                                write_config(target_type, backend_for_ds4, backend_for_dualsense, g_name_ds4, g_name_dualsense);
+                                ControllerType affected_type = is_ds4 ? TYPE_DS4 : TYPE_DUALSENSE;
+                                if (target_type == affected_type) {
+                                    name_change_requested = true;
+                                    response = "OK: Changing " + std::string(is_ds4 ? "DS4" : "DualSense") + " name to \"" +
+                                               effective_name + "\" (recreating virtual device -- brief input interruption)...";
+                                } else {
+                                    response = "OK: " + std::string(is_ds4 ? "DS4" : "DualSense") + " name set to \"" + effective_name +
+                                               "\" (applies next time emulation type is switched to " + (is_ds4 ? "ds4" : "dualsense") + ")";
+                                }
+                            }
                         }
                     } else if (cmd == "set-hide-method legacy" || cmd == "set-hide-method unbind") {
                         HideMethod want_method = (cmd == "set-hide-method unbind") ? HIDE_METHOD_UNBIND : HIDE_METHOD_LEGACY;
@@ -2119,7 +2211,7 @@ int main(int argc, char* argv[]) {
                             }
                             if (ok) {
                                 g_hide_method = want_method;
-                                write_config(target_type, backend_for_ds4, backend_for_dualsense);
+                                write_config(target_type, backend_for_ds4, backend_for_dualsense, g_name_ds4, g_name_dualsense);
                                 response = "OK: Hide method set to " + std::string(hide_method_config_str(want_method)) +
                                             " (applies to the next physical (re)connection; use release-physical then "
                                             "resume-physical, or unplug/replug, to apply it now).";
@@ -2290,6 +2382,25 @@ int main(int argc, char* argv[]) {
                 controller_type_hides_physical(old_type) != controller_type_hides_physical(target_type)) {
                 std::cout << "Forcing physical controller re-enumeration (unbind/rebind) so already-running apps pick up the visibility change..." << std::endl;
                 rebind_physical_hid_driver(disconnected_phy_name);
+            }
+        }
+
+        // Recreate the virtual device in place for a name-only change (no
+        // type/backend/physical-connection change involved, unlike the block
+        // above) -- create_virtual_device() already reads the freshly-
+        // updated g_name_ds4/g_name_dualsense globals, so this just needs to
+        // destroy+recreate whatever's currently active. No-op if the type
+        // whose name changed isn't the one currently live (config was
+        // already persisted above; it'll apply next time that type is
+        // switched to).
+        if (name_change_requested) {
+            name_change_requested = false;
+            if (vdev_configured()) {
+                emit_neutral_report(target_type);
+                destroy_virtual_device();
+                if (create_virtual_device(target_type)) {
+                    device_open = false;
+                }
             }
         }
 
