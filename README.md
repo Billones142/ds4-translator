@@ -2,7 +2,7 @@
 
 A daemon for Linux that maps a physical DualShock 4 controller (connected via Bluetooth or USB) to a virtual DualShock 4 or DualSense controller (connected via virtual USB). It automatically hides the physical controller inputs to prevent double inputs in games, while supporting full LED and rumble passthrough.
 
-It includes an IPC runtime control program (`ds4-ctl`) that allows users to change configuration (such as the virtual controller emulation type) at runtime without restarting the daemon.
+It includes an IPC runtime control program (`ds4-ctl`) that allows users to change configuration (such as the virtual controller emulation type or its reported name) at runtime without restarting the daemon.
 
 ## Features
 
@@ -10,7 +10,7 @@ It includes an IPC runtime control program (`ds4-ctl`) that allows users to chan
 - **Persistent Configuration**: Emulation settings are saved to `/etc/ds4-translator.conf` at runtime. The setting persists across service restarts, system reboots, and controller reconnections.
 - **Runtime Configuration (IPC)**:
   - Uses a Unix domain socket at `/run/ds4-translator.sock` (accessible by user-level programs) to communicate.
-  - Includes a `ds4-ctl` utility to query status and set emulation types on the fly.
+  - Includes a `ds4-ctl` utility to query status, set emulation types, and override the reported controller name on the fly.
 - **Physical Controller Hiding**:
   - Exclusively grabs `/dev/input/event*` nodes using `EVIOCGRAB`.
   - Sets `/dev/hidraw*` permissions of the physical controller to `000` while open, restoring them on exit.
@@ -114,6 +114,30 @@ restarts.
 `functionfs` is verified end-to-end: kernel's `hid-playstation` driver binds
 to it, creates `hidraw`/input/Motion Sensors/Touchpad nodes, and Wine/Proton
 titles that never detected the `uhid` DS4 pick it up correctly.
+
+### Custom Controller Name
+
+The product name the virtual controller reports to the OS can be overridden
+per controller type (max 63 bytes, no newlines):
+
+```bash
+ds4-ctl set-name ds4 "My Custom Pad"
+ds4-ctl set-name dualsense "My Custom Pad"
+ds4-ctl set-name ds4 --reset            # restore the default Sony name
+```
+
+Like the backend setting, this takes effect immediately if that type is the
+one currently active (recreating the virtual device, so there's a brief input
+interruption), otherwise it's persisted for the next `ds4-ctl set-type <that
+type>`. Stored in `/etc/ds4-translator.conf` as `name_ds4=` / `name_dualsense=`.
+
+Two caveats:
+
+- The vendor ID stays Sony's regardless. Some games and drivers cross-check
+  the name against the vendor ID, so a custom name may raise compatibility
+  suspicion in those cases.
+- Apps that read the name through libudev sysfs attributes rather than from
+  the device itself still see the default Sony string.
 
 ## Uninstalling
 
