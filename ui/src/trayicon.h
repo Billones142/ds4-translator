@@ -26,6 +26,10 @@ public:
     // True if a StatusNotifierItem host / tray actually accepted the icon.
     static bool isAvailable();
 
+    // The icon is created once and shown or withdrawn from here, so toggling
+    // the preference does not have to tear the object down.
+    void setVisible(bool visible);
+
 private slots:
     void onStatusChanged();
     void onActivated(QSystemTrayIcon::ActivationReason reason);

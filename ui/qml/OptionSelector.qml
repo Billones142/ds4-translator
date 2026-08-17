@@ -1,13 +1,15 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Layouts
 import Ds4Translator
 
-// A ComboBox bound to a daemon setting.
+// A ComboBox bound to a daemon setting, with Apply and Reset.
 //
-// The daemon is the source of truth, so the box follows `current` whenever a
-// status refresh changes it, and only reports a selection the user made --
-// otherwise a poll landing mid-interaction would echo back as a command.
-ComboBox {
+// Picking an entry only stages the change: nothing is sent until Apply, so a
+// mis-click costs nothing and Reset puts the box back to what the daemon
+// currently reports. The daemon stays the source of truth -- the box follows
+// a status refresh whenever there is no staged change to lose.
+RowLayout {
     id: root
 
     // Config strings the daemon accepts, as reported by ds4ipc. Never
@@ -20,47 +22,63 @@ ComboBox {
     // Currently active value as reported by the daemon.
     property string current: ""
 
+    // Staged value: what Apply would send.
+    readonly property string selectedValue:
+        box.currentIndex >= 0 && box.currentIndex < values.length ? values[box.currentIndex] : ""
+    readonly property bool modified: selectedValue !== "" && selectedValue !== current
+
     signal selected(string value)
 
-    model: values.map(value => labelMap[value] !== undefined ? labelMap[value] : value)
-
-    // Guards the currentIndex writes made to follow the daemon, so
-    // onActivated stays "the user picked this".
-    property bool syncing: false
+    spacing: 8
 
     function syncFromDaemon() {
         const index = values.indexOf(current);
-        if (index < 0 || index === currentIndex) {
+        if (index < 0 || index === box.currentIndex) {
             return;
         }
-        syncing = true;
-        currentIndex = index;
-        syncing = false;
+        box.currentIndex = index;
     }
 
-    onCurrentChanged: syncFromDaemon()
+    onCurrentChanged: {
+        // A staged change the user has not applied yet outranks a status
+        // refresh; without this, a poll would silently undo their selection.
+        if (!modified) {
+            syncFromDaemon();
+        }
+    }
     Component.onCompleted: syncFromDaemon()
 
-    // Hold off background polling while the list is open: a refresh landing
-    // mid-selection would move the highlighted entry under the user.
-    Connections {
-        target: root.popup
-        function onVisibleChanged() {
-            if (root.popup.visible) {
-                DaemonController.beginInteraction();
-            } else {
-                DaemonController.endInteraction();
+    ComboBox {
+        id: box
+        Layout.fillWidth: true
+        model: root.values.map(value =>
+            root.labelMap[value] !== undefined ? root.labelMap[value] : value)
+
+        // Hold off background polling while the list is open: a refresh
+        // landing mid-selection would move the highlighted entry under the
+        // user.
+        Connections {
+            target: box.popup
+            function onVisibleChanged() {
+                if (box.popup.visible) {
+                    DaemonController.beginInteraction();
+                } else {
+                    DaemonController.endInteraction();
+                }
             }
         }
     }
 
-    onActivated: (index) => {
-        if (syncing || index < 0 || index >= values.length) {
-            return;
-        }
-        if (values[index] === current) {
-            return;
-        }
-        root.selected(values[index]);
+    Button {
+        text: qsTr("Apply")
+        enabled: root.enabled && root.modified
+        onClicked: root.selected(root.selectedValue)
+    }
+
+    Button {
+        text: qsTr("Reset")
+        // Discards the staged change; it never sends anything to the daemon.
+        enabled: root.enabled && root.modified
+        onClicked: root.syncFromDaemon()
     }
 }

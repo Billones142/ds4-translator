@@ -151,14 +151,13 @@ ui:
 
 # The .desktop file is not cosmetic: the desktop portal looks the app up by
 # it, and without it every launch logs "App info not found for
-# 'ds4-translator-ui'". The autostart copy starts the tray applet with the
-# graphical session.
+# 'ds4-translator-ui'". No autostart entry is installed: the tray applet is
+# off by default and the settings window writes ~/.config/autostart itself
+# when the user turns "Start the applet on login" on.
 install-ui: ui
 	install -D -m 755 $(UI_BINARY) $(DESTDIR)$(BINDIR)/ds4-translator-ui
 	install -D -m 644 ds4-translator-ui.desktop \
 	    $(DESTDIR)/usr/share/applications/ds4-translator-ui.desktop
-	install -D -m 644 ds4-translator-applet.desktop \
-	    $(DESTDIR)/etc/xdg/autostart/ds4-translator-applet.desktop
 ifdef SUDO_USER
 	chown -R $(SUDO_USER):$(SUDO_USER) $(UI_BUILD_DIR)
 endif
@@ -166,10 +165,11 @@ endif
 uninstall-ui:
 	rm -f $(DESTDIR)$(BINDIR)/ds4-translator-ui
 	rm -f $(DESTDIR)/usr/share/applications/ds4-translator-ui.desktop
+	# Older versions installed this; removed here so an upgrade+uninstall
+	# does not leave a system-wide autostart entry behind.
 	rm -f $(DESTDIR)/etc/xdg/autostart/ds4-translator-applet.desktop
 
-# Same thing for the current user only -- no root, and the autostart entry
-# lands in ~/.config/autostart so it applies to this login session alone.
+# Same thing for the current user only -- no root needed.
 USER_BINDIR      = $(HOME)/.local/bin
 USER_APPDIR      = $(HOME)/.local/share/applications
 USER_AUTOSTART   = $(HOME)/.config/autostart
@@ -178,8 +178,6 @@ install-ui-user: ui
 	install -D -m 755 $(UI_BINARY) $(USER_BINDIR)/ds4-translator-ui
 	install -D -m 644 ds4-translator-ui.desktop \
 	    $(USER_APPDIR)/ds4-translator-ui.desktop
-	install -D -m 644 ds4-translator-applet.desktop \
-	    $(USER_AUTOSTART)/ds4-translator-applet.desktop
 	update-desktop-database $(USER_APPDIR) 2>/dev/null || true
 
 uninstall-ui-user:

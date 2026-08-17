@@ -3,7 +3,8 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import Ds4Translator
 
-// One row of the name settings: label, editable field, Apply and Reset.
+// One row of the name settings: label, editable field, Apply, Reset (discard
+// the draft) and Default (ask the daemon for its built-in name).
 //
 // Unlike the combo boxes, this is not applied on every keystroke -- the field
 // holds a draft until Apply, and status refreshes only overwrite the draft
@@ -52,8 +53,16 @@ ColumnLayout {
 
         Button {
             text: qsTr("Reset")
-            // Nothing to reset when the daemon is already reporting its
-            // built-in default name.
+            // Same meaning as next to the combo boxes: discard the edit, do
+            // not touch the daemon.
+            enabled: root.enabled && root.edited
+            onClicked: field.text = root.currentName
+        }
+
+        Button {
+            text: qsTr("Default")
+            // Sends set-name --reset. Nothing to do when the daemon is
+            // already reporting its built-in default name.
             enabled: root.enabled && !root.isDefault
             onClicked: DaemonController.resetName(root.controller)
         }

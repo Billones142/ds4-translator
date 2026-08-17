@@ -51,7 +51,10 @@ TrayIcon::TrayIcon(DaemonController *daemon, AppController *app, QObject *parent
     connect(m_daemon, &DaemonController::statusChanged, this, &TrayIcon::onStatusChanged);
 
     onStatusChanged();
-    m_tray->show();
+}
+
+void TrayIcon::setVisible(bool visible) {
+    m_tray->setVisible(visible);
 }
 
 // QMenu is a widget, so it cannot be parented to this QObject; it is owned
