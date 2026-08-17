@@ -7,11 +7,10 @@
 #include <cstdint>
 #include <ctime>
 #include <unistd.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <sys/time.h>
 #include <termios.h>
 #include <poll.h>
+
+#include "ipc-client.h"
 
 static std::string button_names_joined();
 
@@ -71,53 +70,11 @@ void print_usage() {
     std::cout << "                                   permission-blocked, for both USB and Bluetooth." << std::endl;
 }
 
-// Connect to the daemon's Unix socket, send one command, return its response.
-// Returns false if the connection/send/recv itself failed (daemon unreachable).
+// One command/response exchange, using the shared client in ipc-client.cpp
+// so ds4-ctl and the settings UI speak to the daemon through exactly the same
+// code path.
 static bool send_command(const std::string& cmd, std::string& out_response) {
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) {
-        out_response = std::string("Failed to create socket: ") + strerror(errno);
-        return false;
-    }
-
-    struct timeval tv;
-    tv.tv_sec = 3;
-    tv.tv_usec = 0;
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, "/run/ds4-translator.sock", sizeof(addr.sun_path) - 1);
-
-    if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        out_response = std::string("Failed to connect to translation daemon (is the ds4-translator service running?): ") + strerror(errno);
-        close(fd);
-        return false;
-    }
-
-    if (write(fd, cmd.c_str(), cmd.size()) < 0) {
-        out_response = std::string("Failed to write to daemon: ") + strerror(errno);
-        close(fd);
-        return false;
-    }
-
-    char rx_buf[1024];
-    memset(rx_buf, 0, sizeof(rx_buf));
-    ssize_t bytes_read = read(fd, rx_buf, sizeof(rx_buf) - 1);
-    close(fd);
-
-    if (bytes_read <= 0) {
-        out_response = "Error: No response from daemon (connection timed out or closed).";
-        return false;
-    }
-
-    out_response = rx_buf;
-    while (!out_response.empty() && (out_response.back() == '\n' || out_response.back() == '\r')) {
-        out_response.pop_back();
-    }
-    return true;
+    return ds4ipc::send_command(cmd, out_response);
 }
 
 static void print_daemon_unreachable_help() {
@@ -551,27 +508,19 @@ static void redraw_test(const std::string& header, const std::vector<std::string
 }
 
 static int run_test_ui() {
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    // "test" is the one command whose connection stays open: the daemon
+    // promotes this socket into its broadcast subscriber list, so the
+    // exchange is driven here rather than through send_command().
+    std::string error;
+    int fd = ds4ipc::connect_socket(&error);
     if (fd < 0) {
-        std::cerr << "Failed to create socket: " << strerror(errno) << std::endl;
-        return 1;
-    }
-
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, "/run/ds4-translator.sock", sizeof(addr.sun_path) - 1);
-
-    if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        std::cerr << "Failed to connect to translation daemon (is the ds4-translator service running?): " << strerror(errno) << std::endl;
-        close(fd);
+        std::cerr << error << std::endl;
         print_daemon_unreachable_help();
         return 1;
     }
 
-    std::string req = "test";
-    if (write(fd, req.c_str(), req.size()) < 0) {
-        std::cerr << "Failed to write to daemon: " << strerror(errno) << std::endl;
+    if (!ds4ipc::write_command(fd, "test", &error)) {
+        std::cerr << error << std::endl;
         close(fd);
         return 1;
     }
@@ -618,15 +567,13 @@ static int run_test_ui() {
         }
 
         if (pr > 0 && (pfds[0].revents & POLLIN)) {
-            char buf[1024];
-            ssize_t n = read(fd, buf, sizeof(buf));
-            if (n <= 0) {
-                if (!(n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) {
-                    std::cout << "\nDaemon connection closed." << std::endl;
-                    break;
-                }
-            } else {
-                rx_accum.append(buf, (size_t)n);
+            std::string read_error;
+            ds4ipc::ReadStatus status = ds4ipc::read_available(fd, &rx_accum, &read_error);
+            if (status == ds4ipc::ReadStatus::Eof || status == ds4ipc::ReadStatus::Error) {
+                std::cout << "\nDaemon connection closed." << std::endl;
+                break;
+            }
+            if (status == ds4ipc::ReadStatus::Data) {
                 size_t nl;
                 while ((nl = rx_accum.find('\n')) != std::string::npos) {
                     std::string line = rx_accum.substr(0, nl);
@@ -787,10 +734,6 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         std::string ctrl = argv[2];
-        if (ctrl != "ds4" && ctrl != "dualsense") {
-            std::cerr << "Error: Invalid controller type. Supported: ds4 dualsense" << std::endl;
-            return 1;
-        }
         std::string name_arg;
         if (std::string(argv[3]) == "--reset") {
             name_arg = "--reset";
@@ -799,20 +742,16 @@ int main(int argc, char* argv[]) {
                 if (i > 3) name_arg += " ";
                 name_arg += argv[i];
             }
-            if (name_arg.find('\n') != std::string::npos || name_arg.find('\r') != std::string::npos) {
-                std::cerr << "Error: name cannot contain newline characters." << std::endl;
-                return 1;
-            }
-            if (name_arg.size() > 63) {
-                std::cerr << "Error: name too long (" << name_arg.size() << " bytes, max 63)." << std::endl;
-                return 1;
-            }
         }
-        std::cerr << "Warning: changing the controller name recreates the virtual device if that type is "
-                      "currently active -- any app/game reading it will see a brief input interruption."
-                   << std::endl;
+        std::string build_error;
+        std::string command = ds4ipc::build_set_name(ctrl, name_arg, &build_error);
+        if (command.empty()) {
+            std::cerr << "Error: " << build_error << std::endl;
+            return 1;
+        }
+        std::cerr << "Warning: " << ds4ipc::kSetNameWarning << std::endl;
         std::string response;
-        if (!send_command("set-name " + ctrl + " " + name_arg, response)) {
+        if (!send_command(command, response)) {
             std::cerr << response << std::endl;
             print_daemon_unreachable_help();
             return 1;
@@ -850,26 +789,36 @@ int main(int argc, char* argv[]) {
         return run_test_ui();
     }
 
+    // The set-* commands build their command string through ds4ipc so their
+    // accepted values are defined once, for every front-end. create-virtual
+    // keeps the spec table: it shares set-type's argument name but not its
+    // value list (no none/hidden).
     std::string full_cmd = cmd;
+    std::string build_error;
     if (cmd == "set-backend") {
         if (argc < 4) {
             std::cerr << "Error: set-backend requires <ds4|dualsense> <uhid|functionfs>" << std::endl;
             return 1;
         }
-        std::string ctrl = argv[2];
-        std::string backend = argv[3];
-        if (ctrl != "ds4" && ctrl != "dualsense") {
-            std::cerr << "Error: Invalid controller type. Supported: ds4 dualsense" << std::endl;
-            return 1;
-        }
-        if (backend != "uhid" && backend != "functionfs") {
-            std::cerr << "Error: Invalid backend. Supported: uhid functionfs" << std::endl;
-            return 1;
-        }
-        full_cmd += " " + ctrl + " " + backend;
-    } else if (cmd == "set-type" || cmd == "create-virtual") {
+        full_cmd = ds4ipc::build_set_backend(argv[2], argv[3], &build_error);
+    } else if (cmd == "set-type") {
         if (argc < 3) {
-            std::cerr << "Error: " << cmd << " requires a target type (" << spec->arg_completions << ")" << std::endl;
+            std::cerr << "Error: set-type requires a target type ("
+                      << ds4ipc::join_values(ds4ipc::type_values()) << ")" << std::endl;
+            return 1;
+        }
+        full_cmd = ds4ipc::build_set_type(argv[2], &build_error);
+    } else if (cmd == "set-hide-method") {
+        if (argc < 3) {
+            std::cerr << "Error: set-hide-method requires "
+                      << ds4ipc::join_values(ds4ipc::hide_method_values()) << std::endl;
+            return 1;
+        }
+        full_cmd = ds4ipc::build_set_hide_method(argv[2], &build_error);
+    } else if (cmd == "create-virtual") {
+        if (argc < 3) {
+            std::cerr << "Error: create-virtual requires a target type (" << spec->arg_completions
+                      << ")" << std::endl;
             return 1;
         }
         std::string type = argv[2];
@@ -878,17 +827,10 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         full_cmd += " " + type;
-    } else if (cmd == "set-hide-method") {
-        if (argc < 3) {
-            std::cerr << "Error: set-hide-method requires " << spec->arg_completions << std::endl;
-            return 1;
-        }
-        std::string method = argv[2];
-        if (!is_in_list(method, spec->arg_completions)) {
-            std::cerr << "Error: Invalid hide method. Supported: " << spec->arg_completions << std::endl;
-            return 1;
-        }
-        full_cmd += " " + method;
+    }
+    if (full_cmd.empty()) {
+        std::cerr << "Error: " << build_error << std::endl;
+        return 1;
     }
     // status/destroy-virtual/release-physical/resume-physical take no args;
     // full_cmd is already just the command name.

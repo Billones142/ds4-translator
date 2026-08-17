@@ -1,18 +1,17 @@
 #include "ipcclient.h"
 
-// Must stay in sync with the daemon and ds4-ctl (src/main.cpp, src/ctl.cpp).
-static const char *kSocketPath = "/run/ds4-translator.sock";
+#include <unistd.h>
 
-IpcClient::IpcClient(QObject *parent)
-    : QObject(parent), m_socket(new QLocalSocket(this)), m_timeout(new QTimer(this)) {
+#include "ipc-client.h"
+
+IpcClient::IpcClient(QObject *parent) : QObject(parent), m_timeout(new QTimer(this)) {
     m_timeout->setSingleShot(true);
-    m_timeout->setInterval(kDefaultTimeoutMs);
-
-    connect(m_socket, &QLocalSocket::connected, this, &IpcClient::onConnected);
-    connect(m_socket, &QLocalSocket::readyRead, this, &IpcClient::onReadyRead);
-    connect(m_socket, &QLocalSocket::errorOccurred, this, &IpcClient::onErrorOccurred);
-    connect(m_socket, &QLocalSocket::disconnected, this, &IpcClient::onDisconnected);
+    m_timeout->setInterval(ds4ipc::kDefaultTimeoutMs);
     connect(m_timeout, &QTimer::timeout, this, &IpcClient::onTimeout);
+}
+
+IpcClient::~IpcClient() {
+    closeConnection();
 }
 
 bool IpcClient::isBusy() const {
@@ -33,71 +32,85 @@ void IpcClient::startNext() {
     m_current = m_queue.takeFirst();
     m_buffer.clear();
     m_inFlight = true;
-    m_socket->abort();
-    m_timeout->start();
-    m_socket->connectToServer(QString::fromLatin1(kSocketPath));
-}
 
-void IpcClient::onConnected() {
-    // The daemon reads one command and does not expect a trailing newline,
-    // but it strips one if present -- send it bare, exactly like ds4-ctl.
-    const QByteArray payload = m_current.toUtf8();
-    if (m_socket->write(payload) < 0) {
-        finish(false, tr("Failed to write to daemon: %1").arg(m_socket->errorString()));
+    std::string error;
+    // Blocking for connect and write: both are immediate on a Unix socket
+    // whose server is listening, and the command is one short line.
+    m_fd = ds4ipc::connect_socket(&error);
+    if (m_fd < 0) {
+        finish(false, QString::fromStdString(error));
+        return;
     }
+    ds4ipc::set_timeout(m_fd, ds4ipc::kDefaultTimeoutMs);
+
+    if (!ds4ipc::write_command(m_fd, m_current.toStdString(), &error)) {
+        finish(false, QString::fromStdString(error));
+        return;
+    }
+
+    // The response is what can take seconds, so only that part is async.
+    if (!ds4ipc::set_non_blocking(m_fd, &error)) {
+        finish(false, QString::fromStdString(error));
+        return;
+    }
+
+    m_notifier = new QSocketNotifier(m_fd, QSocketNotifier::Read, this);
+    connect(m_notifier, &QSocketNotifier::activated, this, &IpcClient::onReadable);
+    m_timeout->start();
 }
 
-void IpcClient::onReadyRead() {
-    m_buffer.append(m_socket->readAll());
-}
-
-void IpcClient::onDisconnected() {
+void IpcClient::onReadable() {
     if (!m_inFlight) {
         return;
     }
-    // The daemon closes the connection right after the response, so
-    // disconnect is the end-of-message marker.
-    m_buffer.append(m_socket->readAll());
-    if (m_buffer.isEmpty()) {
+
+    std::string error;
+    for (;;) {
+        const ds4ipc::ReadStatus status = ds4ipc::read_available(m_fd, &m_buffer, &error);
+        if (status == ds4ipc::ReadStatus::Data) {
+            continue; // drain what the kernel already has
+        }
+        if (status == ds4ipc::ReadStatus::Again) {
+            return; // wait for the next notification
+        }
+        if (status == ds4ipc::ReadStatus::Error) {
+            finish(false, QString::fromStdString(error));
+            return;
+        }
+        break; // Eof: the daemon closed, so the response is complete
+    }
+
+    if (m_buffer.empty()) {
         finish(false, tr("No response from daemon (connection closed)."));
         return;
     }
-    QString response = QString::fromUtf8(m_buffer);
-    while (response.endsWith('\n') || response.endsWith('\r')) {
-        response.chop(1);
-    }
-    finish(true, response);
-}
-
-void IpcClient::onErrorOccurred(QLocalSocket::LocalSocketError error) {
-    if (!m_inFlight) {
-        return;
-    }
-    if (error == QLocalSocket::PeerClosedError) {
-        // Normal end of exchange; onDisconnected() handles it.
-        return;
-    }
-    if (error == QLocalSocket::ConnectionRefusedError ||
-        error == QLocalSocket::ServerNotFoundError ||
-        error == QLocalSocket::SocketAccessError) {
-        finish(false, tr("Cannot reach the translation daemon at %1 "
-                         "(is ds4-translator.service running?): %2")
-                          .arg(QString::fromLatin1(kSocketPath), m_socket->errorString()));
-        return;
-    }
-    finish(false, tr("Socket error: %1").arg(m_socket->errorString()));
+    ds4ipc::trim_response(&m_buffer);
+    finish(true, QString::fromStdString(m_buffer));
 }
 
 void IpcClient::onTimeout() {
     if (!m_inFlight) {
         return;
     }
-    finish(false, tr("Timed out after %1 ms waiting for the daemon.").arg(kDefaultTimeoutMs));
+    finish(false, tr("Timed out after %1 ms waiting for the daemon.")
+                      .arg(ds4ipc::kDefaultTimeoutMs));
+}
+
+void IpcClient::closeConnection() {
+    m_timeout->stop();
+    if (m_notifier) {
+        m_notifier->setEnabled(false);
+        m_notifier->deleteLater();
+        m_notifier = nullptr;
+    }
+    if (m_fd >= 0) {
+        close(m_fd);
+        m_fd = -1;
+    }
 }
 
 void IpcClient::finish(bool ok, const QString &response) {
-    m_timeout->stop();
-    m_socket->abort();
+    closeConnection();
     m_inFlight = false;
     const QString command = m_current;
     m_current.clear();

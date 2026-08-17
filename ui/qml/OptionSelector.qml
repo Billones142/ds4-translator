@@ -10,16 +10,19 @@ import Ds4Translator
 ComboBox {
     id: root
 
-    // Config strings sent to the daemon, parallel to `labels`.
+    // Config strings the daemon accepts, as reported by ds4ipc. Never
+    // hand-written here, so the UI cannot offer a value ds4-ctl rejects.
     required property var values
-    // Human-readable text, parallel to `values`.
-    required property var labels
+    // value -> display text. Looked up by value rather than by position, so
+    // the shared list is free to change order without silently mislabelling
+    // an entry. Values with no entry display as themselves.
+    property var labelMap: ({})
     // Currently active value as reported by the daemon.
     property string current: ""
 
     signal selected(string value)
 
-    model: labels
+    model: values.map(value => labelMap[value] !== undefined ? labelMap[value] : value)
 
     // Guards the currentIndex writes made to follow the daemon, so
     // onActivated stays "the user picked this".

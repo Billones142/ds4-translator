@@ -2,17 +2,23 @@
 #define DS4_UI_DAEMONCONTROLLER_H
 
 #include <QObject>
+#include <QStringList>
 #include <QQmlEngine>
 #include <QString>
 #include <QTimer>
+
+#include <string>
 
 #include "ipcclient.h"
 
 // Model behind the settings window: mirrors the daemon's `status` output as
 // QML-readable properties and exposes the CLI's `set-*` commands as
-// invokables. Argument validation intentionally mirrors ds4-ctl
-// (src/ctl.cpp) so the UI rejects the same input the CLI rejects, instead of
-// making the daemon the only line of defence.
+// invokables.
+//
+// It holds no knowledge of the protocol itself -- accepted values, command
+// strings, name limits and status parsing all come from ds4ipc
+// (src/ipc-client.h), the same code ds4-ctl runs, so the two front-ends
+// cannot disagree about what the daemon accepts.
 class DaemonController : public QObject {
     Q_OBJECT
     QML_ELEMENT
@@ -42,9 +48,6 @@ class DaemonController : public QObject {
     Q_PROPERTY(bool dualsenseNameIsDefault READ dualsenseNameIsDefault NOTIFY statusChanged)
 
 public:
-    // Longest name the daemon accepts, same limit ds4-ctl enforces.
-    static constexpr int kMaxNameBytes = 63;
-
     explicit DaemonController(QObject *parent = nullptr);
 
     bool online() const { return m_online; }
@@ -66,11 +69,19 @@ public:
 
     Q_INVOKABLE void refreshStatus();
 
+    // The values the daemon accepts, straight from ds4ipc, so the controls
+    // offer exactly what ds4-ctl offers. Front-end labels are looked up by
+    // value in QML rather than positionally, so this list stays free to
+    // change order.
+    Q_INVOKABLE QStringList typeValues() const;
+    Q_INVOKABLE QStringList backendValues() const;
+    Q_INVOKABLE QStringList hideMethodValues() const;
+
     // type: ds4 | dualsense | none | hidden
     Q_INVOKABLE void setType(const QString &type);
     // controller: ds4 | dualsense -- backend: uhid | functionfs
     Q_INVOKABLE void setBackend(const QString &controller, const QString &backend);
-    // controller: ds4 | dualsense -- name: free text, <= kMaxNameBytes bytes
+    // controller: ds4 | dualsense -- name: free text, length-checked by ds4ipc
     Q_INVOKABLE void setName(const QString &controller, const QString &name);
     Q_INVOKABLE void resetName(const QString &controller);
     // method: legacy | unbind
@@ -97,6 +108,7 @@ private slots:
 
 private:
     void sendCommand(const QString &command);
+    void sendBuiltCommand(const std::string &command, const std::string &error);
     void setPendingCommands(int count);
     void applyStatus(const QString &response);
     void setMessage(const QString &message, bool isError);
@@ -111,6 +123,8 @@ private:
     int m_interactions = 0;
     bool m_lastMessageIsError = false;
     QString m_lastMessage;
+    // Scratch space for the ds4ipc builders' error output.
+    std::string m_buildError;
 
     QString m_physicalController;
     QString m_connectionType;

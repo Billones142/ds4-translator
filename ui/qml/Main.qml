@@ -131,9 +131,13 @@ ApplicationWindow {
                         id: typeSelector
                         Layout.fillWidth: true
                         enabled: window.editable
-                        values: ["ds4", "dualsense", "none", "hidden"]
-                        labels: [qsTr("DualShock 4"), qsTr("DualSense"),
-                                 qsTr("None"), qsTr("Hidden")]
+                        values: DaemonController.typeValues()
+                        labelMap: ({
+                            "ds4": qsTr("DualShock 4"),
+                            "dualsense": qsTr("DualSense"),
+                            "none": qsTr("None"),
+                            "hidden": qsTr("Hidden")
+                        })
                         current: DaemonController.emulationType
                         onSelected: value => DaemonController.setType(value)
                     }
@@ -162,8 +166,7 @@ ApplicationWindow {
                         OptionSelector {
                             Layout.fillWidth: true
                             enabled: window.editable
-                            values: ["uhid", "functionfs"]
-                            labels: ["uhid", "functionfs"]
+                            values: DaemonController.backendValues()
                             current: DaemonController.ds4Backend
                             onSelected: value => DaemonController.setBackend("ds4", value)
                         }
@@ -175,8 +178,7 @@ ApplicationWindow {
                         OptionSelector {
                             Layout.fillWidth: true
                             enabled: window.editable
-                            values: ["uhid", "functionfs"]
-                            labels: ["uhid", "functionfs"]
+                            values: DaemonController.backendValues()
                             current: DaemonController.dualsenseBackend
                             onSelected: value => DaemonController.setBackend("dualsense", value)
                         }
@@ -239,8 +241,8 @@ ApplicationWindow {
                     OptionSelector {
                         Layout.fillWidth: true
                         enabled: window.editable
-                        values: ["unbind", "legacy"]
-                        labels: [qsTr("unbind (default)"), qsTr("legacy")]
+                        values: DaemonController.hideMethodValues()
+                        labelMap: ({ "unbind": qsTr("unbind (default)") })
                         current: DaemonController.hideMethod
                         onSelected: value => DaemonController.setHideMethod(value)
                     }

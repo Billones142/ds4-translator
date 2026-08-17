@@ -2,6 +2,8 @@
 
 #include <QStringList>
 
+#include "ipc-client.h"
+
 namespace {
 
 // How often the window re-reads `status` so external changes (ds4-ctl from a
@@ -11,37 +13,16 @@ constexpr int kPollIntervalMs = 2000;
 // The one command the UI sends on its own, without the user asking.
 constexpr auto kStatusCommand = QLatin1String("status");
 
-// Accepted argument values, mirroring ds4-ctl's own tables. Built on call
-// rather than held in namespace-scope QStringLists: a container with static
-// storage duration would construct before main() with no way to catch a
-// throw (bugprone-throwing-static-initialization), and these lists are tiny.
-QStringList controllerValues() {
-    return {QStringLiteral("ds4"), QStringLiteral("dualsense")};
-}
-QStringList typeValues() {
-    return {QStringLiteral("ds4"), QStringLiteral("dualsense"), QStringLiteral("none"),
-            QStringLiteral("hidden")};
-}
-QStringList backendValues() {
-    return {QStringLiteral("uhid"), QStringLiteral("functionfs")};
-}
-QStringList hideMethodValues() {
-    return {QStringLiteral("legacy"), QStringLiteral("unbind")};
-}
+// How the daemon marks a name it made up itself in its status report.
+constexpr auto kDefaultNameSuffix = QLatin1String(" (default)");
 
-// The daemon reports display names ("DualShock 4"); the set-* commands take
-// config strings ("ds4"). Map one to the other so a status refresh can drive
-// the same controls the setters write to.
-QString typeDisplayToConfig(const QString &display) {
-    if (display == QLatin1String("DualShock 4")) return QStringLiteral("ds4");
-    if (display == QLatin1String("DualSense")) return QStringLiteral("dualsense");
-    if (display == QLatin1String("Hidden")) return QStringLiteral("hidden");
-    return QStringLiteral("none");
-}
-
-// "Hide Method" may carry a trailing "(active on current connection)" note.
-QString firstToken(const QString &value) {
-    return value.section(' ', 0, 0);
+QStringList toStringList(const std::vector<std::string> &values) {
+    QStringList list;
+    list.reserve(static_cast<qsizetype>(values.size()));
+    for (const std::string &value : values) {
+        list.append(QString::fromStdString(value));
+    }
+    return list;
 }
 
 } // namespace
@@ -101,80 +82,57 @@ void DaemonController::refreshStatus() {
     sendCommand(kStatusCommand);
 }
 
+QStringList DaemonController::typeValues() const {
+    return toStringList(ds4ipc::type_values());
+}
+
+QStringList DaemonController::backendValues() const {
+    return toStringList(ds4ipc::backend_values());
+}
+
+QStringList DaemonController::hideMethodValues() const {
+    return toStringList(ds4ipc::hide_method_values());
+}
+
 void DaemonController::setType(const QString &type) {
-    if (!typeValues().contains(type)) {
-        setMessage(tr("Invalid emulation type '%1'. Supported: %2")
-                       .arg(type, typeValues().join(QLatin1Char(' '))),
-                   true);
-        return;
-    }
-    sendCommand(QStringLiteral("set-type ") + type);
+    sendBuiltCommand(ds4ipc::build_set_type(type.toStdString(), &m_buildError), m_buildError);
 }
 
 void DaemonController::setBackend(const QString &controller, const QString &backend) {
-    if (!requireControllerArg(controller)) {
-        return;
-    }
-    if (!backendValues().contains(backend)) {
-        setMessage(tr("Invalid backend '%1'. Supported: %2")
-                       .arg(backend, backendValues().join(QLatin1Char(' '))),
-                   true);
-        return;
-    }
-    sendCommand(QStringLiteral("set-backend ") + controller + QLatin1Char(' ') + backend);
+    sendBuiltCommand(
+        ds4ipc::build_set_backend(controller.toStdString(), backend.toStdString(), &m_buildError),
+        m_buildError);
 }
 
 QString DaemonController::validateName(const QString &name) const {
-    if (name.isEmpty()) {
-        return tr("Name cannot be empty (use Reset to restore the default).");
-    }
-    if (name.contains(QLatin1Char('\n')) || name.contains(QLatin1Char('\r'))) {
-        return tr("Name cannot contain newline characters.");
-    }
-    const qsizetype bytes = name.toUtf8().size();
-    if (bytes > kMaxNameBytes) {
-        return tr("Name too long (%1 bytes, max %2).").arg(bytes).arg(kMaxNameBytes);
-    }
-    return QString();
+    return QString::fromStdString(ds4ipc::validate_name(name.toStdString()));
 }
 
 void DaemonController::setName(const QString &controller, const QString &name) {
-    if (!requireControllerArg(controller)) {
-        return;
-    }
-    const QString problem = validateName(name);
-    if (!problem.isEmpty()) {
-        setMessage(problem, true);
-        return;
-    }
-    sendCommand(QStringLiteral("set-name ") + controller + QLatin1Char(' ') + name);
+    sendBuiltCommand(
+        ds4ipc::build_set_name(controller.toStdString(), name.toStdString(), &m_buildError),
+        m_buildError);
 }
 
 void DaemonController::resetName(const QString &controller) {
-    if (!requireControllerArg(controller)) {
-        return;
-    }
-    sendCommand(QStringLiteral("set-name ") + controller + QStringLiteral(" --reset"));
+    sendBuiltCommand(ds4ipc::build_set_name(controller.toStdString(), "--reset", &m_buildError),
+                     m_buildError);
 }
 
 void DaemonController::setHideMethod(const QString &method) {
-    if (!hideMethodValues().contains(method)) {
-        setMessage(tr("Invalid hide method '%1'. Supported: %2")
-                       .arg(method, hideMethodValues().join(QLatin1Char(' '))),
-                   true);
-        return;
-    }
-    sendCommand(QStringLiteral("set-hide-method ") + method);
+    sendBuiltCommand(ds4ipc::build_set_hide_method(method.toStdString(), &m_buildError),
+                     m_buildError);
 }
 
-bool DaemonController::requireControllerArg(const QString &controller) {
-    if (controllerValues().contains(controller)) {
-        return true;
+// Every setter funnels through here: ds4ipc decides whether the arguments are
+// acceptable and what the command looks like, so the UI cannot accept an
+// argument ds4-ctl would reject, or word the rejection differently.
+void DaemonController::sendBuiltCommand(const std::string &command, const std::string &error) {
+    if (command.empty()) {
+        setMessage(QString::fromStdString(error), true);
+        return;
     }
-    setMessage(tr("Invalid controller '%1'. Supported: %2")
-                   .arg(controller, controllerValues().join(QLatin1Char(' '))),
-               true);
-    return false;
+    sendCommand(QString::fromStdString(command));
 }
 
 void DaemonController::onReplyReady(const QString &command, bool ok, const QString &response) {
@@ -204,40 +162,31 @@ void DaemonController::onReplyReady(const QString &command, bool ok, const QStri
 }
 
 void DaemonController::applyStatus(const QString &response) {
-    const QStringList lines = response.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
-    for (const QString &line : lines) {
-        const qsizetype sep = line.indexOf(QLatin1Char(':'));
-        if (sep < 0) {
-            continue;
-        }
-        const QString key = line.left(sep).trimmed();
-        const QString value = line.mid(sep + 1).trimmed();
+    const std::vector<ds4ipc::StatusField> fields = ds4ipc::parse_status(response.toStdString());
+    const auto field = [&fields](const char *key) {
+        return QString::fromStdString(ds4ipc::status_value(fields, key));
+    };
 
-        if (key == QLatin1String("Physical Controller")) {
-            m_physicalController = value;
-        } else if (key == QLatin1String("Connection Type")) {
-            m_connectionType = value;
-        } else if (key == QLatin1String("Active Backend")) {
-            m_activeBackend = value;
-        } else if (key == QLatin1String("Virtual Emulation")) {
-            m_emulationType = typeDisplayToConfig(value);
-        } else if (key == QLatin1String("DS4 Backend")) {
-            m_ds4Backend = value;
-        } else if (key == QLatin1String("DualSense Backend")) {
-            m_dualsenseBackend = value;
-        } else if (key == QLatin1String("Hide Method")) {
-            m_hideMethod = firstToken(value);
-        } else if (key == QLatin1String("DS4 Name")) {
-            m_ds4NameIsDefault = value.endsWith(QLatin1String("(default)"));
-            m_ds4Name = m_ds4NameIsDefault ? value.chopped(QStringLiteral(" (default)").size())
-                                           : value;
-        } else if (key == QLatin1String("DualSense Name")) {
-            m_dualsenseNameIsDefault = value.endsWith(QLatin1String("(default)"));
-            m_dualsenseName = m_dualsenseNameIsDefault
-                                  ? value.chopped(QStringLiteral(" (default)").size())
-                                  : value;
-        }
-    }
+    m_physicalController = field("Physical Controller");
+    m_connectionType = field("Connection Type");
+    m_activeBackend = field("Active Backend");
+    m_emulationType = QString::fromStdString(
+        ds4ipc::type_display_to_config(field("Virtual Emulation").toStdString()));
+    m_ds4Backend = field("DS4 Backend");
+    m_dualsenseBackend = field("DualSense Backend");
+    // "Hide Method" may carry a trailing "(active on current connection)".
+    m_hideMethod = field("Hide Method").section(QLatin1Char(' '), 0, 0);
+
+    const QString ds4Name = field("DS4 Name");
+    m_ds4NameIsDefault = ds4Name.endsWith(kDefaultNameSuffix);
+    m_ds4Name = m_ds4NameIsDefault ? ds4Name.chopped(kDefaultNameSuffix.size()) : ds4Name;
+
+    const QString dualsenseName = field("DualSense Name");
+    m_dualsenseNameIsDefault = dualsenseName.endsWith(kDefaultNameSuffix);
+    m_dualsenseName = m_dualsenseNameIsDefault
+                          ? dualsenseName.chopped(kDefaultNameSuffix.size())
+                          : dualsenseName;
+
     emit statusChanged();
 }
 
