@@ -5,12 +5,33 @@ import Ds4Translator
 
 ApplicationWindow {
     id: window
-    title: qsTr("DS4 Translator — Settings")
+    title: qsTr("Settings")
     width: 640
     height: 720
     minimumWidth: 480
     minimumHeight: 560
-    visible: true
+    // Started with --background: the applet is running, so the window waits
+    // in the tray until the user asks for it.
+    visible: !AppController.startHidden
+
+    // With a tray, closing the window only puts it away -- the applet keeps
+    // running. Without one, closing must really quit, or the process would
+    // linger with no way to reach it.
+    onClosing: (close) => {
+        if (AppController.trayAvailable) {
+            close.accepted = false;
+            window.hide();
+        }
+    }
+
+    Connections {
+        target: AppController
+        function onShowWindowRequested() {
+            window.show();
+            window.raise();
+            window.requestActivate();
+        }
+    }
 
     // Every control is disabled while the daemon is unreachable: sending a
     // command that cannot arrive would only produce an error banner. It is

@@ -16,7 +16,9 @@ set(DS4_UI_STRICT_WARNINGS
     -Wnull-dereference -Wpointer-arith -Wcast-align -Wundef -Wwrite-strings
 )
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Quick QuickControls2)
+# Widgets: QSystemTrayIcon and QMenu (the applet) live there; Qt Quick
+# has no tray API.
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Quick QuickControls2 Widgets)
 
 qt_standard_project_setup(REQUIRES 6.5)
 
@@ -33,6 +35,8 @@ qt_add_executable(ds4-translator-ui
     src/main.cpp
     src/ipcclient.cpp
     src/ipcclient.h
+    src/trayicon.cpp
+    src/trayicon.h
     ${DS4_SHARED_DIR}/ipc-client.cpp
     ${DS4_SHARED_DIR}/ipc-client.h
 )
@@ -47,10 +51,13 @@ qt_add_qml_module(ds4-translator-ui
     SOURCES
         src/daemoncontroller.h
         src/daemoncontroller.cpp
+        src/appcontroller.h
+        src/appcontroller.cpp
 )
 
 set_source_files_properties(
     src/main.cpp src/ipcclient.cpp src/daemoncontroller.cpp
+    src/trayicon.cpp src/appcontroller.cpp
     ${DS4_SHARED_DIR}/ipc-client.cpp
     PROPERTIES COMPILE_OPTIONS "${DS4_UI_STRICT_WARNINGS}"
 )
@@ -63,6 +70,7 @@ target_link_libraries(ds4-translator-ui PRIVATE
     Qt6::Gui
     Qt6::Quick
     Qt6::QuickControls2
+    Qt6::Widgets
 )
 
 include(GNUInstallDirs)

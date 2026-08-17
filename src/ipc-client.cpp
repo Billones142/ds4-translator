@@ -354,4 +354,11 @@ std::string type_display_to_config(const std::string &display) {
     return "none";
 }
 
+std::string type_config_to_display(const std::string &config) {
+    if (config == "ds4") return "DualShock 4";
+    if (config == "dualsense") return "DualSense";
+    if (config == "hidden") return "Hidden";
+    return "None";
+}
+
 } // namespace ds4ipc

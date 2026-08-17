@@ -149,10 +149,16 @@ ui:
 	cmake -S ui -B $(UI_BUILD_DIR) -DCMAKE_BUILD_TYPE=Release
 	cmake --build $(UI_BUILD_DIR) -j$(shell nproc)
 
+# The .desktop file is not cosmetic: the desktop portal looks the app up by
+# it, and without it every launch logs "App info not found for
+# 'ds4-translator-ui'". The autostart copy starts the tray applet with the
+# graphical session.
 install-ui: ui
 	install -D -m 755 $(UI_BINARY) $(DESTDIR)$(BINDIR)/ds4-translator-ui
 	install -D -m 644 ds4-translator-ui.desktop \
 	    $(DESTDIR)/usr/share/applications/ds4-translator-ui.desktop
+	install -D -m 644 ds4-translator-applet.desktop \
+	    $(DESTDIR)/etc/xdg/autostart/ds4-translator-applet.desktop
 ifdef SUDO_USER
 	chown -R $(SUDO_USER):$(SUDO_USER) $(UI_BUILD_DIR)
 endif
@@ -160,6 +166,27 @@ endif
 uninstall-ui:
 	rm -f $(DESTDIR)$(BINDIR)/ds4-translator-ui
 	rm -f $(DESTDIR)/usr/share/applications/ds4-translator-ui.desktop
+	rm -f $(DESTDIR)/etc/xdg/autostart/ds4-translator-applet.desktop
+
+# Same thing for the current user only -- no root, and the autostart entry
+# lands in ~/.config/autostart so it applies to this login session alone.
+USER_BINDIR      = $(HOME)/.local/bin
+USER_APPDIR      = $(HOME)/.local/share/applications
+USER_AUTOSTART   = $(HOME)/.config/autostart
+
+install-ui-user: ui
+	install -D -m 755 $(UI_BINARY) $(USER_BINDIR)/ds4-translator-ui
+	install -D -m 644 ds4-translator-ui.desktop \
+	    $(USER_APPDIR)/ds4-translator-ui.desktop
+	install -D -m 644 ds4-translator-applet.desktop \
+	    $(USER_AUTOSTART)/ds4-translator-applet.desktop
+	update-desktop-database $(USER_APPDIR) 2>/dev/null || true
+
+uninstall-ui-user:
+	rm -f $(USER_BINDIR)/ds4-translator-ui
+	rm -f $(USER_APPDIR)/ds4-translator-ui.desktop
+	rm -f $(USER_AUTOSTART)/ds4-translator-applet.desktop
+	update-desktop-database $(USER_APPDIR) 2>/dev/null || true
 
 install: all
 	install -D -m 755 $(TARGET_DAEMON) $(DESTDIR)$(BINDIR)/$(notdir $(TARGET_DAEMON))
@@ -199,4 +226,5 @@ uninstall:
 	udevadm trigger
 	systemctl daemon-reload
 
-.PHONY: all debug clean install uninstall ui install-ui uninstall-ui
+.PHONY: all debug clean install uninstall ui install-ui uninstall-ui \
+        install-ui-user uninstall-ui-user

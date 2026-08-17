@@ -115,8 +115,9 @@ std::vector<StatusField> parse_status(const std::string &response);
 std::string status_value(const std::vector<StatusField> &fields, const std::string &key);
 
 // Maps the daemon's display name ("DualShock 4") to the config string its
-// set-* commands take ("ds4").
+// set-* commands take ("ds4"), and back.
 std::string type_display_to_config(const std::string &display);
+std::string type_config_to_display(const std::string &config);
 
 } // namespace ds4ipc
 
