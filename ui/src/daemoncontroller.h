@@ -1,0 +1,115 @@
+#ifndef DS4_UI_DAEMONCONTROLLER_H
+#define DS4_UI_DAEMONCONTROLLER_H
+
+#include <QObject>
+#include <QQmlEngine>
+#include <QString>
+#include <QTimer>
+
+#include "ipcclient.h"
+
+// Model behind the settings window: mirrors the daemon's `status` output as
+// QML-readable properties and exposes the CLI's `set-*` commands as
+// invokables. Argument validation intentionally mirrors ds4-ctl
+// (src/ctl.cpp) so the UI rejects the same input the CLI rejects, instead of
+// making the daemon the only line of defence.
+class DaemonController : public QObject {
+    Q_OBJECT
+    QML_ELEMENT
+    QML_SINGLETON
+
+    Q_PROPERTY(bool online READ online NOTIFY statusChanged)
+    Q_PROPERTY(bool busy READ busy NOTIFY busyChanged)
+    Q_PROPERTY(QString lastMessage READ lastMessage NOTIFY lastMessageChanged)
+    Q_PROPERTY(bool lastMessageIsError READ lastMessageIsError NOTIFY lastMessageChanged)
+
+    Q_PROPERTY(QString physicalController READ physicalController NOTIFY statusChanged)
+    Q_PROPERTY(QString connectionType READ connectionType NOTIFY statusChanged)
+    Q_PROPERTY(QString activeBackend READ activeBackend NOTIFY statusChanged)
+    // Config-string values ("ds4"/"dualsense"/"none"/"hidden",
+    // "uhid"/"functionfs", "legacy"/"unbind") so QML can bind them straight
+    // to a control's current index.
+    Q_PROPERTY(QString emulationType READ emulationType NOTIFY statusChanged)
+    Q_PROPERTY(QString ds4Backend READ ds4Backend NOTIFY statusChanged)
+    Q_PROPERTY(QString dualsenseBackend READ dualsenseBackend NOTIFY statusChanged)
+    Q_PROPERTY(QString hideMethod READ hideMethod NOTIFY statusChanged)
+    Q_PROPERTY(QString ds4Name READ ds4Name NOTIFY statusChanged)
+    Q_PROPERTY(QString dualsenseName READ dualsenseName NOTIFY statusChanged)
+    Q_PROPERTY(bool ds4NameIsDefault READ ds4NameIsDefault NOTIFY statusChanged)
+    Q_PROPERTY(bool dualsenseNameIsDefault READ dualsenseNameIsDefault NOTIFY statusChanged)
+
+public:
+    // Longest name the daemon accepts, same limit ds4-ctl enforces.
+    static constexpr int kMaxNameBytes = 63;
+
+    explicit DaemonController(QObject *parent = nullptr);
+
+    bool online() const { return m_online; }
+    bool busy() const { return m_ipc->isBusy(); }
+    QString lastMessage() const { return m_lastMessage; }
+    bool lastMessageIsError() const { return m_lastMessageIsError; }
+
+    QString physicalController() const { return m_physicalController; }
+    QString connectionType() const { return m_connectionType; }
+    QString activeBackend() const { return m_activeBackend; }
+    QString emulationType() const { return m_emulationType; }
+    QString ds4Backend() const { return m_ds4Backend; }
+    QString dualsenseBackend() const { return m_dualsenseBackend; }
+    QString hideMethod() const { return m_hideMethod; }
+    QString ds4Name() const { return m_ds4Name; }
+    QString dualsenseName() const { return m_dualsenseName; }
+    bool ds4NameIsDefault() const { return m_ds4NameIsDefault; }
+    bool dualsenseNameIsDefault() const { return m_dualsenseNameIsDefault; }
+
+    Q_INVOKABLE void refreshStatus();
+
+    // type: ds4 | dualsense | none | hidden
+    Q_INVOKABLE void setType(const QString &type);
+    // controller: ds4 | dualsense -- backend: uhid | functionfs
+    Q_INVOKABLE void setBackend(const QString &controller, const QString &backend);
+    // controller: ds4 | dualsense -- name: free text, <= kMaxNameBytes bytes
+    Q_INVOKABLE void setName(const QString &controller, const QString &name);
+    Q_INVOKABLE void resetName(const QString &controller);
+    // method: legacy | unbind
+    Q_INVOKABLE void setHideMethod(const QString &method);
+
+    // Returns an empty string if the name is acceptable, otherwise the reason
+    // it is not -- so QML can disable the Apply button before sending.
+    Q_INVOKABLE QString validateName(const QString &name) const;
+
+signals:
+    void statusChanged();
+    void busyChanged();
+    void lastMessageChanged();
+
+private slots:
+    void onReplyReady(const QString &command, bool ok, const QString &response);
+
+private:
+    void sendCommand(const QString &command);
+    void applyStatus(const QString &response);
+    void setMessage(const QString &message, bool isError);
+    void setOnline(bool online);
+    bool requireControllerArg(const QString &controller);
+
+    IpcClient *m_ipc;
+    QTimer *m_pollTimer;
+
+    bool m_online = false;
+    bool m_lastMessageIsError = false;
+    QString m_lastMessage;
+
+    QString m_physicalController;
+    QString m_connectionType;
+    QString m_activeBackend;
+    QString m_emulationType;
+    QString m_ds4Backend;
+    QString m_dualsenseBackend;
+    QString m_hideMethod;
+    QString m_ds4Name;
+    QString m_dualsenseName;
+    bool m_ds4NameIsDefault = true;
+    bool m_dualsenseNameIsDefault = true;
+};
+
+#endif // DS4_UI_DAEMONCONTROLLER_H

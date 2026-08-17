@@ -29,6 +29,8 @@ STRICT_WARNINGS = -Wall -Wextra -Werror -Wshadow -Wformat=2 -Wformat-security \
                    -Wno-missing-field-initializers
 
 BUILD_DIR = build
+UI_BUILD_DIR = ui/build
+UI_BINARY    = $(UI_BUILD_DIR)/ds4-translator-ui
 
 # Full HID-driver unbind + libusb raw-interrupt transport (see
 # src/usb-hid-transport.* and src/hid-unbind-detect.*), the hide method
@@ -133,6 +135,28 @@ $(HIDBPF_BPF_OBJ): src/hid-bpf/hid-bpf-transport.bpf.c src/hid-bpf/hid_bpf.h \
 
 clean:
 	rm -rf $(BUILD_DIR)
+	rm -rf $(UI_BUILD_DIR)
+
+# Qt 6 settings GUI (ui/). Deliberately kept out of `all` and `install`:
+# it needs Qt 6 + CMake, which the daemon itself does not, so a machine
+# without them still builds and installs the daemon exactly as before.
+# Always delegated: CMake already does its own up-to-date checking, so
+# there is nothing for make to track here.
+ui:
+	cmake -S ui -B $(UI_BUILD_DIR) -DCMAKE_BUILD_TYPE=Release
+	cmake --build $(UI_BUILD_DIR) -j$(shell nproc)
+
+install-ui: ui
+	install -D -m 755 $(UI_BINARY) $(DESTDIR)$(BINDIR)/ds4-translator-ui
+	install -D -m 644 ds4-translator-ui.desktop \
+	    $(DESTDIR)/usr/share/applications/ds4-translator-ui.desktop
+ifdef SUDO_USER
+	chown -R $(SUDO_USER):$(SUDO_USER) $(UI_BUILD_DIR)
+endif
+
+uninstall-ui:
+	rm -f $(DESTDIR)$(BINDIR)/ds4-translator-ui
+	rm -f $(DESTDIR)/usr/share/applications/ds4-translator-ui.desktop
 
 install: all
 	install -D -m 755 $(TARGET_DAEMON) $(DESTDIR)$(BINDIR)/$(notdir $(TARGET_DAEMON))
@@ -172,4 +196,4 @@ uninstall:
 	udevadm trigger
 	systemctl daemon-reload
 
-.PHONY: all debug clean install uninstall
+.PHONY: all debug clean install uninstall ui install-ui uninstall-ui
