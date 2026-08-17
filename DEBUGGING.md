@@ -121,5 +121,11 @@ The log records timestamps, thread IDs, and system call events:
    - Search the log for `HIDIOCGFEATURE`. Look at which Feature Report IDs (e.g. `0x02`, `0x10`, `0x12`, `0x25`) the game is requesting.
    - If `HIDIOCGFEATURE` fails (`ret=-1`), `ds4-translator` needs to be updated to answer that specific Feature Report in `src/main.cpp`.
 
-3. **Controller detected as Generic Xbox Controller**:
+3. **All input stops over Bluetooth, but the controller still shows as connected**:
+   - Look for `hidp_send_message() BT socket write error: Resource temporarily unavailable (11)` in `journalctl -u bluetooth`, alongside the daemon logging that its `/sys/bus/hid/devices/0005:...` path no longer exists.
+   - That is BlueZ tearing the HID session down after its L2CAP send buffer overran: the ACL link and pairing survive (so `bluetoothctl info` still says `Connected: yes`) while the kernel HID device is destroyed, and nothing recreates it automatically.
+   - Recover by cycling the link: `bluetoothctl disconnect <MAC>` then `bluetoothctl connect <MAC>`, or hold the PS button off and on.
+   - The daemon paces its own rumble/LED reports to 40 Hz (`BtOutputPacer` in `src/main.cpp`) to stay under that limit. If this still happens, an unpaced writer other than the daemon is likely also talking to the controller's `hidraw` node.
+
+4. **Controller detected as Generic Xbox Controller**:
    - Check if `libudev` properties (`ID_BUS=usb`, `ID_VENDOR_ID=054c`, `ID_MODEL_ID=05c4`) are correctly injected into the virtual device using `udevadm info -q all /dev/hidrawX`.

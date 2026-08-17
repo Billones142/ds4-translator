@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
@@ -105,6 +106,30 @@ std::string find_hidraw_node(const std::string& sysfs_path) {
     return "";
 }
 
+// Rate-limits output-write failure logging: once the physical controller
+// is gone every queued write fails, and one line per attempt floods the
+// journal at report rate (the ENODEV burst that accompanied the Bluetooth
+// HID teardown observed 2026-08-17).
+void log_write_error() {
+    static std::chrono::steady_clock::time_point last_logged{};
+    static unsigned suppressed = 0;
+    constexpr auto kQuietPeriod = std::chrono::seconds(5);
+
+    auto now = std::chrono::steady_clock::now();
+    if (last_logged.time_since_epoch().count() != 0 && now - last_logged < kQuietPeriod) {
+        ++suppressed;
+        return;
+    }
+    std::cerr << "hid-bpf: failed to write output report to physical controller: "
+              << strerror(errno);
+    if (suppressed > 0) {
+        std::cerr << " (" << suppressed << " identical failures suppressed)";
+    }
+    std::cerr << std::endl;
+    last_logged = now;
+    suppressed = 0;
+}
+
 int on_ringbuf_report(void* ctx, void* data, size_t data_sz) {
     auto* t = static_cast<TransportState*>(ctx);
     ssize_t n = write(t->sv[0], data, data_sz);
@@ -118,22 +143,28 @@ void pump_thread_fn(TransportState* t) {
     int liveness_check_counter = 0;
 
     while (!t->stop_flag.load(std::memory_order_relaxed)) {
-        // Outbound: forward at most one pending LED/rumble write per
-        // iteration, straight to the still-live hidraw node -- mirrors
-        // usb-hid-transport.cpp's pump_thread_fn exactly, since
-        // hid_device_event never touches this direction.
+        // Outbound: drain every queued LED/rumble report and forward only
+        // the newest one, straight to the still-live hidraw node. Each
+        // report carries the complete rumble+LED state (see
+        // send_physical_output_report()), so an older one is always fully
+        // superseded -- forwarding it too would only cost an extra
+        // Bluetooth round trip and delay the state that actually matters.
+        // The daemon side already paces these (BtOutputPacer in main.cpp),
+        // so a backlog should be rare; this keeps one from turning into
+        // lag if it happens anyway.
         struct pollfd pfd;
         pfd.fd = t->sv[0];
         pfd.events = POLLIN;
         pfd.revents = 0;
-        if (poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN)) {
+        ssize_t newest = 0;
+        while (poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN)) {
             ssize_t n = read(t->sv[0], out_buf, sizeof(out_buf));
-            if (n > 0) {
-                if (write(t->hidraw_fd, out_buf, (size_t)n) < 0) {
-                    std::cerr << "hid-bpf: failed to write output report to "
-                              << "physical controller: " << strerror(errno) << std::endl;
-                }
-            }
+            if (n <= 0) break;
+            newest = n;
+            pfd.revents = 0;
+        }
+        if (newest > 0 && write(t->hidraw_fd, out_buf, (size_t)newest) < 0) {
+            log_write_error();
         }
 
         // Inbound: blocks up to 8ms (matches usb-hid-transport.cpp's own
