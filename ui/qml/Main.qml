@@ -13,8 +13,37 @@ ApplicationWindow {
     visible: true
 
     // Every control is disabled while the daemon is unreachable: sending a
-    // command that cannot arrive would only produce an error banner.
+    // command that cannot arrive would only produce an error banner. It is
+    // also disabled while a command the user triggered is still running, so
+    // a second one cannot be queued on top of it. Background status polls do
+    // not count as busy -- they used to, which made open combo box popups
+    // close on their own every poll interval.
     readonly property bool editable: DaemonController.online && !DaemonController.busy
+
+    // set-type/set-name/set-backend recreate the virtual device and routinely
+    // take a second or more. Showing progress instantly would make every
+    // quick command flash; this only appears once a command is slow enough
+    // that the user would otherwise wonder whether anything happened.
+    property bool showProgress: false
+    readonly property int progressDelayMs: 700
+
+    Timer {
+        id: progressDelay
+        interval: window.progressDelayMs
+        onTriggered: window.showProgress = true
+    }
+
+    Connections {
+        target: DaemonController
+        function onBusyChanged() {
+            if (DaemonController.busy) {
+                progressDelay.restart();
+            } else {
+                progressDelay.stop();
+                window.showProgress = false;
+            }
+        }
+    }
 
     header: ToolBar {
         RowLayout {
@@ -27,8 +56,12 @@ ApplicationWindow {
                 font.bold: true
             }
             Item { Layout.fillWidth: true }
+            Label {
+                text: qsTr("Applying…")
+                visible: window.showProgress
+            }
             BusyIndicator {
-                running: DaemonController.busy
+                running: window.showProgress
                 visible: running
                 implicitWidth: 20
                 implicitHeight: 20

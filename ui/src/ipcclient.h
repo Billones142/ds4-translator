@@ -18,7 +18,10 @@ class IpcClient : public QObject {
     Q_OBJECT
 
 public:
-    static constexpr int kDefaultTimeoutMs = 3000;
+    // Deliberately long: set-type/set-name/set-backend recreate the virtual
+    // device, which routinely takes seconds. Anything shorter turns a normal
+    // slow command into a bogus "daemon unreachable" error.
+    static constexpr int kDefaultTimeoutMs = 10000;
 
     explicit IpcClient(QObject *parent = nullptr);
 

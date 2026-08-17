@@ -8,6 +8,9 @@ namespace {
 // terminal, a controller being plugged in) show up without user action.
 constexpr int kPollIntervalMs = 2000;
 
+// The one command the UI sends on its own, without the user asking.
+constexpr auto kStatusCommand = QLatin1String("status");
+
 // Accepted argument values, mirroring ds4-ctl's own tables. Built on call
 // rather than held in namespace-scope QStringLists: a container with static
 // storage duration would construct before main() with no way to catch a
@@ -55,21 +58,47 @@ DaemonController::DaemonController(QObject *parent)
 }
 
 void DaemonController::sendCommand(const QString &command) {
-    const bool wasBusy = busy();
+    if (command != kStatusCommand) {
+        setPendingCommands(m_pendingCommands + 1);
+    }
     m_ipc->send(command);
-    if (!wasBusy) {
+}
+
+void DaemonController::setPendingCommands(int count) {
+    if (m_pendingCommands == count) {
+        return;
+    }
+    const bool wasBusy = busy();
+    m_pendingCommands = count;
+    if (wasBusy != busy()) {
         emit busyChanged();
     }
 }
 
+void DaemonController::beginInteraction() {
+    ++m_interactions;
+}
+
+void DaemonController::endInteraction() {
+    if (m_interactions > 0) {
+        --m_interactions;
+    }
+}
+
 void DaemonController::refreshStatus() {
-    // Skip the tick if a command is still in flight: the refresh that follows
-    // every completed command already covers that case, and queueing polls
-    // behind a stuck request would only pile up work.
-    if (busy()) {
+    // Skip the tick while the socket is busy: the refresh that follows every
+    // completed command already covers that case, and queueing polls behind a
+    // slow request (set-type recreates the virtual device and can take
+    // seconds) would only pile up work.
+    if (m_ipc->isBusy()) {
         return;
     }
-    sendCommand(QStringLiteral("status"));
+    // Skip it while the user is interacting with a control too, so a refresh
+    // cannot move the selection out from under them.
+    if (m_interactions > 0) {
+        return;
+    }
+    sendCommand(kStatusCommand);
 }
 
 void DaemonController::setType(const QString &type) {
@@ -149,7 +178,10 @@ bool DaemonController::requireControllerArg(const QString &controller) {
 }
 
 void DaemonController::onReplyReady(const QString &command, bool ok, const QString &response) {
-    const bool isStatus = (command == QLatin1String("status"));
+    const bool isStatus = (command == kStatusCommand);
+    if (!isStatus) {
+        setPendingCommands(m_pendingCommands - 1);
+    }
 
     if (!ok) {
         setOnline(false);
@@ -167,11 +199,7 @@ void DaemonController::onReplyReady(const QString &command, bool ok, const QStri
         // Re-read the daemon's own view instead of assuming the command took
         // effect: set-type can be refused (e.g. while a physical controller
         // is connected) and still return a plain message.
-        sendCommand(QStringLiteral("status"));
-    }
-
-    if (!busy()) {
-        emit busyChanged();
+        sendCommand(kStatusCommand);
     }
 }
 

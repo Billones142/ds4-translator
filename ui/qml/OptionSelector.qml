@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import Ds4Translator
 
 // A ComboBox bound to a daemon setting.
 //
@@ -36,6 +37,19 @@ ComboBox {
 
     onCurrentChanged: syncFromDaemon()
     Component.onCompleted: syncFromDaemon()
+
+    // Hold off background polling while the list is open: a refresh landing
+    // mid-selection would move the highlighted entry under the user.
+    Connections {
+        target: root.popup
+        function onVisibleChanged() {
+            if (root.popup.visible) {
+                DaemonController.beginInteraction();
+            } else {
+                DaemonController.endInteraction();
+            }
+        }
+    }
 
     onActivated: (index) => {
         if (syncing || index < 0 || index >= values.length) {

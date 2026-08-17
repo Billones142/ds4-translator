@@ -19,6 +19,9 @@ class DaemonController : public QObject {
     QML_SINGLETON
 
     Q_PROPERTY(bool online READ online NOTIFY statusChanged)
+    // True only while a command the *user* triggered is in flight. Background
+    // status polls deliberately do not set it: they must never disable a
+    // control the user is in the middle of using.
     Q_PROPERTY(bool busy READ busy NOTIFY busyChanged)
     Q_PROPERTY(QString lastMessage READ lastMessage NOTIFY lastMessageChanged)
     Q_PROPERTY(bool lastMessageIsError READ lastMessageIsError NOTIFY lastMessageChanged)
@@ -45,7 +48,7 @@ public:
     explicit DaemonController(QObject *parent = nullptr);
 
     bool online() const { return m_online; }
-    bool busy() const { return m_ipc->isBusy(); }
+    bool busy() const { return m_pendingCommands > 0; }
     QString lastMessage() const { return m_lastMessage; }
     bool lastMessageIsError() const { return m_lastMessageIsError; }
 
@@ -77,6 +80,13 @@ public:
     // it is not -- so QML can disable the Apply button before sending.
     Q_INVOKABLE QString validateName(const QString &name) const;
 
+    // Bracket a direct interaction (an open combo box popup, say) to hold off
+    // background polling: a status refresh landing mid-interaction would move
+    // the control under the user's cursor. Reference-counted, so overlapping
+    // interactions are safe.
+    Q_INVOKABLE void beginInteraction();
+    Q_INVOKABLE void endInteraction();
+
 signals:
     void statusChanged();
     void busyChanged();
@@ -87,6 +97,7 @@ private slots:
 
 private:
     void sendCommand(const QString &command);
+    void setPendingCommands(int count);
     void applyStatus(const QString &response);
     void setMessage(const QString &message, bool isError);
     void setOnline(bool online);
@@ -96,6 +107,8 @@ private:
     QTimer *m_pollTimer;
 
     bool m_online = false;
+    int m_pendingCommands = 0;
+    int m_interactions = 0;
     bool m_lastMessageIsError = false;
     QString m_lastMessage;
 
