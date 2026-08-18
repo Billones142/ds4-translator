@@ -327,16 +327,76 @@ const char *dpad_name(uint8_t dpad) {
     }
 }
 
-std::string format_state_line(const char *source, const uint8_t axes[6], const uint8_t buttons[3],
-                              const int16_t gyro[3], const int16_t accel[3]) {
-    char buf[192];
-    // Axis order matches the HID report: x y rx ry z rz. The motion fields
-    // are appended last on purpose -- a front-end built against the older,
-    // motion-less line still parses the fields it knows and ignores these.
+void decode_buttons(const uint8_t bytes[3], uint16_t *out_buttons, uint8_t *out_dpad) {
+    // The low nibble of the first byte is the d-pad hat; the rest are one bit
+    // per button.
+    if (out_dpad != nullptr) {
+        *out_dpad = static_cast<uint8_t>(bytes[0] & 0x0F);
+    }
+    if (out_buttons == nullptr) {
+        return;
+    }
+    uint16_t buttons = 0;
+    if (bytes[0] & 0x10) buttons |= kBtnSquare;
+    if (bytes[0] & 0x20) buttons |= kBtnCross;
+    if (bytes[0] & 0x40) buttons |= kBtnCircle;
+    if (bytes[0] & 0x80) buttons |= kBtnTriangle;
+    if (bytes[1] & 0x01) buttons |= kBtnL1;
+    if (bytes[1] & 0x02) buttons |= kBtnR1;
+    if (bytes[1] & 0x04) buttons |= kBtnL2;
+    if (bytes[1] & 0x08) buttons |= kBtnR2;
+    if (bytes[1] & 0x10) buttons |= kBtnShare;
+    if (bytes[1] & 0x20) buttons |= kBtnOptions;
+    if (bytes[1] & 0x40) buttons |= kBtnL3;
+    if (bytes[1] & 0x80) buttons |= kBtnR3;
+    if (bytes[2] & 0x01) buttons |= kBtnPs;
+    if (bytes[2] & 0x02) buttons |= kBtnTouchpad;
+    *out_buttons = buttons;
+}
+
+TouchPoint decode_touch_point(const uint8_t bytes[4]) {
+    TouchPoint point;
+    // Bit 7 of the first byte is set while the slot is *not* being touched;
+    // the low 7 bits are the contact counter, which nothing here needs.
+    point.active = (bytes[0] & 0x80) == 0;
+    // x and y are 12 bits each, packed into three bytes: x low, then y low
+    // in the high nibble of the shared byte / x high in its low nibble.
+    point.x = bytes[1] | ((bytes[2] & 0x0F) << 8);
+    point.y = ((bytes[2] & 0xF0) >> 4) | (bytes[3] << 4);
+    return point;
+}
+
+std::string format_state_line(const std::string &source, const InputState &state) {
+    char buf[256];
+    // Axis order matches the HID report: x y rx ry z rz. The motion and touch
+    // fields are appended last on purpose -- a front-end built against an
+    // older, shorter line still parses the fields it knows and ignores these.
+    uint8_t byte0 = static_cast<uint8_t>(state.dpad & 0x0F);
+    if (state.buttons & kBtnSquare) byte0 |= 0x10;
+    if (state.buttons & kBtnCross) byte0 |= 0x20;
+    if (state.buttons & kBtnCircle) byte0 |= 0x40;
+    if (state.buttons & kBtnTriangle) byte0 |= 0x80;
+    uint8_t byte1 = 0;
+    if (state.buttons & kBtnL1) byte1 |= 0x01;
+    if (state.buttons & kBtnR1) byte1 |= 0x02;
+    if (state.buttons & kBtnL2) byte1 |= 0x04;
+    if (state.buttons & kBtnR2) byte1 |= 0x08;
+    if (state.buttons & kBtnShare) byte1 |= 0x10;
+    if (state.buttons & kBtnOptions) byte1 |= 0x20;
+    if (state.buttons & kBtnL3) byte1 |= 0x40;
+    if (state.buttons & kBtnR3) byte1 |= 0x80;
+    uint8_t byte2 = 0;
+    if (state.buttons & kBtnPs) byte2 |= 0x01;
+    if (state.buttons & kBtnTouchpad) byte2 |= 0x02;
+
     (void)snprintf(buf, sizeof(buf),
-                   "STATE %s %u %u %u %u %u %u %02x %02x %02x %d %d %d %d %d %d\n", source,
-                   axes[0], axes[1], axes[2], axes[3], axes[4], axes[5], buttons[0], buttons[1],
-                   buttons[2], gyro[0], gyro[1], gyro[2], accel[0], accel[1], accel[2]);
+                   "STATE %s %u %u %u %u %u %u %02x %02x %02x %d %d %d %d %d %d %d %d %d %d %d "
+                   "%d\n",
+                   source.c_str(), state.lx, state.ly, state.rx, state.ry, state.l2, state.r2,
+                   byte0, byte1, byte2, state.gyro[0], state.gyro[1], state.gyro[2],
+                   state.accel[0], state.accel[1], state.accel[2],
+                   state.touch[0].active ? 1 : 0, state.touch[0].x, state.touch[0].y,
+                   state.touch[1].active ? 1 : 0, state.touch[1].x, state.touch[1].y);
     return std::string(buf);
 }
 
@@ -348,16 +408,19 @@ bool parse_state(const std::string &line, InputState *out) {
     unsigned x = 0, y = 0, rx = 0, ry = 0, z = 0, rz = 0, b0 = 0, b1 = 0, b2 = 0;
     int gyro[3] = {0, 0, 0};
     int accel[3] = {0, 0, 0};
+    int touch[6] = {0, 0, 0, 0, 0, 0};
     // sscanf over a strtoul chain: this is our own daemon's line-oriented
     // protocol on a local control socket, not adversarial input, and the
     // field-count check below is the validation that matters.
     int fields = sscanf(line.c_str(), // NOLINT(cert-err34-c,bugprone-unchecked-string-to-number-conversion)
-                        "STATE %15s %u %u %u %u %u %u %x %x %x %d %d %d %d %d %d", source, &x, &y,
-                        &rx, &ry, &z, &rz, &b0, &b1, &b2, &gyro[0], &gyro[1], &gyro[2], &accel[0],
-                        &accel[1], &accel[2]);
-    // 10 fields is the pre-motion line an older daemon sends: accept it and
-    // leave the sensor values at zero rather than showing nothing at all.
-    if (fields != 16 && fields != 10) {
+                        "STATE %15s %u %u %u %u %u %u %x %x %x %d %d %d %d %d %d %d %d %d %d %d %d",
+                        source, &x, &y, &rx, &ry, &z, &rz, &b0, &b1, &b2, &gyro[0], &gyro[1],
+                        &gyro[2], &accel[0], &accel[1], &accel[2], &touch[0], &touch[1], &touch[2],
+                        &touch[3], &touch[4], &touch[5]);
+    // 16 fields is the line before touch was added, 10 the one before motion
+    // was: accept both from an older daemon and leave those values at zero
+    // rather than showing nothing at all.
+    if (fields != 22 && fields != 16 && fields != 10) {
         return false;
     }
     InputState state;
@@ -369,34 +432,24 @@ bool parse_state(const std::string &line, InputState *out) {
     state.l2 = static_cast<uint8_t>(z);
     state.r2 = static_cast<uint8_t>(rz);
 
-    // Buttons arrive as the three raw HID bytes; the low nibble of the first
-    // is the d-pad hat, the rest are one bit per button.
-    const auto byte0 = static_cast<uint8_t>(b0);
-    const auto byte1 = static_cast<uint8_t>(b1);
-    const auto byte2 = static_cast<uint8_t>(b2);
-    state.dpad = static_cast<uint8_t>(byte0 & 0x0F);
-    uint16_t buttons = 0;
-    if (byte0 & 0x10) buttons |= kBtnSquare;
-    if (byte0 & 0x20) buttons |= kBtnCross;
-    if (byte0 & 0x40) buttons |= kBtnCircle;
-    if (byte0 & 0x80) buttons |= kBtnTriangle;
-    if (byte1 & 0x01) buttons |= kBtnL1;
-    if (byte1 & 0x02) buttons |= kBtnR1;
-    if (byte1 & 0x04) buttons |= kBtnL2;
-    if (byte1 & 0x08) buttons |= kBtnR2;
-    if (byte1 & 0x10) buttons |= kBtnShare;
-    if (byte1 & 0x20) buttons |= kBtnOptions;
-    if (byte1 & 0x40) buttons |= kBtnL3;
-    if (byte1 & 0x80) buttons |= kBtnR3;
-    if (byte2 & 0x01) buttons |= kBtnPs;
-    if (byte2 & 0x02) buttons |= kBtnTouchpad;
-    state.buttons = buttons;
+    const uint8_t button_bytes[3] = {static_cast<uint8_t>(b0), static_cast<uint8_t>(b1),
+                                     static_cast<uint8_t>(b2)};
+    decode_buttons(button_bytes, &state.buttons, &state.dpad);
 
-    state.has_motion = (fields == 16);
+    state.has_motion = (fields >= 16);
     if (state.has_motion) {
         for (int i = 0; i < 3; ++i) {
             state.gyro[i] = static_cast<int16_t>(gyro[i]);
             state.accel[i] = static_cast<int16_t>(accel[i]);
+        }
+    }
+    state.has_touch = (fields == 22);
+    if (state.has_touch) {
+        for (size_t i = 0; i < 2; ++i) {
+            const int *slot = &touch[i * 3];
+            state.touch[i].active = slot[0] != 0;
+            state.touch[i].x = slot[1];
+            state.touch[i].y = slot[2];
         }
     }
     *out = state;

@@ -75,6 +75,35 @@ Item {
         }
     }
 
+    // One finger on the touchpad, placed by mapping the pad's own coordinate
+    // space onto the drawn pad area.
+    component Contact: Rectangle {
+        id: contact
+
+        property bool active: false
+        property int padX: 0
+        property int padY: 0
+        // The touchpad area of the drawing, in artwork coordinates.
+        readonly property real areaX: 211
+        readonly property real areaY: 44
+        readonly property real areaWidth: 181
+        readonly property real areaHeight: 99
+
+        width: 18
+        height: 18
+        radius: 9
+        color: root.accent
+        border.width: 2
+        border.color: "#ffffff"
+        opacity: contact.active ? 0.9 : 0
+        visible: contact.opacity > 0
+        x: contact.areaX - width / 2
+           + contact.areaWidth * (contact.padX / InputMonitor.touchWidth)
+        y: contact.areaY - height / 2
+           + contact.areaHeight * (contact.padY / InputMonitor.touchHeight)
+        Behavior on opacity { NumberAnimation { duration: 70 } }
+    }
+
     component Stick: Item {
         id: stick
 
@@ -184,6 +213,17 @@ Item {
         Spot {
             x: 211; y: 44; width: 181; height: 99; radius: 10
             pressed: (root.buttons & InputMonitor.Touchpad) !== 0
+        }
+
+        Contact {
+            active: root.live && InputMonitor.touch1Active
+            padX: InputMonitor.touch1X
+            padY: InputMonitor.touch1Y
+        }
+        Contact {
+            active: root.live && InputMonitor.touch2Active
+            padX: InputMonitor.touch2X
+            padY: InputMonitor.touch2Y
         }
 
         // ------------------------------------------------ shoulders/triggers

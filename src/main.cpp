@@ -1042,6 +1042,9 @@ uint8_t sequence_number = 0;
 // can inspect what a game would currently see without needing its own
 // separate read path into the report-forwarding logic below.
 struct dualshock4_input_report_common last_virtual_common;
+// Newest touch report of the batch that came with it (the pad reports up to
+// two contacts per report, and several timestamped reports per packet).
+struct dualshock4_touch_report last_virtual_touch;
 bool last_virtual_valid = false;
 // Mirrors `!test_subscribers.empty()` so emit_input_report() (a free
 // function with no access to main()'s locals) can skip the copy above
@@ -1222,6 +1225,19 @@ void emit_input_report(ControllerType type, const struct dualshock4_input_report
                         bool has_real_battery) {
     if (g_has_test_subscribers) {
         last_virtual_common = common;
+        // Only the newest report of the batch: the older ones are the same
+        // fingers a few milliseconds earlier.
+        memset(&last_virtual_touch, 0, sizeof(last_virtual_touch));
+        if (num_touch > 0) {
+            int newest = num_touch - 1;
+            if (newest > 3) newest = 3;
+            last_virtual_touch = touch_reps[newest];
+        } else {
+            // No contact data at all: mark both slots as not touched, which is
+            // the 0x80 bit rather than the zero memset above.
+            last_virtual_touch.points[0].contact = 0x80;
+            last_virtual_touch.points[1].contact = 0x80;
+        }
         last_virtual_valid = true;
     }
 
@@ -1581,7 +1597,11 @@ int main(int argc, char* argv[]) {
     constexpr size_t TEST_EVENT_LOG_MAX = 20;
 
     struct dualshock4_input_report_common last_phy_common;
+    struct dualshock4_touch_report last_phy_touch;
     memset(&last_phy_common, 0, sizeof(last_phy_common));
+    memset(&last_phy_touch, 0, sizeof(last_phy_touch));
+    last_phy_touch.points[0].contact = 0x80;
+    last_phy_touch.points[1].contact = 0x80;
     bool last_phy_valid = false;
 
     auto test_log_event = [&](const std::string& line) {
@@ -1604,25 +1624,41 @@ int main(int argc, char* argv[]) {
         std::string line;
         // Formatted by the shared protocol client, the same code the readers
         // (ds4-ctl test, the Qt live view) parse it with.
-        auto state_line = [](const char *source, const struct dualshock4_input_report_common& c) {
+        auto state_line = [](const char *source, const struct dualshock4_input_report_common& c,
+                              const struct dualshock4_touch_report& t) {
             // Copied out field by field: the report is packed, so passing
             // pointers into it would mean taking the address of a possibly
             // unaligned member.
-            const uint8_t axes[6] = {c.x, c.y, c.rx, c.ry, c.z, c.rz};
-            const uint8_t buttons[3] = {c.buttons[0], c.buttons[1], c.buttons[2]};
-            const int16_t gyro[3] = {c.gyro[0], c.gyro[1], c.gyro[2]};
-            const int16_t accel[3] = {c.accel[0], c.accel[1], c.accel[2]};
-            return ds4ipc::format_state_line(source, axes, buttons, gyro, accel);
+            ds4ipc::InputState state;
+            state.lx = c.x;
+            state.ly = c.y;
+            state.rx = c.rx;
+            state.ry = c.ry;
+            state.l2 = c.z;
+            state.r2 = c.rz;
+            const uint8_t button_bytes[3] = {c.buttons[0], c.buttons[1], c.buttons[2]};
+            ds4ipc::decode_buttons(button_bytes, &state.buttons, &state.dpad);
+            for (int i = 0; i < 3; ++i) {
+                state.gyro[i] = c.gyro[i];
+                state.accel[i] = c.accel[i];
+            }
+            for (int i = 0; i < 2; ++i) {
+                const struct dualshock4_touch_point& p = t.points[i];
+                const uint8_t point_bytes[4] = {
+                    p.contact, p.x_lo, static_cast<uint8_t>(p.x_hi | (p.y_lo << 4)), p.y_hi};
+                state.touch[i] = ds4ipc::decode_touch_point(point_bytes);
+            }
+            return ds4ipc::format_state_line(source, state);
         };
         if (controller_type_emulates(target_type)) {
             bool vdev_exists = (backend_type == BACKEND_FUNCTIONFS) ? virtual_functionfs.device_open : (uhid_fd >= 0);
             if (vdev_exists && last_virtual_valid) {
-                line = state_line("VIRTUAL", last_virtual_common);
+                line = state_line("VIRTUAL", last_virtual_common, last_virtual_touch);
             } else {
                 line = "NOTE No active virtual controller yet (connect the physical controller, or run 'ds4-ctl create-virtual').\n";
             }
         } else if (last_phy_valid) {
-            line = state_line("PHYSICAL", last_phy_common);
+            line = state_line("PHYSICAL", last_phy_common, last_phy_touch);
         } else {
             line = "NOTE No physical controller connected.\n";
         }
@@ -2509,6 +2545,15 @@ int main(int argc, char* argv[]) {
                 if (got_report) {
                     if (g_has_test_subscribers) {
                         last_phy_common = common;
+                        memset(&last_phy_touch, 0, sizeof(last_phy_touch));
+                        if (num_touch > 0) {
+                            int newest = num_touch - 1;
+                            if (newest > 3) newest = 3;
+                            last_phy_touch = touch_reps[newest];
+                        } else {
+                            last_phy_touch.points[0].contact = 0x80;
+                            last_phy_touch.points[1].contact = 0x80;
+                        }
                         last_phy_valid = true;
                     }
                     if (vdev_ready_for_io()) {

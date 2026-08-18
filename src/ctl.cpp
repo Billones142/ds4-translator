@@ -466,6 +466,21 @@ static void redraw_test(const std::string& header, const std::vector<std::string
                  st.in.gyro[0], st.in.gyro[1], st.in.gyro[2],
                  st.in.accel[0], st.in.accel[1], st.in.accel[2]);
         std::cout << "\x1b[0K" << buf << "\n";
+        // The touchpad tracks two fingers; a slot keeps its last coordinates
+        // after the finger leaves, so only the active ones are worth showing.
+        std::string touch_text;
+        for (int i = 0; i < 2; ++i) {
+            const ds4ipc::TouchPoint& point = st.in.touch[i];
+            (void)snprintf(buf, sizeof(buf), "  #%d %s", i + 1,
+                     point.active ? "" : "-");
+            touch_text += buf;
+            if (point.active) {
+                (void)snprintf(buf, sizeof(buf), "%4d,%3d", point.x, point.y);
+                touch_text += buf;
+            }
+        }
+        std::cout << "\x1b[0KTouchpad (max " << ds4ipc::kTouchWidth << "x" << ds4ipc::kTouchHeight
+                  << "):" << touch_text << "\n";
     }
     std::cout << "\x1b[0K\n";
     std::cout << "\x1b[0KLED/rumble commands received, most recent last:\n";

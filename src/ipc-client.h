@@ -132,6 +132,19 @@ enum Button : uint16_t {
 constexpr uint8_t kDpadNeutral = 8;
 const char *dpad_name(uint8_t dpad);
 
+// Touchpad resolution the controller reports its contacts in.
+constexpr int kTouchWidth = 1920;
+constexpr int kTouchHeight = 943;
+
+// One touchpad contact. The pad tracks two fingers at once, each with its
+// own slot; a slot that is not being touched keeps the coordinates of the
+// last contact, so `active` is what tells them apart.
+struct TouchPoint {
+    bool active = false;
+    int x = 0; // 0..kTouchWidth-1, left to right
+    int y = 0; // 0..kTouchHeight-1, top to bottom
+};
+
 // Decoded STATE line. Axes are the raw 0..255 HID values (128 is centre for
 // the sticks, 0 is released for the triggers); motion is the raw signed
 // sensor output, which is what the daemon forwards.
@@ -144,18 +157,29 @@ struct InputState {
     uint8_t dpad = kDpadNeutral;
     int16_t gyro[3] = {0, 0, 0};   // pitch, yaw, roll
     int16_t accel[3] = {0, 0, 0};  // x, y, z
-    // False when the line came from a daemon older than the motion fields,
-    // so gyro/accel above are zeros rather than readings.
+    TouchPoint touch[2];
+    // False when the line came from a daemon older than the motion (or the
+    // touch) fields, so those values are zeros rather than readings.
     bool has_motion = false;
+    bool has_touch = false;
 };
 
-// Builds one STATE line (daemon side), newline included.
-std::string format_state_line(const char *source, const uint8_t axes[6], const uint8_t buttons[3],
-                              const int16_t gyro[3], const int16_t accel[3]);
+// Builds one STATE line (daemon side), newline included. The daemon fills an
+// InputState from the HID report it is relaying and hands it over here, so
+// the wire format has exactly one writer.
+std::string format_state_line(const std::string &source, const InputState &state);
+
+// Decodes the button/d-pad bits out of the three raw HID button bytes.
+void decode_buttons(const uint8_t bytes[3], uint16_t *out_buttons, uint8_t *out_dpad);
+
+// Decodes one contact out of its four raw HID bytes (contact id/state byte,
+// then the packed 12-bit x and y).
+TouchPoint decode_touch_point(const uint8_t bytes[4]);
 
 // Parses one STATE line (front-end side). Returns false for any other line
 // or for a malformed one, leaving *out untouched. A line from an older
-// daemon (no motion fields) still parses, with has_motion false.
+// daemon (no motion or touch fields) still parses, with has_motion /
+// has_touch false.
 bool parse_state(const std::string &line, InputState *out);
 
 // ------------------------------------------------------------------- status

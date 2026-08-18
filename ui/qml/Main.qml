@@ -41,6 +41,19 @@ ApplicationWindow {
     // close on their own every poll interval.
     readonly property bool editable: DaemonController.online && !DaemonController.busy
 
+    // The two touchpad slots, as coordinates or a dash while unused. Written
+    // out here rather than in the label so the empty case reads as one word.
+    readonly property string touchSummary: {
+        if (!InputMonitor.hasTouch) {
+            return qsTr("not reported");
+        }
+        const first = InputMonitor.touch1Active
+            ? "%1,%2".arg(InputMonitor.touch1X).arg(InputMonitor.touch1Y) : "—";
+        const second = InputMonitor.touch2Active
+            ? "%1,%2".arg(InputMonitor.touch2X).arg(InputMonitor.touch2Y) : "—";
+        return "%1  %2".arg(first).arg(second);
+    }
+
     // set-type/set-name/set-backend recreate the virtual device and routinely
     // take a second or more. Showing progress instantly would make every
     // quick command flash; this only appears once a command is slow enough
@@ -407,8 +420,9 @@ ApplicationWindow {
                     Layout.rightMargin: 12
                     horizontalAlignment: Text.AlignHCenter
                     text: InputMonitor.hasState
-                        ? qsTr("D-pad: %1     L2: %2     R2: %3")
+                        ? qsTr("D-pad: %1     L2: %2     R2: %3     Touch: %4")
                             .arg(InputMonitor.dpadName()).arg(InputMonitor.l2).arg(InputMonitor.r2)
+                            .arg(window.touchSummary)
                         : ""
                     opacity: 0.75
                 }

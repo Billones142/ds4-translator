@@ -55,9 +55,24 @@ class InputMonitor : public QObject {
     // D-pad hat: 0 = up, clockwise in 45 degree steps, 8 = neutral.
     Q_PROPERTY(int dpad READ dpad NOTIFY inputChanged)
 
-    // False when the daemon is older than the motion fields of the STATE
-    // line, so the sensor values below are zeros and not readings.
+    // False when the daemon is older than the motion (or the touch) fields of
+    // the STATE line, so those values are zeros and not readings.
     Q_PROPERTY(bool hasMotion READ hasMotion NOTIFY inputChanged)
+    Q_PROPERTY(bool hasTouch READ hasTouch NOTIFY inputChanged)
+
+    // The touchpad tracks two fingers at once. Each slot reports whether it
+    // is being touched and where, in the pad's own coordinates (0..1919 by
+    // 0..942, origin top-left); an inactive slot keeps its last position.
+    Q_PROPERTY(bool touch1Active READ touch1Active NOTIFY inputChanged)
+    Q_PROPERTY(int touch1X READ touch1X NOTIFY inputChanged)
+    Q_PROPERTY(int touch1Y READ touch1Y NOTIFY inputChanged)
+    Q_PROPERTY(bool touch2Active READ touch2Active NOTIFY inputChanged)
+    Q_PROPERTY(int touch2X READ touch2X NOTIFY inputChanged)
+    Q_PROPERTY(int touch2Y READ touch2Y NOTIFY inputChanged)
+    // Pad resolution, so a view can map a contact onto its own drawing
+    // without repeating the numbers.
+    Q_PROPERTY(int touchWidth READ touchWidth CONSTANT)
+    Q_PROPERTY(int touchHeight READ touchHeight CONSTANT)
     // Raw motion sensor counts. Deliberately not converted to degrees/s or g:
     // that needs the per-unit calibration data the daemon does not forward.
     Q_PROPERTY(int gyroPitch READ gyroPitch NOTIFY inputChanged)
@@ -106,6 +121,15 @@ public:
     int l2() const { return m_state.l2; }
     int r2() const { return m_state.r2; }
     bool hasMotion() const { return m_state.has_motion; }
+    bool hasTouch() const { return m_state.has_touch; }
+    bool touch1Active() const { return m_state.touch[0].active; }
+    int touch1X() const { return m_state.touch[0].x; }
+    int touch1Y() const { return m_state.touch[0].y; }
+    bool touch2Active() const { return m_state.touch[1].active; }
+    int touch2X() const { return m_state.touch[1].x; }
+    int touch2Y() const { return m_state.touch[1].y; }
+    static int touchWidth() { return ds4ipc::kTouchWidth; }
+    static int touchHeight() { return ds4ipc::kTouchHeight; }
     int buttons() const { return m_state.buttons; }
     int dpad() const { return m_state.dpad; }
     int gyroPitch() const { return m_state.gyro[0]; }
