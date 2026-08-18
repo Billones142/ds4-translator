@@ -18,7 +18,9 @@ set(DS4_UI_STRICT_WARNINGS
 
 # Widgets: QSystemTrayIcon and QMenu (the applet) live there; Qt Quick
 # has no tray API.
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Quick QuickControls2 Widgets)
+# Svg: the live view's controller artwork is an SVG, which Image can only
+# load when the Qt SVG image-format plugin is present.
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Quick QuickControls2 Widgets Svg)
 
 qt_standard_project_setup(REQUIRES 6.5)
 
@@ -48,16 +50,29 @@ qt_add_qml_module(ds4-translator-ui
         qml/Main.qml
         qml/OptionSelector.qml
         qml/NameEditor.qml
+        qml/ControllerView.qml
+        qml/MotionView.qml
     SOURCES
         src/daemoncontroller.h
         src/daemoncontroller.cpp
         src/appcontroller.h
         src/appcontroller.cpp
+        src/inputmonitor.h
+        src/inputmonitor.cpp
+)
+
+# The controller drawing the live view overlays button state onto. Kept in
+# the repo's shared assets/ directory (it is documentation artwork too), and
+# compiled into the binary so the installed UI needs no data files.
+qt_add_resources(ds4-translator-ui "controller_art"
+    PREFIX "/art"
+    BASE ${CMAKE_CURRENT_SOURCE_DIR}/../assets
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/../assets/Dualshock_4_Layout.svg
 )
 
 set_source_files_properties(
     src/main.cpp src/ipcclient.cpp src/daemoncontroller.cpp
-    src/trayicon.cpp src/appcontroller.cpp
+    src/trayicon.cpp src/appcontroller.cpp src/inputmonitor.cpp
     ${DS4_SHARED_DIR}/ipc-client.cpp
     PROPERTIES COMPILE_OPTIONS "${DS4_UI_STRICT_WARNINGS}"
 )
@@ -71,6 +86,7 @@ target_link_libraries(ds4-translator-ui PRIVATE
     Qt6::Quick
     Qt6::QuickControls2
     Qt6::Widgets
+    Qt6::Svg
 )
 
 include(GNUInstallDirs)

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <fcntl.h>
 #include <sys/socket.h>
@@ -307,6 +308,102 @@ std::string build_set_hide_method(const std::string &method, std::string *error)
     }
     return "set-hide-method " + method;
 }
+
+// -------------------------------------------------------------- live input
+
+const char *const kTestCommand = "test";
+
+const char *dpad_name(uint8_t dpad) {
+    switch (dpad) {
+        case 0: return "Up";
+        case 1: return "Up-Right";
+        case 2: return "Right";
+        case 3: return "Down-Right";
+        case 4: return "Down";
+        case 5: return "Down-Left";
+        case 6: return "Left";
+        case 7: return "Up-Left";
+        default: return "Neutral";
+    }
+}
+
+std::string format_state_line(const char *source, const uint8_t axes[6], const uint8_t buttons[3],
+                              const int16_t gyro[3], const int16_t accel[3]) {
+    char buf[192];
+    // Axis order matches the HID report: x y rx ry z rz. The motion fields
+    // are appended last on purpose -- a front-end built against the older,
+    // motion-less line still parses the fields it knows and ignores these.
+    (void)snprintf(buf, sizeof(buf),
+                   "STATE %s %u %u %u %u %u %u %02x %02x %02x %d %d %d %d %d %d\n", source,
+                   axes[0], axes[1], axes[2], axes[3], axes[4], axes[5], buttons[0], buttons[1],
+                   buttons[2], gyro[0], gyro[1], gyro[2], accel[0], accel[1], accel[2]);
+    return std::string(buf);
+}
+
+bool parse_state(const std::string &line, InputState *out) {
+    if (out == nullptr || line.rfind("STATE ", 0) != 0) {
+        return false;
+    }
+    char source[16];
+    unsigned x = 0, y = 0, rx = 0, ry = 0, z = 0, rz = 0, b0 = 0, b1 = 0, b2 = 0;
+    int gyro[3] = {0, 0, 0};
+    int accel[3] = {0, 0, 0};
+    // sscanf over a strtoul chain: this is our own daemon's line-oriented
+    // protocol on a local control socket, not adversarial input, and the
+    // field-count check below is the validation that matters.
+    int fields = sscanf(line.c_str(), // NOLINT(cert-err34-c,bugprone-unchecked-string-to-number-conversion)
+                        "STATE %15s %u %u %u %u %u %u %x %x %x %d %d %d %d %d %d", source, &x, &y,
+                        &rx, &ry, &z, &rz, &b0, &b1, &b2, &gyro[0], &gyro[1], &gyro[2], &accel[0],
+                        &accel[1], &accel[2]);
+    // 10 fields is the pre-motion line an older daemon sends: accept it and
+    // leave the sensor values at zero rather than showing nothing at all.
+    if (fields != 16 && fields != 10) {
+        return false;
+    }
+    InputState state;
+    state.source = source;
+    state.lx = static_cast<uint8_t>(x);
+    state.ly = static_cast<uint8_t>(y);
+    state.rx = static_cast<uint8_t>(rx);
+    state.ry = static_cast<uint8_t>(ry);
+    state.l2 = static_cast<uint8_t>(z);
+    state.r2 = static_cast<uint8_t>(rz);
+
+    // Buttons arrive as the three raw HID bytes; the low nibble of the first
+    // is the d-pad hat, the rest are one bit per button.
+    const auto byte0 = static_cast<uint8_t>(b0);
+    const auto byte1 = static_cast<uint8_t>(b1);
+    const auto byte2 = static_cast<uint8_t>(b2);
+    state.dpad = static_cast<uint8_t>(byte0 & 0x0F);
+    uint16_t buttons = 0;
+    if (byte0 & 0x10) buttons |= kBtnSquare;
+    if (byte0 & 0x20) buttons |= kBtnCross;
+    if (byte0 & 0x40) buttons |= kBtnCircle;
+    if (byte0 & 0x80) buttons |= kBtnTriangle;
+    if (byte1 & 0x01) buttons |= kBtnL1;
+    if (byte1 & 0x02) buttons |= kBtnR1;
+    if (byte1 & 0x04) buttons |= kBtnL2;
+    if (byte1 & 0x08) buttons |= kBtnR2;
+    if (byte1 & 0x10) buttons |= kBtnShare;
+    if (byte1 & 0x20) buttons |= kBtnOptions;
+    if (byte1 & 0x40) buttons |= kBtnL3;
+    if (byte1 & 0x80) buttons |= kBtnR3;
+    if (byte2 & 0x01) buttons |= kBtnPs;
+    if (byte2 & 0x02) buttons |= kBtnTouchpad;
+    state.buttons = buttons;
+
+    state.has_motion = (fields == 16);
+    if (state.has_motion) {
+        for (int i = 0; i < 3; ++i) {
+            state.gyro[i] = static_cast<int16_t>(gyro[i]);
+            state.accel[i] = static_cast<int16_t>(accel[i]);
+        }
+    }
+    *out = state;
+    return true;
+}
+
+// ------------------------------------------------------------------- status
 
 std::vector<StatusField> parse_status(const std::string &response) {
     std::vector<StatusField> fields;

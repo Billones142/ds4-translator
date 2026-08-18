@@ -97,21 +97,23 @@ static void print_daemon_unreachable_help() {
 // keyboard. Analog sticks are intentionally left fixed at center (128,128)
 // rather than half-implemented with awkward toggle semantics.
 
+// Same bits the daemon's live STATE line decodes to, so the synthetic
+// tester below and the live monitor speak one vocabulary.
 enum {
-    SYN_BTN_SQUARE   = 1 << 0,
-    SYN_BTN_CROSS    = 1 << 1,
-    SYN_BTN_CIRCLE   = 1 << 2,
-    SYN_BTN_TRIANGLE = 1 << 3,
-    SYN_BTN_L1       = 1 << 4,
-    SYN_BTN_R1       = 1 << 5,
-    SYN_BTN_L2       = 1 << 6,
-    SYN_BTN_R2       = 1 << 7,
-    SYN_BTN_SHARE    = 1 << 8,
-    SYN_BTN_OPTIONS  = 1 << 9,
-    SYN_BTN_L3       = 1 << 10,
-    SYN_BTN_R3       = 1 << 11,
-    SYN_BTN_PS       = 1 << 12,
-    SYN_BTN_TOUCHPAD = 1 << 13,
+    SYN_BTN_SQUARE   = ds4ipc::kBtnSquare,
+    SYN_BTN_CROSS    = ds4ipc::kBtnCross,
+    SYN_BTN_CIRCLE   = ds4ipc::kBtnCircle,
+    SYN_BTN_TRIANGLE = ds4ipc::kBtnTriangle,
+    SYN_BTN_L1       = ds4ipc::kBtnL1,
+    SYN_BTN_R1       = ds4ipc::kBtnR1,
+    SYN_BTN_L2       = ds4ipc::kBtnL2,
+    SYN_BTN_R2       = ds4ipc::kBtnR2,
+    SYN_BTN_SHARE    = ds4ipc::kBtnShare,
+    SYN_BTN_OPTIONS  = ds4ipc::kBtnOptions,
+    SYN_BTN_L3       = ds4ipc::kBtnL3,
+    SYN_BTN_R3       = ds4ipc::kBtnR3,
+    SYN_BTN_PS       = ds4ipc::kBtnPs,
+    SYN_BTN_TOUCHPAD = ds4ipc::kBtnTouchpad,
 };
 
 // Single source of truth for `tap`'s button/dpad names, shared by run_tap(),
@@ -202,20 +204,6 @@ struct UiState {
     uint8_t dpad = 8; // 0=up..7=up-left clockwise, 8=neutral
 };
 
-static const char *dpad_name(uint8_t dpad) {
-    switch (dpad) {
-        case 0: return "Up";
-        case 1: return "Up-Right";
-        case 2: return "Right";
-        case 3: return "Down-Right";
-        case 4: return "Down";
-        case 5: return "Down-Left";
-        case 6: return "Left";
-        case 7: return "Up-Left";
-        default: return "Neutral";
-    }
-}
-
 static std::string mark(uint16_t buttons, uint16_t bit, const char *label) {
     return (buttons & bit) ? (std::string("[") + label + "]") : (std::string(" ") + label + " ");
 }
@@ -243,7 +231,7 @@ static void redraw(const UiState& s, const std::string& daemon_status, bool stat
     std::cout << "\x1b[0K   " << mark(s.buttons, SYN_BTN_SQUARE, "Square(J)") << "                      " << mark(s.buttons, SYN_BTN_CIRCLE, "Circle(L)") << "\n";
     std::cout << "\x1b[0K              " << mark(s.buttons, SYN_BTN_CROSS, "Cross(K)") << "\n";
     std::cout << "\x1b[0K\n";
-    std::cout << "\x1b[0KD-Pad (arrow keys): " << dpad_name(s.dpad) << "\n";
+    std::cout << "\x1b[0KD-Pad (arrow keys): " << ds4ipc::dpad_name(s.dpad) << "\n";
     std::cout << "\x1b[0K\n";
     std::cout << "\x1b[0K   " << mark(s.buttons, SYN_BTN_L1, "L1(Q)") << "  " << mark(s.buttons, SYN_BTN_R1, "R1(E)")
               << "      " << mark(s.buttons, SYN_BTN_L2, "L2(1)") << "  " << mark(s.buttons, SYN_BTN_R2, "R2(2)")
@@ -437,31 +425,9 @@ static int run_virtual_ui(const std::string& type, bool auto_destroy) {
 // hidden — currently looks like, plus a scrolling log of LED/rumble
 // output commands it observed being sent to it.
 
-static UiState decode_raw_state(uint8_t b0, uint8_t b1, uint8_t b2) {
-    UiState s;
-    s.dpad = b0 & 0x0F;
-    if (b0 & 0x10) s.buttons |= SYN_BTN_SQUARE;
-    if (b0 & 0x20) s.buttons |= SYN_BTN_CROSS;
-    if (b0 & 0x40) s.buttons |= SYN_BTN_CIRCLE;
-    if (b0 & 0x80) s.buttons |= SYN_BTN_TRIANGLE;
-    if (b1 & 0x01) s.buttons |= SYN_BTN_L1;
-    if (b1 & 0x02) s.buttons |= SYN_BTN_R1;
-    if (b1 & 0x04) s.buttons |= SYN_BTN_L2;
-    if (b1 & 0x08) s.buttons |= SYN_BTN_R2;
-    if (b1 & 0x10) s.buttons |= SYN_BTN_SHARE;
-    if (b1 & 0x20) s.buttons |= SYN_BTN_OPTIONS;
-    if (b1 & 0x40) s.buttons |= SYN_BTN_L3;
-    if (b1 & 0x80) s.buttons |= SYN_BTN_R3;
-    if (b2 & 0x01) s.buttons |= SYN_BTN_PS;
-    if (b2 & 0x02) s.buttons |= SYN_BTN_TOUCHPAD;
-    return s;
-}
-
 struct TestState {
     bool have_state = false;
-    std::string source;
-    UiState ui;
-    uint8_t lx = 128, ly = 128, rx = 128, ry = 128, l2 = 0, r2 = 0;
+    ds4ipc::InputState in;
     std::string note = "Waiting for data from daemon...";
 };
 
@@ -477,22 +443,28 @@ static void redraw_test(const std::string& header, const std::vector<std::string
     if (!st.have_state) {
         std::cout << "\x1b[0K" << st.note << "\n";
     } else {
-        std::cout << "\x1b[0KSource: " << st.source << "\n";
+        std::cout << "\x1b[0KSource: " << st.in.source << "\n";
         std::cout << "\x1b[0K\n";
-        std::cout << "\x1b[0K              " << mark(st.ui.buttons, SYN_BTN_TRIANGLE, "Triangle") << "\n";
-        std::cout << "\x1b[0K   " << mark(st.ui.buttons, SYN_BTN_SQUARE, "Square") << "                " << mark(st.ui.buttons, SYN_BTN_CIRCLE, "Circle") << "\n";
-        std::cout << "\x1b[0K              " << mark(st.ui.buttons, SYN_BTN_CROSS, "Cross") << "\n";
+        std::cout << "\x1b[0K              " << mark(st.in.buttons, SYN_BTN_TRIANGLE, "Triangle") << "\n";
+        std::cout << "\x1b[0K   " << mark(st.in.buttons, SYN_BTN_SQUARE, "Square") << "                " << mark(st.in.buttons, SYN_BTN_CIRCLE, "Circle") << "\n";
+        std::cout << "\x1b[0K              " << mark(st.in.buttons, SYN_BTN_CROSS, "Cross") << "\n";
         std::cout << "\x1b[0K\n";
-        std::cout << "\x1b[0KD-Pad: " << dpad_name(st.ui.dpad) << "\n";
-        std::cout << "\x1b[0K   " << mark(st.ui.buttons, SYN_BTN_L1, "L1") << "  " << mark(st.ui.buttons, SYN_BTN_R1, "R1")
-                  << "      " << mark(st.ui.buttons, SYN_BTN_L2, "L2") << "  " << mark(st.ui.buttons, SYN_BTN_R2, "R2")
-                  << "      " << mark(st.ui.buttons, SYN_BTN_L3, "L3") << "  " << mark(st.ui.buttons, SYN_BTN_R3, "R3") << "\n";
-        std::cout << "\x1b[0K   " << mark(st.ui.buttons, SYN_BTN_SHARE, "Share") << "  " << mark(st.ui.buttons, SYN_BTN_OPTIONS, "Options")
-                  << "      " << mark(st.ui.buttons, SYN_BTN_PS, "PS") << "  " << mark(st.ui.buttons, SYN_BTN_TOUCHPAD, "Touchpad") << "\n";
+        std::cout << "\x1b[0KD-Pad: " << ds4ipc::dpad_name(st.in.dpad) << "\n";
+        std::cout << "\x1b[0K   " << mark(st.in.buttons, SYN_BTN_L1, "L1") << "  " << mark(st.in.buttons, SYN_BTN_R1, "R1")
+                  << "      " << mark(st.in.buttons, SYN_BTN_L2, "L2") << "  " << mark(st.in.buttons, SYN_BTN_R2, "R2")
+                  << "      " << mark(st.in.buttons, SYN_BTN_L3, "L3") << "  " << mark(st.in.buttons, SYN_BTN_R3, "R3") << "\n";
+        std::cout << "\x1b[0K   " << mark(st.in.buttons, SYN_BTN_SHARE, "Share") << "  " << mark(st.in.buttons, SYN_BTN_OPTIONS, "Options")
+                  << "      " << mark(st.in.buttons, SYN_BTN_PS, "PS") << "  " << mark(st.in.buttons, SYN_BTN_TOUCHPAD, "Touchpad") << "\n";
         std::cout << "\x1b[0K\n";
-        char buf[128];
+        char buf[160];
         (void)snprintf(buf, sizeof(buf), "LX=%3u LY=%3u   RX=%3u RY=%3u   L2=%3u R2=%3u",
-                 st.lx, st.ly, st.rx, st.ry, st.l2, st.r2);
+                 st.in.lx, st.in.ly, st.in.rx, st.in.ry, st.in.l2, st.in.r2);
+        std::cout << "\x1b[0K" << buf << "\n";
+        // Raw sensor counts, as the controller reports them -- no scaling to
+        // degrees/s or g, which would need per-unit calibration data.
+        (void)snprintf(buf, sizeof(buf), "Gyro  P=%6d Y=%6d R=%6d   Accel X=%6d Y=%6d Z=%6d",
+                 st.in.gyro[0], st.in.gyro[1], st.in.gyro[2],
+                 st.in.accel[0], st.in.accel[1], st.in.accel[2]);
         std::cout << "\x1b[0K" << buf << "\n";
     }
     std::cout << "\x1b[0K\n";
@@ -519,7 +491,7 @@ static int run_test_ui() {
         return 1;
     }
 
-    if (!ds4ipc::write_command(fd, "test", &error)) {
+    if (!ds4ipc::write_command(fd, ds4ipc::kTestCommand, &error)) {
         std::cerr << error << std::endl;
         close(fd);
         return 1;
@@ -585,22 +557,10 @@ static int run_test_ui() {
                     } else if (line.rfind("CAVEAT ", 0) == 0) {
                         caveats.push_back(line.substr(7));
                     } else if (line.rfind("STATE ", 0) == 0) {
-                        char source[16];
-                        unsigned x, y, rxv, ry, z, rz, b0, b1, b2;
-                        // sscanf over strtoul: this is our own daemon's line-oriented
-                        // status protocol over a local control socket, not adversarial
-                        // input -- the nf==10 field-count check below is the validation
-                        // that matters here, and a strtoul-chain rewrite for 10 fields
-                        // buys no real safety over that.
-                        int nf = sscanf(line.c_str(), "STATE %15s %u %u %u %u %u %u %x %x %x", // NOLINT(cert-err34-c,bugprone-unchecked-string-to-number-conversion)
-                                        source, &x, &y, &rxv, &ry, &z, &rz, &b0, &b1, &b2);
-                        if (nf == 10) {
+                        ds4ipc::InputState parsed;
+                        if (ds4ipc::parse_state(line, &parsed)) {
                             st.have_state = true;
-                            st.source = source;
-                            st.lx = (uint8_t)x;  st.ly = (uint8_t)y;
-                            st.rx = (uint8_t)rxv; st.ry = (uint8_t)ry;
-                            st.l2 = (uint8_t)z;  st.r2 = (uint8_t)rz;
-                            st.ui = decode_raw_state((uint8_t)b0, (uint8_t)b1, (uint8_t)b2);
+                            st.in = parsed;
                         }
                     } else if (line.rfind("NOTE ", 0) == 0) {
                         st.have_state = false;

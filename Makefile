@@ -78,14 +78,17 @@ TARGET_CTL    = $(BUILD_DIR)/ds4-ctl
 TARGET_SPOOF  = $(BUILD_DIR)/libudev-sony-spoof.so
 TARGET_SPOOF32 = $(BUILD_DIR)/libudev-sony-spoof32.so
 
-DAEMON_SRC = src/main.cpp src/functionfs-backend.c $(UNBIND_SRC)
-# Client side of the control protocol, shared by ds4-ctl and the Qt UI
-# in ui/ (which compiles src/ipc-client.cpp into its own binary).
+DAEMON_SRC = src/main.cpp src/functionfs-backend.c $(UNBIND_SRC) $(IPC_SRC)
+# The control protocol itself: the client transport/command rules used by
+# ds4-ctl and the Qt UI in ui/ (which compiles src/ipc-client.cpp into its
+# own binary), plus the live-monitor STATE line format, which the daemon
+# writes and both front-ends parse -- so the daemon links it too.
 IPC_SRC    = src/ipc-client.cpp
 CTL_SRC    = src/ctl.cpp $(IPC_SRC)
 SPOOF_SRC  = src/udev-spoof.c
 
-DAEMON_OBJ = $(BUILD_DIR)/main.o $(BUILD_DIR)/functionfs-backend.o $(UNBIND_OBJ) $(HIDBPF_OBJ)
+DAEMON_OBJ = $(BUILD_DIR)/main.o $(BUILD_DIR)/functionfs-backend.o $(UNBIND_OBJ) $(HIDBPF_OBJ) \
+             $(BUILD_DIR)/ipc-client.o
 CTL_OBJ    = $(BUILD_DIR)/ctl.o $(BUILD_DIR)/ipc-client.o
 
 all: $(TARGET_DAEMON) $(TARGET_CTL) $(TARGET_SPOOF) $(TARGET_SPOOF32) $(HIDBPF_BPF_OBJ)

@@ -66,28 +66,50 @@ ApplicationWindow {
         }
     }
 
-    header: ToolBar {
-        RowLayout {
-            anchors.fill: parent
-            anchors.leftMargin: 12
-            anchors.rightMargin: 12
+    header: ColumnLayout {
+        spacing: 0
 
-            Label {
-                text: DaemonController.online ? qsTr("Daemon connected") : qsTr("Daemon unreachable")
-                font.bold: true
-            }
-            Item { Layout.fillWidth: true }
-            Label {
-                text: qsTr("Applying…")
-                visible: window.showProgress
-            }
-            BusyIndicator {
-                running: window.showProgress
-                visible: running
-                implicitWidth: 20
-                implicitHeight: 20
+        ToolBar {
+            Layout.fillWidth: true
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 12
+                anchors.rightMargin: 12
+
+                Label {
+                    text: DaemonController.online ? qsTr("Daemon connected") : qsTr("Daemon unreachable")
+                    font.bold: true
+                }
+                Item { Layout.fillWidth: true }
+                Label {
+                    text: qsTr("Applying…")
+                    visible: window.showProgress
+                }
+                BusyIndicator {
+                    running: window.showProgress
+                    visible: running
+                    implicitWidth: 20
+                    implicitHeight: 20
+                }
             }
         }
+
+        TabBar {
+            id: tabBar
+            Layout.fillWidth: true
+
+            TabButton { text: qsTr("Settings") }
+            TabButton { text: qsTr("Controller") }
+        }
+    }
+
+    // The live stream makes the daemon poll its input source far harder, so
+    // it is subscribed to only while its page is actually on screen (and the
+    // window is not sitting hidden in the tray).
+    Binding {
+        target: InputMonitor
+        property: "active"
+        value: window.visible && tabBar.currentIndex === 1
     }
 
     footer: Pane {
@@ -100,236 +122,306 @@ ApplicationWindow {
         }
     }
 
-    ScrollView {
+    StackLayout {
         anchors.fill: parent
-        contentWidth: availableWidth
+        currentIndex: tabBar.currentIndex
 
-        ColumnLayout {
-            width: parent.width
-            spacing: 16
+        ScrollView {
+            contentWidth: availableWidth
 
-            GroupBox {
-                title: qsTr("Status")
-                Layout.fillWidth: true
-                Layout.margins: 12
+            ColumnLayout {
+                width: parent.width
+                spacing: 16
 
-                GridLayout {
-                    anchors.fill: parent
-                    columns: 2
-                    columnSpacing: 12
+                GroupBox {
+                    title: qsTr("Status")
+                    Layout.fillWidth: true
+                    Layout.margins: 12
 
-                    Label { text: qsTr("Physical controller:") }
-                    Label {
-                        text: DaemonController.physicalController || qsTr("—")
-                        Layout.fillWidth: true
-                        elide: Text.ElideMiddle
-                    }
+                    GridLayout {
+                        anchors.fill: parent
+                        columns: 2
+                        columnSpacing: 12
 
-                    Label { text: qsTr("Connection:") }
-                    Label { text: DaemonController.connectionType || qsTr("—") }
+                        Label { text: qsTr("Physical controller:") }
+                        Label {
+                            text: DaemonController.physicalController || qsTr("—")
+                            Layout.fillWidth: true
+                            elide: Text.ElideMiddle
+                        }
 
-                    Label { text: qsTr("Active backend:") }
-                    Label { text: DaemonController.activeBackend || qsTr("—") }
-                }
-            }
+                        Label { text: qsTr("Connection:") }
+                        Label { text: DaemonController.connectionType || qsTr("—") }
 
-            GroupBox {
-                title: qsTr("Virtual controller type")
-                Layout.fillWidth: true
-                Layout.leftMargin: 12
-                Layout.rightMargin: 12
-
-                ColumnLayout {
-                    anchors.fill: parent
-
-                    Label {
-                        text: qsTr("Which controller games see. Changing this recreates the virtual device.")
-                        wrapMode: Text.Wrap
-                        Layout.fillWidth: true
-                    }
-
-                    OptionSelector {
-                        id: typeSelector
-                        Layout.fillWidth: true
-                        enabled: window.editable
-                        values: DaemonController.typeValues()
-                        labelMap: ({
-                            "ds4": qsTr("DualShock 4"),
-                            "dualsense": qsTr("DualSense"),
-                            "none": qsTr("None"),
-                            "hidden": qsTr("Hidden")
-                        })
-                        current: DaemonController.emulationType
-                        onSelected: value => DaemonController.setType(value)
+                        Label { text: qsTr("Active backend:") }
+                        Label { text: DaemonController.activeBackend || qsTr("—") }
                     }
                 }
-            }
 
-            GroupBox {
-                title: qsTr("Emulation backend")
-                Layout.fillWidth: true
-                Layout.leftMargin: 12
-                Layout.rightMargin: 12
+                GroupBox {
+                    title: qsTr("Virtual controller type")
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
 
-                ColumnLayout {
-                    anchors.fill: parent
-                    spacing: 8
+                    ColumnLayout {
+                        anchors.fill: parent
 
-                    Label {
-                        text: qsTr("Set per emulated type. Applies the next time that type's virtual device is created.")
-                        wrapMode: Text.Wrap
-                        Layout.fillWidth: true
+                        Label {
+                            text: qsTr("Which controller games see. Changing this recreates the virtual device.")
+                            wrapMode: Text.Wrap
+                            Layout.fillWidth: true
+                        }
+
+                        OptionSelector {
+                            id: typeSelector
+                            Layout.fillWidth: true
+                            enabled: window.editable
+                            values: DaemonController.typeValues()
+                            labelMap: ({
+                                "ds4": qsTr("DualShock 4"),
+                                "dualsense": qsTr("DualSense"),
+                                "none": qsTr("None"),
+                                "hidden": qsTr("Hidden")
+                            })
+                            current: DaemonController.emulationType
+                            onSelected: value => DaemonController.setType(value)
+                        }
                     }
+                }
 
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Label { text: qsTr("DualShock 4:"); Layout.preferredWidth: 110 }
+                GroupBox {
+                    title: qsTr("Emulation backend")
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        spacing: 8
+
+                        Label {
+                            text: qsTr("Set per emulated type. Applies the next time that type's virtual device is created.")
+                            wrapMode: Text.Wrap
+                            Layout.fillWidth: true
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Label { text: qsTr("DualShock 4:"); Layout.preferredWidth: 110 }
+                            OptionSelector {
+                                Layout.fillWidth: true
+                                enabled: window.editable
+                                values: DaemonController.backendValues()
+                                current: DaemonController.ds4Backend
+                                onSelected: value => DaemonController.setBackend("ds4", value)
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Label { text: qsTr("DualSense:"); Layout.preferredWidth: 110 }
+                            OptionSelector {
+                                Layout.fillWidth: true
+                                enabled: window.editable
+                                values: DaemonController.backendValues()
+                                current: DaemonController.dualsenseBackend
+                                onSelected: value => DaemonController.setBackend("dualsense", value)
+                            }
+                        }
+                    }
+                }
+
+                GroupBox {
+                    title: qsTr("Reported controller name")
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        spacing: 8
+
+                        Label {
+                            text: qsTr("Applying a name recreates the virtual device if that type is active — any app reading it sees a brief input interruption.")
+                            wrapMode: Text.Wrap
+                            Layout.fillWidth: true
+                        }
+
+                        NameEditor {
+                            Layout.fillWidth: true
+                            enabled: window.editable
+                            controller: "ds4"
+                            label: qsTr("DualShock 4")
+                            currentName: DaemonController.ds4Name
+                            isDefault: DaemonController.ds4NameIsDefault
+                        }
+
+                        NameEditor {
+                            Layout.fillWidth: true
+                            enabled: window.editable
+                            controller: "dualsense"
+                            label: qsTr("DualSense")
+                            currentName: DaemonController.dualsenseName
+                            isDefault: DaemonController.dualsenseNameIsDefault
+                        }
+                    }
+                }
+
+                GroupBox {
+                    title: qsTr("Hide method")
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+
+                    ColumnLayout {
+                        anchors.fill: parent
+
+                        Label {
+                            text: qsTr("How the physical controller is hidden from other apps. Applies on the next physical (re)connection.")
+                            wrapMode: Text.Wrap
+                            Layout.fillWidth: true
+                        }
+
                         OptionSelector {
                             Layout.fillWidth: true
                             enabled: window.editable
-                            values: DaemonController.backendValues()
-                            current: DaemonController.ds4Backend
-                            onSelected: value => DaemonController.setBackend("ds4", value)
+                            values: DaemonController.hideMethodValues()
+                            labelMap: ({ "unbind": qsTr("unbind (default)") })
+                            current: DaemonController.hideMethod
+                            onSelected: value => DaemonController.setHideMethod(value)
                         }
                     }
+                }
 
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Label { text: qsTr("DualSense:"); Layout.preferredWidth: 110 }
-                        OptionSelector {
+                // Preferences of this application itself, not of the daemon: they
+                // stay usable while the daemon is unreachable.
+                GroupBox {
+                    title: qsTr("Application")
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+                    Layout.bottomMargin: 12
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        spacing: 8
+
+                        Switch {
+                            text: qsTr("Show a tray icon")
+                            checked: AppController.trayEnabled
+                            enabled: AppController.trayAvailable
+                            // Toggling writes `checked` imperatively, which drops
+                            // the binding above; restoring it keeps the stored
+                            // preference the source of truth, so a change that
+                            // could not be saved snaps back.
+                            onToggled: {
+                                AppController.trayEnabled = checked;
+                                checked = Qt.binding(() => AppController.trayEnabled);
+                            }
+                        }
+
+                        Label {
+                            text: AppController.trayAvailable
+                                ? qsTr("With the tray icon, closing this window leaves the applet running and the emulated controller type can be switched from the tray menu.")
+                                : qsTr("This session has no system tray, so the tray icon is unavailable.")
+                            wrapMode: Text.Wrap
                             Layout.fillWidth: true
-                            enabled: window.editable
-                            values: DaemonController.backendValues()
-                            current: DaemonController.dualsenseBackend
-                            onSelected: value => DaemonController.setBackend("dualsense", value)
+                        }
+
+                        Switch {
+                            text: qsTr("Start the applet on login")
+                            checked: AppController.autostartEnabled
+                            // Autostart runs the applet with --background, which
+                            // needs somewhere to sit.
+                            enabled: AppController.trayEnabled
+                            onToggled: {
+                                AppController.autostartEnabled = checked;
+                                checked = Qt.binding(() => AppController.autostartEnabled);
+                            }
+                        }
+
+                        Label {
+                            text: AppController.trayEnabled
+                                ? qsTr("Adds an autostart entry for this user only. It starts the applet in the tray, without opening this window.")
+                                : qsTr("Requires the tray icon: turning the tray icon off also removes the autostart entry.")
+                            wrapMode: Text.Wrap
+                            Layout.fillWidth: true
+                        }
+
+                        Label {
+                            text: AppController.settingsError
+                            visible: text.length > 0
+                            color: "#c0392b"
+                            wrapMode: Text.Wrap
+                            Layout.fillWidth: true
                         }
                     }
                 }
             }
+        }
 
-            GroupBox {
-                title: qsTr("Reported controller name")
-                Layout.fillWidth: true
-                Layout.leftMargin: 12
-                Layout.rightMargin: 12
+        // Live view: what the daemon currently sees on the controller.
+        ScrollView {
+            contentWidth: availableWidth
 
-                ColumnLayout {
-                    anchors.fill: parent
-                    spacing: 8
+            ColumnLayout {
+                width: parent.width
+                spacing: 12
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.margins: 12
 
                     Label {
-                        text: qsTr("Applying a name recreates the virtual device if that type is active — any app reading it sees a brief input interruption.")
+                        text: InputMonitor.hasState
+                            ? (InputMonitor.source === "VIRTUAL"
+                                ? qsTr("Showing the emulated controller")
+                                : qsTr("Showing the physical controller"))
+                            : InputMonitor.note
                         wrapMode: Text.Wrap
                         Layout.fillWidth: true
                     }
 
-                    NameEditor {
-                        Layout.fillWidth: true
-                        enabled: window.editable
-                        controller: "ds4"
-                        label: qsTr("DualShock 4")
-                        currentName: DaemonController.ds4Name
-                        isDefault: DaemonController.ds4NameIsDefault
-                    }
-
-                    NameEditor {
-                        Layout.fillWidth: true
-                        enabled: window.editable
-                        controller: "dualsense"
-                        label: qsTr("DualSense")
-                        currentName: DaemonController.dualsenseName
-                        isDefault: DaemonController.dualsenseNameIsDefault
+                    BusyIndicator {
+                        running: InputMonitor.active && !InputMonitor.hasState
+                        visible: running
+                        implicitWidth: 20
+                        implicitHeight: 20
                     }
                 }
-            }
 
-            GroupBox {
-                title: qsTr("Hide method")
-                Layout.fillWidth: true
-                Layout.leftMargin: 12
-                Layout.rightMargin: 12
-
-                ColumnLayout {
-                    anchors.fill: parent
-
-                    Label {
-                        text: qsTr("How the physical controller is hidden from other apps. Applies on the next physical (re)connection.")
-                        wrapMode: Text.Wrap
-                        Layout.fillWidth: true
-                    }
-
-                    OptionSelector {
-                        Layout.fillWidth: true
-                        enabled: window.editable
-                        values: DaemonController.hideMethodValues()
-                        labelMap: ({ "unbind": qsTr("unbind (default)") })
-                        current: DaemonController.hideMethod
-                        onSelected: value => DaemonController.setHideMethod(value)
-                    }
+                ControllerView {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+                    // The drawing has a fixed aspect ratio; height follows the
+                    // width it is given so nothing is letterboxed.
+                    Layout.preferredHeight: width * (implicitHeight / implicitWidth)
+                    opacity: InputMonitor.hasState ? 1 : 0.45
                 }
-            }
 
-            // Preferences of this application itself, not of the daemon: they
-            // stay usable while the daemon is unreachable.
-            GroupBox {
-                title: qsTr("Application")
-                Layout.fillWidth: true
-                Layout.leftMargin: 12
-                Layout.rightMargin: 12
-                Layout.bottomMargin: 12
+                Label {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+                    horizontalAlignment: Text.AlignHCenter
+                    text: InputMonitor.hasState
+                        ? qsTr("D-pad: %1     L2: %2     R2: %3")
+                            .arg(InputMonitor.dpadName()).arg(InputMonitor.l2).arg(InputMonitor.r2)
+                        : ""
+                    opacity: 0.75
+                }
 
-                ColumnLayout {
-                    anchors.fill: parent
-                    spacing: 8
+                GroupBox {
+                    title: qsTr("Motion sensors")
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+                    Layout.bottomMargin: 12
 
-                    Switch {
-                        text: qsTr("Show a tray icon")
-                        checked: AppController.trayEnabled
-                        enabled: AppController.trayAvailable
-                        // Toggling writes `checked` imperatively, which drops
-                        // the binding above; restoring it keeps the stored
-                        // preference the source of truth, so a change that
-                        // could not be saved snaps back.
-                        onToggled: {
-                            AppController.trayEnabled = checked;
-                            checked = Qt.binding(() => AppController.trayEnabled);
-                        }
-                    }
-
-                    Label {
-                        text: AppController.trayAvailable
-                            ? qsTr("With the tray icon, closing this window leaves the applet running and the emulated controller type can be switched from the tray menu.")
-                            : qsTr("This session has no system tray, so the tray icon is unavailable.")
-                        wrapMode: Text.Wrap
-                        Layout.fillWidth: true
-                    }
-
-                    Switch {
-                        text: qsTr("Start the applet on login")
-                        checked: AppController.autostartEnabled
-                        // Autostart runs the applet with --background, which
-                        // needs somewhere to sit.
-                        enabled: AppController.trayEnabled
-                        onToggled: {
-                            AppController.autostartEnabled = checked;
-                            checked = Qt.binding(() => AppController.autostartEnabled);
-                        }
-                    }
-
-                    Label {
-                        text: AppController.trayEnabled
-                            ? qsTr("Adds an autostart entry for this user only. It starts the applet in the tray, without opening this window.")
-                            : qsTr("Requires the tray icon: turning the tray icon off also removes the autostart entry.")
-                        wrapMode: Text.Wrap
-                        Layout.fillWidth: true
-                    }
-
-                    Label {
-                        text: AppController.settingsError
-                        visible: text.length > 0
-                        color: "#c0392b"
-                        wrapMode: Text.Wrap
-                        Layout.fillWidth: true
+                    MotionView {
+                        anchors.fill: parent
                     }
                 }
             }

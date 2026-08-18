@@ -31,6 +31,7 @@
 #include "hid-unbind-detect.h"
 #include "usb-hid-transport.h"
 #include "hid-bpf-transport.h"
+#include "ipc-client.h"
 
 #ifndef DS4_VERSION
 #define DS4_VERSION "unknown"
@@ -1601,25 +1602,27 @@ int main(int argc, char* argv[]) {
     auto test_broadcast_state = [&]() {
         if (test_subscribers.empty()) return;
         std::string line;
+        // Formatted by the shared protocol client, the same code the readers
+        // (ds4-ctl test, the Qt live view) parse it with.
+        auto state_line = [](const char *source, const struct dualshock4_input_report_common& c) {
+            // Copied out field by field: the report is packed, so passing
+            // pointers into it would mean taking the address of a possibly
+            // unaligned member.
+            const uint8_t axes[6] = {c.x, c.y, c.rx, c.ry, c.z, c.rz};
+            const uint8_t buttons[3] = {c.buttons[0], c.buttons[1], c.buttons[2]};
+            const int16_t gyro[3] = {c.gyro[0], c.gyro[1], c.gyro[2]};
+            const int16_t accel[3] = {c.accel[0], c.accel[1], c.accel[2]};
+            return ds4ipc::format_state_line(source, axes, buttons, gyro, accel);
+        };
         if (controller_type_emulates(target_type)) {
             bool vdev_exists = (backend_type == BACKEND_FUNCTIONFS) ? virtual_functionfs.device_open : (uhid_fd >= 0);
             if (vdev_exists && last_virtual_valid) {
-                char buf[160];
-                (void)snprintf(buf, sizeof(buf), "STATE VIRTUAL %u %u %u %u %u %u %02x %02x %02x\n",
-                         last_virtual_common.x, last_virtual_common.y, last_virtual_common.rx, last_virtual_common.ry,
-                         last_virtual_common.z, last_virtual_common.rz,
-                         last_virtual_common.buttons[0], last_virtual_common.buttons[1], last_virtual_common.buttons[2]);
-                line = buf;
+                line = state_line("VIRTUAL", last_virtual_common);
             } else {
                 line = "NOTE No active virtual controller yet (connect the physical controller, or run 'ds4-ctl create-virtual').\n";
             }
         } else if (last_phy_valid) {
-            char buf[160];
-            (void)snprintf(buf, sizeof(buf), "STATE PHYSICAL %u %u %u %u %u %u %02x %02x %02x\n",
-                     last_phy_common.x, last_phy_common.y, last_phy_common.rx, last_phy_common.ry,
-                     last_phy_common.z, last_phy_common.rz,
-                     last_phy_common.buttons[0], last_phy_common.buttons[1], last_phy_common.buttons[2]);
-            line = buf;
+            line = state_line("PHYSICAL", last_phy_common);
         } else {
             line = "NOTE No physical controller connected.\n";
         }

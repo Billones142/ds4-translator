@@ -1,6 +1,7 @@
 #ifndef DS4_IPC_CLIENT_H
 #define DS4_IPC_CLIENT_H
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -99,6 +100,63 @@ std::string build_set_hide_method(const std::string &method, std::string *error)
 // Warning to show before a name change: it recreates the virtual device if
 // that type is currently active.
 extern const char *const kSetNameWarning;
+
+// -------------------------------------------------------------- live input
+
+// Command that subscribes to the daemon's live input stream. Unlike every
+// other command this connection stays open: the daemon promotes it into its
+// broadcast subscriber list and pushes lines until the client disconnects.
+extern const char *const kTestCommand;
+
+// Button bits of a live STATE line. The daemon reports the raw HID button
+// bytes; these are the decoded, front-end friendly bits, and they are also
+// what `ds4-ctl virtual`'s synthetic "input" command takes.
+enum Button : uint16_t {
+    kBtnSquare   = 1 << 0,
+    kBtnCross    = 1 << 1,
+    kBtnCircle   = 1 << 2,
+    kBtnTriangle = 1 << 3,
+    kBtnL1       = 1 << 4,
+    kBtnR1       = 1 << 5,
+    kBtnL2       = 1 << 6,
+    kBtnR2       = 1 << 7,
+    kBtnShare    = 1 << 8,
+    kBtnOptions  = 1 << 9,
+    kBtnL3       = 1 << 10,
+    kBtnR3       = 1 << 11,
+    kBtnPs       = 1 << 12,
+    kBtnTouchpad = 1 << 13,
+};
+
+// D-pad hat value: 0 = up, then clockwise in 45 degree steps, 8 = neutral.
+constexpr uint8_t kDpadNeutral = 8;
+const char *dpad_name(uint8_t dpad);
+
+// Decoded STATE line. Axes are the raw 0..255 HID values (128 is centre for
+// the sticks, 0 is released for the triggers); motion is the raw signed
+// sensor output, which is what the daemon forwards.
+struct InputState {
+    std::string source;      // "VIRTUAL" or "PHYSICAL"
+    uint8_t lx = 128, ly = 128;
+    uint8_t rx = 128, ry = 128;
+    uint8_t l2 = 0, r2 = 0;
+    uint16_t buttons = 0;    // OR of Button
+    uint8_t dpad = kDpadNeutral;
+    int16_t gyro[3] = {0, 0, 0};   // pitch, yaw, roll
+    int16_t accel[3] = {0, 0, 0};  // x, y, z
+    // False when the line came from a daemon older than the motion fields,
+    // so gyro/accel above are zeros rather than readings.
+    bool has_motion = false;
+};
+
+// Builds one STATE line (daemon side), newline included.
+std::string format_state_line(const char *source, const uint8_t axes[6], const uint8_t buttons[3],
+                              const int16_t gyro[3], const int16_t accel[3]);
+
+// Parses one STATE line (front-end side). Returns false for any other line
+// or for a malformed one, leaving *out untouched. A line from an older
+// daemon (no motion fields) still parses, with has_motion false.
+bool parse_state(const std::string &line, InputState *out);
 
 // ------------------------------------------------------------------- status
 
