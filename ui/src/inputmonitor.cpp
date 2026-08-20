@@ -13,7 +13,7 @@ constexpr int kRetryIntervalMs = 2000;
 
 InputMonitor::InputMonitor(QObject *parent)
     : QObject(parent), m_retry(new QTimer(this)),
-      m_note(tr("Not watching the controller.")) {
+      m_connectionNote(tr("Not watching the controller.")) {
     m_retry->setInterval(kRetryIntervalMs);
     connect(m_retry, &QTimer::timeout, this, &InputMonitor::tryConnect);
 }
@@ -30,14 +30,26 @@ void InputMonitor::setActive(bool active) {
     emit activeChanged();
 
     if (m_active) {
-        setNote(tr("Connecting to the daemon…"));
+        setConnectionNote(tr("Connecting to the daemon…"));
         tryConnect();
         m_retry->start();
     } else {
         m_retry->stop();
         disconnectStream();
-        setNote(tr("Not watching the controller."));
+        setConnectionNote(tr("Not watching the controller."));
     }
+}
+
+void InputMonitor::setSource(Source source) {
+    if (m_source == source) {
+        return;
+    }
+    m_source = source;
+    emit sourceChanged();
+    // Everything the view reads comes from the selected source, so switching
+    // is the same event as new data arriving.
+    emit inputChanged();
+    emit noteChanged();
 }
 
 void InputMonitor::tryConnect() {
@@ -50,13 +62,17 @@ void InputMonitor::tryConnect() {
     // async -- the same split IpcClient uses for the settings commands.
     int fd = ds4ipc::connect_socket(&error);
     if (fd < 0) {
-        setNote(QString::fromStdString(error));
+        setConnectionNote(QString::fromStdString(error));
         return;
     }
-    if (!ds4ipc::write_command(fd, ds4ipc::kTestCommand, &error) ||
+    // "all": both sources every tick, since the view lets the user switch
+    // between them without reconnecting. An older daemon rejects it, and the
+    // reply below downgrades this to the single-source command.
+    const char *command = m_allSources ? ds4ipc::kTestAllCommand : ds4ipc::kTestCommand;
+    if (!ds4ipc::write_command(fd, command, &error) ||
         !ds4ipc::set_non_blocking(fd, &error)) {
         close(fd);
-        setNote(QString::fromStdString(error));
+        setConnectionNote(QString::fromStdString(error));
         return;
     }
 
@@ -64,7 +80,7 @@ void InputMonitor::tryConnect() {
     m_buffer.clear();
     m_notifier = new QSocketNotifier(m_fd, QSocketNotifier::Read, this);
     connect(m_notifier, &QSocketNotifier::activated, this, &InputMonitor::onReadable);
-    setNote(tr("Waiting for data from the daemon…"));
+    setConnectionNote(tr("Waiting for data from the daemon…"));
     emit connectedChanged();
 }
 
@@ -80,8 +96,17 @@ void InputMonitor::disconnectStream() {
         emit connectedChanged();
     }
     m_buffer.clear();
-    if (m_hasState) {
-        m_hasState = false;
+    clearStates();
+}
+
+void InputMonitor::clearStates() {
+    bool had_state = false;
+    for (int i = 0; i < kSourceCount; ++i) {
+        had_state = had_state || m_hasState[i];
+        m_hasState[i] = false;
+        m_notes[i].clear();
+    }
+    if (had_state) {
         emit inputChanged();
     }
 }
@@ -93,10 +118,23 @@ void InputMonitor::onReadable() {
         return;
     }
     if (status == ds4ipc::ReadStatus::Eof || status == ds4ipc::ReadStatus::Error) {
+        // A daemon older than "test all" rejects it and closes, and its reply
+        // carries no trailing newline, so it is still sitting in the buffer
+        // rather than having gone through handleLine().
+        const bool unsupported = status == ds4ipc::ReadStatus::Eof && m_allSources &&
+                                 m_buffer.rfind("Unknown command", 0) == 0;
         disconnectStream();
-        setNote(status == ds4ipc::ReadStatus::Eof
-                    ? tr("The daemon closed the connection.")
-                    : QString::fromStdString(error));
+        if (unsupported) {
+            // The retry timer reconnects in a moment with the single-source
+            // command, which every daemon version understands.
+            m_allSources = false;
+            setConnectionNote(tr("This daemon only streams its active source. Restart "
+                                 "ds4-translator after updating it to watch both."));
+        } else {
+            setConnectionNote(status == ds4ipc::ReadStatus::Eof
+                                  ? tr("The daemon closed the connection.")
+                                  : QString::fromStdString(error));
+        }
         return; // the retry timer picks it up again
     }
 
@@ -107,36 +145,90 @@ void InputMonitor::onReadable() {
     }
 }
 
+int InputMonitor::sourceIndex(const std::string &source) {
+    if (source == ds4ipc::kSourceVirtual) {
+        return Virtual;
+    }
+    if (source == ds4ipc::kSourcePhysical) {
+        return Physical;
+    }
+    return -1;
+}
+
 void InputMonitor::handleLine(const std::string &line) {
     ds4ipc::InputState parsed;
     if (ds4ipc::parse_state(line, &parsed)) {
-        m_state = parsed;
-        m_hasState = true;
+        const int index = sourceIndex(parsed.source);
+        if (index < 0) {
+            return; // a source this build does not know about
+        }
+        m_states[index] = parsed;
+        m_hasState[index] = true;
+        // Emitted for either source: the picker shows both as available or
+        // not, so the other source's arrival is a visible change too.
         emit inputChanged();
         return;
     }
-    if (line.rfind("NOTE ", 0) == 0) {
-        // The daemon has nothing to show (no controller, or no virtual device
-        // yet) and says why; keep displaying its reason instead of a stale
-        // snapshot.
-        if (m_hasState) {
-            m_hasState = false;
+
+    std::string note_source;
+    std::string note_text;
+    if (ds4ipc::parse_note(line, &note_source, &note_text)) {
+        // The daemon has nothing to show for that source (no controller, no
+        // virtual device yet, emulation off) and says why; keep displaying
+        // its reason instead of a stale snapshot.
+        const QString text = QString::fromStdString(note_text);
+        const int index = sourceIndex(note_source);
+        if (index < 0) {
+            // A daemon older than the two-source stream does not name the
+            // source in its notes. It only follows one source anyway, so the
+            // reason applies to whatever this view could have shown.
+            for (int i = 0; i < kSourceCount; ++i) {
+                if (m_hasState[i]) {
+                    m_hasState[i] = false;
+                    emit inputChanged();
+                }
+                setNote(i, text);
+            }
+            return;
+        }
+        if (m_hasState[index]) {
+            m_hasState[index] = false;
             emit inputChanged();
         }
-        setNote(QString::fromStdString(line.substr(5)));
+        setNote(index, text);
     }
     // OK:/CAVEAT/EVENT lines are about the subscription and the LED/rumble
     // traffic; the terminal monitor shows them, this view does not.
 }
 
-void InputMonitor::setNote(const QString &note) {
-    if (m_note == note) {
+QString InputMonitor::note() const {
+    // While the stream is down there is nothing per-source to say -- the
+    // reason is the connection itself.
+    if (m_fd < 0) {
+        return m_connectionNote;
+    }
+    const QString &note = m_notes[m_source];
+    return note.isEmpty() ? m_connectionNote : note;
+}
+
+void InputMonitor::setNote(int source, const QString &note) {
+    if (m_notes[source] == note) {
         return;
     }
-    m_note = note;
+    m_notes[source] = note;
+    if (source == m_source) {
+        emit noteChanged();
+    }
+}
+
+void InputMonitor::setConnectionNote(const QString &note) {
+    if (m_connectionNote == note) {
+        return;
+    }
+    m_connectionNote = note;
     emit noteChanged();
 }
 
 QString InputMonitor::dpadName() const {
-    return QString::fromLatin1(ds4ipc::dpad_name(m_state.dpad));
+    return QString::fromLatin1(ds4ipc::dpad_name(selected().dpad));
 }

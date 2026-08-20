@@ -103,10 +103,19 @@ extern const char *const kSetNameWarning;
 
 // -------------------------------------------------------------- live input
 
-// Command that subscribes to the daemon's live input stream. Unlike every
+// Commands that subscribe to the daemon's live input stream. Unlike every
 // other command this connection stays open: the daemon promotes it into its
 // broadcast subscriber list and pushes lines until the client disconnects.
+//
+// kTestCommand follows whichever source is active (the emulated device, or
+// the physical controller when emulation is off). kTestAllCommand asks for
+// both every tick, so the reader can show either one on demand.
 extern const char *const kTestCommand;
+extern const char *const kTestAllCommand;
+
+// Values of InputState::source, and of the source word of a NOTE line.
+extern const char *const kSourceVirtual;
+extern const char *const kSourcePhysical;
 
 // Button bits of a live STATE line. The daemon reports the raw HID button
 // bytes; these are the decoded, front-end friendly bits, and they are also
@@ -175,6 +184,10 @@ void decode_buttons(const uint8_t bytes[3], uint16_t *out_buttons, uint8_t *out_
 // Decodes one contact out of its four raw HID bytes (contact id/state byte,
 // then the packed 12-bit x and y).
 TouchPoint decode_touch_point(const uint8_t bytes[4]);
+
+// Parses a "NOTE <SOURCE> <text>" line: why that source has nothing to show
+// right now. Returns false for any other line.
+bool parse_note(const std::string &line, std::string *out_source, std::string *out_text);
 
 // Parses one STATE line (front-end side). Returns false for any other line
 // or for a malformed one, leaving *out untouched. A line from an older

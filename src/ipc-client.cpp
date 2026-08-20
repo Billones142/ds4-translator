@@ -312,6 +312,29 @@ std::string build_set_hide_method(const std::string &method, std::string *error)
 // -------------------------------------------------------------- live input
 
 const char *const kTestCommand = "test";
+const char *const kTestAllCommand = "test all";
+
+const char *const kSourceVirtual = "VIRTUAL";
+const char *const kSourcePhysical = "PHYSICAL";
+
+bool parse_note(const std::string &line, std::string *out_source, std::string *out_text) {
+    if (line.rfind("NOTE ", 0) != 0) {
+        return false;
+    }
+    const std::string body = line.substr(5);
+    // The source word is optional: daemons older than the two-source stream
+    // sent the reason on its own.
+    std::string::size_type space = body.find(' ');
+    std::string first = body.substr(0, space);
+    const bool has_source = (first == kSourceVirtual || first == kSourcePhysical);
+    if (out_source != nullptr) {
+        *out_source = has_source ? first : std::string();
+    }
+    if (out_text != nullptr) {
+        *out_text = (has_source && space != std::string::npos) ? body.substr(space + 1) : body;
+    }
+    return true;
+}
 
 const char *dpad_name(uint8_t dpad) {
     switch (dpad) {

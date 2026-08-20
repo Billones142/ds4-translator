@@ -11,12 +11,15 @@
 
 #include "ipc-client.h"
 
-// Live view of whatever the daemon currently sees on the controller.
+// Live view of what the daemon currently sees, on either of its two sources:
+// the emulated controller it presents to games, or the physical one it reads.
 //
-// This is the `test` command, the one command whose connection stays open:
-// the daemon promotes the socket into its broadcast list and pushes a STATE
-// line about 30 times a second, so unlike the settings commands there is no
-// request/response pairing here and no IpcClient queue involved.
+// This is the `test all` command, the one command whose connection stays
+// open: the daemon promotes the socket into its broadcast list and pushes a
+// STATE line per source about 30 times a second, so unlike the settings
+// commands there is no request/response pairing here and no IpcClient queue
+// involved. Both sources are tracked at all times and `source` only decides
+// which one the properties below report, so switching is instant.
 //
 // The stream is only subscribed to while something is actually watching it
 // (setActive(false) drops the connection): a subscriber makes the daemon poll
@@ -32,14 +35,20 @@ class InputMonitor : public QObject {
     // Connected to the daemon's stream (which does not yet mean a controller
     // is reporting anything -- see `hasState`).
     Q_PROPERTY(bool connected READ isConnected NOTIFY connectedChanged)
-    // True once a STATE line arrived; false while the daemon is only sending
-    // a NOTE (no controller, or no virtual device yet).
+    // Which device the properties below report: Virtual (the emulated
+    // controller games see) or Physical (the controller the daemon reads).
+    Q_PROPERTY(Source source READ source WRITE setSource NOTIFY sourceChanged)
+    // True once a STATE line arrived for the selected source; false while the
+    // daemon is only sending a NOTE for it (no controller, no virtual device
+    // yet, emulation off).
     Q_PROPERTY(bool hasState READ hasState NOTIFY inputChanged)
-    // Why there is no state, in the daemon's words, or the connection error.
+    // Why the selected source has nothing to show, in the daemon's words, or
+    // the connection error.
     Q_PROPERTY(QString note READ note NOTIFY noteChanged)
-    // Which device the values come from: "VIRTUAL" (the emulated controller)
-    // or "PHYSICAL" (raw passthrough, when emulation is off).
-    Q_PROPERTY(QString source READ source NOTIFY inputChanged)
+    // Per-source availability, so a source picker can show which ones are
+    // actually reporting before the user switches to them.
+    Q_PROPERTY(bool virtualLive READ virtualLive NOTIFY inputChanged)
+    Q_PROPERTY(bool physicalLive READ physicalLive NOTIFY inputChanged)
 
     // Axes as the controller reports them: sticks 0..255 with 128 centred,
     // triggers 0..255 with 0 released.
@@ -106,47 +115,59 @@ public:
     };
     Q_ENUM(Button)
 
+    // The daemon's two streams. The values are indices into the per-source
+    // arrays below.
+    enum Source {
+        Virtual = 0,
+        Physical = 1,
+    };
+    Q_ENUM(Source)
+
     bool isActive() const { return m_active; }
     void setActive(bool active);
 
     bool isConnected() const { return m_fd >= 0; }
-    bool hasState() const { return m_hasState; }
-    QString note() const { return m_note; }
-    QString source() const { return QString::fromStdString(m_state.source); }
+    Source source() const { return m_source; }
+    void setSource(Source source);
+    bool hasState() const { return m_hasState[m_source]; }
+    QString note() const;
+    bool virtualLive() const { return m_hasState[Virtual]; }
+    bool physicalLive() const { return m_hasState[Physical]; }
 
-    int leftX() const { return m_state.lx; }
-    int leftY() const { return m_state.ly; }
-    int rightX() const { return m_state.rx; }
-    int rightY() const { return m_state.ry; }
-    int l2() const { return m_state.l2; }
-    int r2() const { return m_state.r2; }
-    bool hasMotion() const { return m_state.has_motion; }
-    bool hasTouch() const { return m_state.has_touch; }
-    bool touch1Active() const { return m_state.touch[0].active; }
-    int touch1X() const { return m_state.touch[0].x; }
-    int touch1Y() const { return m_state.touch[0].y; }
-    bool touch2Active() const { return m_state.touch[1].active; }
-    int touch2X() const { return m_state.touch[1].x; }
-    int touch2Y() const { return m_state.touch[1].y; }
+    int leftX() const { return selected().lx; }
+    int leftY() const { return selected().ly; }
+    int rightX() const { return selected().rx; }
+    int rightY() const { return selected().ry; }
+    int l2() const { return selected().l2; }
+    int r2() const { return selected().r2; }
+    bool hasMotion() const { return selected().has_motion; }
+    bool hasTouch() const { return selected().has_touch; }
+    bool touch1Active() const { return selected().touch[0].active; }
+    int touch1X() const { return selected().touch[0].x; }
+    int touch1Y() const { return selected().touch[0].y; }
+    bool touch2Active() const { return selected().touch[1].active; }
+    int touch2X() const { return selected().touch[1].x; }
+    int touch2Y() const { return selected().touch[1].y; }
     static int touchWidth() { return ds4ipc::kTouchWidth; }
     static int touchHeight() { return ds4ipc::kTouchHeight; }
-    int buttons() const { return m_state.buttons; }
-    int dpad() const { return m_state.dpad; }
-    int gyroPitch() const { return m_state.gyro[0]; }
-    int gyroYaw() const { return m_state.gyro[1]; }
-    int gyroRoll() const { return m_state.gyro[2]; }
-    int accelX() const { return m_state.accel[0]; }
-    int accelY() const { return m_state.accel[1]; }
-    int accelZ() const { return m_state.accel[2]; }
+    int buttons() const { return selected().buttons; }
+    int dpad() const { return selected().dpad; }
+    int gyroPitch() const { return selected().gyro[0]; }
+    int gyroYaw() const { return selected().gyro[1]; }
+    int gyroRoll() const { return selected().gyro[2]; }
+    int accelX() const { return selected().accel[0]; }
+    int accelY() const { return selected().accel[1]; }
+    int accelZ() const { return selected().accel[2]; }
 
     // True when `bit` (a Button value) is currently held.
-    Q_INVOKABLE bool isPressed(int bit) const { return (m_state.buttons & bit) != 0; }
+    Q_INVOKABLE bool isPressed(int bit) const { return (selected().buttons & bit) != 0; }
     // "Up", "Down-Left", "Neutral", ... for the current hat value.
     Q_INVOKABLE QString dpadName() const;
 
 signals:
     void activeChanged();
     void connectedChanged();
+    void sourceChanged();
     void noteChanged();
     // One signal for the whole input snapshot: every field of a STATE line
     // changes together, ~30 times a second, so splitting it into a signal per
@@ -158,18 +179,34 @@ private slots:
     void tryConnect();
 
 private:
+    static constexpr int kSourceCount = 2;
+
+    const ds4ipc::InputState &selected() const { return m_states[m_source]; }
     void disconnectStream();
     void handleLine(const std::string &line);
-    void setNote(const QString &note);
+    // Index of a STATE/NOTE line's source word, or -1 when it names none.
+    static int sourceIndex(const std::string &source);
+    void setNote(int source, const QString &note);
+    void setConnectionNote(const QString &note);
+    void clearStates();
 
     QTimer *m_retry;
     QSocketNotifier *m_notifier = nullptr;
-    ds4ipc::InputState m_state;
+    ds4ipc::InputState m_states[kSourceCount];
     std::string m_buffer;
-    QString m_note;
+    // Per-source reason for having nothing to show, straight from the daemon.
+    QString m_notes[kSourceCount];
+    // Set instead of the per-source notes while the stream itself is down, so
+    // an unreachable daemon is not reported as an idle controller.
+    QString m_connectionNote;
+    Source m_source = Virtual;
+    // Cleared when the daemon does not know "test all" (one older than the
+    // two-source stream): the plain "test" command is used instead, and only
+    // the source that daemon considers active reports anything.
+    bool m_allSources = true;
     int m_fd = -1;
     bool m_active = false;
-    bool m_hasState = false;
+    bool m_hasState[kSourceCount] = {false, false};
 };
 
 #endif // DS4_UI_INPUTMONITOR_H

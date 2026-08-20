@@ -1592,7 +1592,16 @@ int main(int argc, char* argv[]) {
     // physical passthrough — currently looks like) plus an EVENT line
     // whenever an LED/rumble output report actually changes something.
     // Kept local to main() since nothing outside the poll loop touches it.
-    std::vector<int> test_subscribers;
+    //
+    // `all` subscribers (the "test all" command, used by the Qt UI's test
+    // view) get both sources every tick and choose between them themselves;
+    // plain `test` keeps sending only the active one, which is what ds4-ctl's
+    // terminal monitor has always shown.
+    struct TestSubscriber {
+        int fd;
+        bool all;
+    };
+    std::vector<TestSubscriber> test_subscribers;
     std::deque<std::string> test_event_log; // small ring buffer replayed to new subscribers
     constexpr size_t TEST_EVENT_LOG_MAX = 20;
 
@@ -1609,8 +1618,8 @@ int main(int argc, char* argv[]) {
         if (test_event_log.size() > TEST_EVENT_LOG_MAX) test_event_log.pop_front();
         std::string msg = "EVENT " + line + "\n";
         for (auto it = test_subscribers.begin(); it != test_subscribers.end(); ) {
-            if (write(*it, msg.c_str(), msg.size()) < 0) {
-                close(*it);
+            if (write(it->fd, msg.c_str(), msg.size()) < 0) {
+                close(it->fd);
                 it = test_subscribers.erase(it);
             } else {
                 ++it;
@@ -1621,7 +1630,6 @@ int main(int argc, char* argv[]) {
 
     auto test_broadcast_state = [&]() {
         if (test_subscribers.empty()) return;
-        std::string line;
         // Formatted by the shared protocol client, the same code the readers
         // (ds4-ctl test, the Qt live view) parse it with.
         auto state_line = [](const char *source, const struct dualshock4_input_report_common& c,
@@ -1650,21 +1658,40 @@ int main(int argc, char* argv[]) {
             }
             return ds4ipc::format_state_line(source, state);
         };
+        // Both sources are prepared every tick: the emulated device and the
+        // physical controller are independent things to look at, and which
+        // one a subscriber wants is its own business.
+        std::string virtual_line;
         if (controller_type_emulates(target_type)) {
             bool vdev_exists = (backend_type == BACKEND_FUNCTIONFS) ? virtual_functionfs.device_open : (uhid_fd >= 0);
             if (vdev_exists && last_virtual_valid) {
-                line = state_line("VIRTUAL", last_virtual_common, last_virtual_touch);
+                virtual_line = state_line("VIRTUAL", last_virtual_common, last_virtual_touch);
             } else {
-                line = "NOTE No active virtual controller yet (connect the physical controller, or run 'ds4-ctl create-virtual').\n";
+                virtual_line = "NOTE VIRTUAL No active virtual controller yet (connect the physical controller, or run 'ds4-ctl create-virtual').\n";
             }
-        } else if (last_phy_valid) {
-            line = state_line("PHYSICAL", last_phy_common, last_phy_touch);
         } else {
-            line = "NOTE No physical controller connected.\n";
+            virtual_line = "NOTE VIRTUAL Emulation is off (type=" + std::string(controller_type_config_str(target_type)) +
+                            "); the physical controller is passed through instead.\n";
         }
+        std::string physical_line;
+        if (last_phy_valid) {
+            physical_line = state_line("PHYSICAL", last_phy_common, last_phy_touch);
+        } else if (phy_fd < 0) {
+            physical_line = "NOTE PHYSICAL No physical controller connected.\n";
+        } else {
+            // Open but silent: Bluetooth under the unbind hide method has no
+            // live transport, so its reports never reach us.
+            physical_line = "NOTE PHYSICAL No reports from the physical controller yet.\n";
+        }
+        // What plain `test` has always sent: whichever source is the active
+        // one, on its own.
+        const std::string& active_line = controller_type_emulates(target_type) ? virtual_line : physical_line;
+        std::string both_lines = virtual_line + physical_line;
+
         for (auto it = test_subscribers.begin(); it != test_subscribers.end(); ) {
-            if (write(*it, line.c_str(), line.size()) < 0) {
-                close(*it);
+            const std::string& payload = it->all ? both_lines : active_line;
+            if (write(it->fd, payload.c_str(), payload.size()) < 0) {
+                close(it->fd);
                 it = test_subscribers.erase(it);
             } else {
                 ++it;
@@ -2258,7 +2285,7 @@ int main(int argc, char* argv[]) {
                                 response = "Error: failed to open HID-bus uevent monitor; staying on legacy hide method.";
                             }
                         }
-                    } else if (cmd == "test") {
+                    } else if (cmd == "test" || cmd == "test all") {
                         // Turns this connection into a live push stream instead of a
                         // one-shot request/response: client_fd is handed off to
                         // test_subscribers (see the lambdas declared near the top of
@@ -2266,6 +2293,11 @@ int main(int argc, char* argv[]) {
                         // line plus an EVENT line on every LED/rumble change until it
                         // disconnects (ds4-ctl's `test` command runs until Ctrl+C).
                         fcntl(client_fd, F_SETFL, O_NONBLOCK);
+                        // "test all": the subscriber follows both the emulated
+                        // and the physical controller and picks between them
+                        // itself, so the header names the active one only as
+                        // information.
+                        const bool wants_all = (cmd == "test all");
                         std::string header = "OK: Test monitor active. Type=" + std::string(controller_type_name(target_type));
                         if (controller_type_emulates(target_type)) {
                             header += " Source=Virtual controller\n";
@@ -2283,7 +2315,7 @@ int main(int argc, char* argv[]) {
                                 std::string msg = "EVENT " + ev + "\n";
                                 if (write(client_fd, msg.c_str(), msg.size()) < 0) break; // dead fd; later ticks will drop it
                             }
-                            test_subscribers.push_back(client_fd);
+                            test_subscribers.push_back(TestSubscriber{client_fd, wants_all});
                             g_has_test_subscribers = true;
                         } else {
                             close(client_fd);
@@ -2816,8 +2848,8 @@ int main(int argc, char* argv[]) {
     }
 
     // Clean up Unix socket
-    for (int fd : test_subscribers) {
-        close(fd);
+    for (const TestSubscriber& subscriber : test_subscribers) {
+        close(subscriber.fd);
     }
     if (server_fd >= 0) {
         close(server_fd);

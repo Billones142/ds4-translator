@@ -41,6 +41,24 @@ ApplicationWindow {
     // close on their own every poll interval.
     readonly property bool editable: DaemonController.online && !DaemonController.busy
 
+    // Names of the two test sources. The emulated one is named after the type
+    // it is currently emulating, the physical one after the device the daemon
+    // reports owning, so "the same controller twice" cannot be confused.
+    readonly property string emulatedSourceLabel: {
+        const type = DaemonController.emulationType;
+        const label = type === "ds4" ? qsTr("Emulated DualShock 4")
+            : type === "dualsense" ? qsTr("Emulated DualSense")
+            : qsTr("Emulated controller (off)");
+        return InputMonitor.virtualLive ? label : qsTr("%1 — idle").arg(label);
+    }
+    readonly property string physicalSourceLabel: {
+        const device = DaemonController.physicalController;
+        const label = device.length > 0
+            ? qsTr("Physical: %1").arg(device)
+            : qsTr("Physical controller");
+        return InputMonitor.physicalLive ? label : qsTr("%1 — idle").arg(label);
+    }
+
     // The two touchpad slots, as coordinates or a dash while unused. Written
     // out here rather than in the label so the empty case reads as one word.
     readonly property string touchSummary: {
@@ -112,7 +130,7 @@ ApplicationWindow {
             Layout.fillWidth: true
 
             TabButton { text: qsTr("Settings") }
-            TabButton { text: qsTr("Controller") }
+            TabButton { text: qsTr("Test") }
         }
     }
 
@@ -382,18 +400,28 @@ ApplicationWindow {
                 width: parent.width
                 spacing: 12
 
+                // Which of the daemon's two streams to watch. Both are
+                // followed at once, so switching shows the other one
+                // immediately instead of reconnecting.
                 RowLayout {
                     Layout.fillWidth: true
                     Layout.margins: 12
+                    spacing: 8
 
-                    Label {
-                        text: InputMonitor.hasState
-                            ? (InputMonitor.source === "VIRTUAL"
-                                ? qsTr("Showing the emulated controller")
-                                : qsTr("Showing the physical controller"))
-                            : InputMonitor.note
-                        wrapMode: Text.Wrap
+                    Label { text: qsTr("Watching:") }
+
+                    // A plain ComboBox, not the OptionSelector used in the
+                    // settings tab: this changes nothing on the daemon, so
+                    // there is nothing to stage behind an Apply button.
+                    ComboBox {
                         Layout.fillWidth: true
+                        model: [window.emulatedSourceLabel, window.physicalSourceLabel]
+                        currentIndex: InputMonitor.source === InputMonitor.Virtual ? 0 : 1
+                        onActivated: index => {
+                            InputMonitor.source = index === 0
+                                ? InputMonitor.Virtual
+                                : InputMonitor.Physical;
+                        }
                     }
 
                     BusyIndicator {
@@ -402,6 +430,17 @@ ApplicationWindow {
                         implicitWidth: 20
                         implicitHeight: 20
                     }
+                }
+
+                // Only shown when the selected source has nothing to report:
+                // with data on screen the drawing says it better than words.
+                Label {
+                    visible: !InputMonitor.hasState
+                    text: InputMonitor.note
+                    wrapMode: Text.Wrap
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
                 }
 
                 ControllerView {

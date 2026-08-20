@@ -533,6 +533,7 @@ static int run_test_ui() {
     const size_t MAX_EVENTS = 12;
 
     std::string rx_accum;
+    std::string note_text;
     bool quit = false;
     bool need_redraw = true;
 
@@ -577,9 +578,11 @@ static int run_test_ui() {
                             st.have_state = true;
                             st.in = parsed;
                         }
-                    } else if (line.rfind("NOTE ", 0) == 0) {
+                    } else if (ds4ipc::parse_note(line, nullptr, &note_text)) {
+                        // Plain `test` follows one source, so whichever note
+                        // arrives is about the source being shown.
                         st.have_state = false;
-                        st.note = line.substr(5);
+                        st.note = note_text;
                     } else if (line.rfind("EVENT ", 0) == 0) {
                         time_t t = time(nullptr);
                         struct tm tmv;
