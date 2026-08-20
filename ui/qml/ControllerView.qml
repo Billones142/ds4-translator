@@ -118,16 +118,65 @@ Item {
         property int axisX: 128
         property int axisY: 128
         property bool clicked: false
-        // How far the knob travels from centre at full deflection: what is
-        // left of the well once the knob is in it, so the drawing stays inside
-        // its own ring.
+
+        // The view is straight down on a stick that pivots at its base, so a
+        // pushed stick is a tilted disc seen edge-on-ish: it slides away from
+        // the well's centre and narrows along the direction it was pushed,
+        // while staying full width across it. Both come from one angle.
+        readonly property real maxTiltDeg: 38
+        // How far the knob travels at full deflection: what is left of the
+        // well once the knob is in it, so the drawing stays inside its ring.
         readonly property real travel: 14
+        // The height of the cap above the pivot that puts the knob exactly
+        // that far out when tilted all the way.
+        readonly property real armLength:
+            stick.travel / Math.sin(stick.maxTiltDeg * Math.PI / 180)
+
+        // -1..1 per axis. The neutral value is 128, so the two halves of the
+        // range are one step apart; each is scaled by its own half.
+        readonly property real deflectX:
+            stick.axisX >= 128 ? (stick.axisX - 128) / 127 : (stick.axisX - 128) / 128
+        readonly property real deflectY:
+            stick.axisY >= 128 ? (stick.axisY - 128) / 127 : (stick.axisY - 128) / 128
+        // The gate is round, so a diagonal is not further out than a straight
+        // push even though both axes read full.
+        readonly property real deflection:
+            Math.min(1, Math.hypot(stick.deflectX, stick.deflectY))
+        readonly property real tiltRad:
+            stick.maxTiltDeg * Math.PI / 180 * stick.deflection
+        // Which way it was pushed, in degrees, for the squash below.
+        readonly property real tiltDirection:
+            Math.atan2(stick.deflectY, stick.deflectX) * 180 / Math.PI
+        readonly property real offset: stick.armLength * Math.sin(stick.tiltRad)
 
         // The knob's own size in the layout's units.
         width: 68
         height: 68
-        x: stick.centreX - width / 2 + (stick.axisX - 128) / 127 * stick.travel
-        y: stick.centreY - height / 2 + (stick.axisY - 128) / 127 * stick.travel
+        x: stick.centreX - width / 2
+           + (stick.deflection > 0 ? stick.offset * stick.deflectX / stick.deflection : 0)
+        y: stick.centreY - height / 2
+           + (stick.deflection > 0 ? stick.offset * stick.deflectY / stick.deflection : 0)
+
+        // Turn the push direction onto the x axis, foreshorten along it, turn
+        // back: the circle becomes an ellipse with its short axis pointing the
+        // way the stick leans, whatever that way is.
+        transform: [
+            Rotation {
+                origin.x: stick.width / 2
+                origin.y: stick.height / 2
+                angle: -stick.tiltDirection
+            },
+            Scale {
+                origin.x: stick.width / 2
+                origin.y: stick.height / 2
+                xScale: Math.cos(stick.tiltRad)
+            },
+            Rotation {
+                origin.x: stick.width / 2
+                origin.y: stick.height / 2
+                angle: stick.tiltDirection
+            }
+        ]
 
         // The knob itself, taken out of the layout drawing and moved as one
         // piece -- the base artwork below has the two knobs cut out of it, so
