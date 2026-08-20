@@ -443,6 +443,33 @@ std::string format_state_line(const std::string &source, const InputState &state
     return std::string(buf);
 }
 
+std::string format_output_line(const OutputState &state) {
+    char buf[64];
+    (void)snprintf(buf, sizeof(buf), "OUTPUT %d %d %d %d %d\n", state.red, state.green, state.blue,
+                   state.rumble_left, state.rumble_right);
+    return std::string(buf);
+}
+
+bool parse_output(const std::string &line, OutputState *out) {
+    if (out == nullptr || line.rfind("OUTPUT ", 0) != 0) {
+        return false;
+    }
+    unsigned red = 0, green = 0, blue = 0, left = 0, right = 0;
+    int fields = sscanf(line.c_str(), // NOLINT(cert-err34-c,bugprone-unchecked-string-to-number-conversion)
+                        "OUTPUT %u %u %u %u %u", &red, &green, &blue, &left, &right);
+    if (fields != 5) {
+        return false;
+    }
+    OutputState state;
+    state.red = static_cast<int>(red);
+    state.green = static_cast<int>(green);
+    state.blue = static_cast<int>(blue);
+    state.rumble_left = static_cast<int>(left);
+    state.rumble_right = static_cast<int>(right);
+    *out = state;
+    return true;
+}
+
 double TimingStats::reports_per_second() const {
     if (reports == 0 || window_us == 0) {
         return 0.0;

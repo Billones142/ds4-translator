@@ -50,6 +50,16 @@ class InputMonitor : public QObject {
     Q_PROPERTY(bool virtualLive READ virtualLive NOTIFY inputChanged)
     Q_PROPERTY(bool physicalLive READ physicalLive NOTIFY inputChanged)
 
+    // What the emulated device is currently asking the light bar and motors
+    // to do, so a view can follow a game moving them. False until the daemon
+    // has said (older ones never do).
+    Q_PROPERTY(bool hasOutput READ hasOutput NOTIFY outputChanged)
+    Q_PROPERTY(int ledRed READ ledRed NOTIFY outputChanged)
+    Q_PROPERTY(int ledGreen READ ledGreen NOTIFY outputChanged)
+    Q_PROPERTY(int ledBlue READ ledBlue NOTIFY outputChanged)
+    Q_PROPERTY(int rumbleLeft READ rumbleLeft NOTIFY outputChanged)
+    Q_PROPERTY(int rumbleRight READ rumbleRight NOTIFY outputChanged)
+
     // Report timing. False against a daemon that does not measure it.
     Q_PROPERTY(bool timingSupported READ timingSupported NOTIFY timingChanged)
     // True while measure() is collecting windows.
@@ -176,6 +186,13 @@ public:
     int accelY() const { return selected().accel[1]; }
     int accelZ() const { return selected().accel[2]; }
 
+    bool hasOutput() const { return m_hasOutput; }
+    int ledRed() const { return m_output.red; }
+    int ledGreen() const { return m_output.green; }
+    int ledBlue() const { return m_output.blue; }
+    int rumbleLeft() const { return m_output.rumble_left; }
+    int rumbleRight() const { return m_output.rumble_right; }
+
     bool timingSupported() const { return m_timingSupported; }
     bool measuring() const { return m_measureWindows > 0; }
     bool measured() const { return m_measured; }
@@ -203,6 +220,7 @@ signals:
     void sourceChanged();
     void noteChanged();
     void timingChanged();
+    void outputChanged();
     // One signal for the whole input snapshot: every field of a STATE line
     // changes together, ~30 times a second, so splitting it into a signal per
     // property would only multiply the work with no gain.
@@ -249,6 +267,8 @@ private:
     int m_measureWindows = 0;
     ds4ipc::TimingStats m_accumulated;
     ds4ipc::TimingStats m_result;
+    ds4ipc::OutputState m_output;
+    bool m_hasOutput = false;
     bool m_timingSupported = false;
     bool m_measured = false;
 };

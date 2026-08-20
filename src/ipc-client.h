@@ -227,6 +227,22 @@ std::string format_timing_line(uint32_t reports, uint64_t window_us, uint32_t in
 // Parses a TIMING line. Returns false for any other line.
 bool parse_timing(const std::string &line, TimingStats *out);
 
+// Light bar colour and rumble levels the emulated device is currently asking
+// for -- what a game has set, or the daemon's own default. Values are 0..255.
+struct OutputState {
+    int red = 0;
+    int green = 0;
+    int blue = 0;
+    int rumble_left = 0;
+    int rumble_right = 0;
+};
+
+// Builds one OUTPUT line (daemon side), newline included.
+std::string format_output_line(const OutputState &state);
+
+// Parses an OUTPUT line. Returns false for any other line.
+bool parse_output(const std::string &line, OutputState *out);
+
 // Parses a "NOTE <SOURCE> <text>" line: why that source has nothing to show
 // right now. Returns false for any other line.
 bool parse_note(const std::string &line, std::string *out_source, std::string *out_text);

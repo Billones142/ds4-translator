@@ -1622,6 +1622,12 @@ int main(int argc, char* argv[]) {
         uint32_t latency_samples = 0;
     };
     TimingWindow timing;
+
+    // Last light bar/rumble state sent to subscribers. The values only change
+    // when a game (or the daemon itself) asks for something new, so they are
+    // broadcast on change rather than every tick.
+    ds4ipc::OutputState broadcast_output;
+    bool broadcast_output_valid = false;
     auto timing_window_start = std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point last_report_time;
     bool have_last_report_time = false;
@@ -1712,6 +1718,25 @@ int main(int argc, char* argv[]) {
         const std::string& active_line = controller_type_emulates(target_type) ? virtual_line : physical_line;
         std::string both_lines = virtual_line + physical_line;
 
+        // What the emulated device is asking the light bar and motors to do.
+        // Sent on change: a view that mirrors it (the UI's light bar tester)
+        // needs to follow a game moving it, without a line per tick.
+        ds4ipc::OutputState output;
+        output.red = cur_r;
+        output.green = cur_g;
+        output.blue = cur_b;
+        output.rumble_left = cur_motor_left;
+        output.rumble_right = cur_motor_right;
+        std::string output_line;
+        if (!broadcast_output_valid || output.red != broadcast_output.red ||
+            output.green != broadcast_output.green || output.blue != broadcast_output.blue ||
+            output.rumble_left != broadcast_output.rumble_left ||
+            output.rumble_right != broadcast_output.rumble_right) {
+            broadcast_output = output;
+            broadcast_output_valid = true;
+            output_line = ds4ipc::format_output_line(output);
+        }
+
         // Once a second, what the last window of physical reports looked like.
         // Sent to every subscriber: an older reader ignores lines it does not
         // recognise, exactly as it already does for EVENT.
@@ -1729,10 +1754,10 @@ int main(int argc, char* argv[]) {
                 timing.latency_max_us);
             timing = TimingWindow();
             timing_window_start = now;
-            both_lines += timing_line;
         }
+        both_lines += output_line + timing_line;
 
-        const std::string single_payload = active_line + timing_line;
+        const std::string single_payload = active_line + output_line + timing_line;
         for (auto it = test_subscribers.begin(); it != test_subscribers.end(); ) {
             const std::string& payload = it->all ? both_lines : single_payload;
             if (write(it->fd, payload.c_str(), payload.size()) < 0) {
@@ -2423,6 +2448,17 @@ int main(int argc, char* argv[]) {
                                       "CAVEAT type=none is full passthrough -- LED/rumble commands other apps send directly\n"
                                       "CAVEAT to the physical controller can't be observed here.\n";
                         }
+                        // Current light bar/rumble state up front: it is only
+                        // broadcast on change, so a subscriber that connects
+                        // between changes would otherwise wait for a game to
+                        // touch it before knowing anything.
+                        ds4ipc::OutputState current_output;
+                        current_output.red = cur_r;
+                        current_output.green = cur_g;
+                        current_output.blue = cur_b;
+                        current_output.rumble_left = cur_motor_left;
+                        current_output.rumble_right = cur_motor_right;
+                        header += ds4ipc::format_output_line(current_output);
                         keep_open = true;
                         if (write(client_fd, header.c_str(), header.size()) >= 0) {
                             for (const auto& ev : test_event_log) {

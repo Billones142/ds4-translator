@@ -7,40 +7,99 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import Ds4Translator
 
-// Drives the physical controller's light bar and rumble motors directly, to
-// check the hardware works.
+// The physical controller's light bar and rumble motors: what they are doing
+// right now, and a way to drive them by hand to check the hardware.
 //
-// Nothing here is a setting: the daemon forwards what the emulated device
-// asks for as soon as a game sends its next output report, which takes the
-// controller straight back. "Hand back" does it immediately.
+// Two modes, the switch decides which. Following: the sliders mirror what the
+// emulated device is asking for, so a game moving the light bar moves them
+// too, and nothing here can be dragged. Driving: what the sliders say goes
+// straight to the controller -- until the game's next output report takes it
+// back, which is why this is a test and not a setting.
 ColumnLayout {
     id: root
 
     // The daemon writes to the physical controller, so there has to be one.
     readonly property bool available: DaemonController.online
         && DaemonController.physicalController.length > 0
+    // Whether the emulated device is in charge (the switch).
+    readonly property bool following: driveSwitch.checked
+    readonly property bool editable: root.available && !root.following
 
     property int red: 0
     property int green: 0
     property int blue: 255
     property int rumbleLeft: 0
     property int rumbleRight: 0
+    // A send is waiting for the rate limit below to come round again.
+    property bool pendingSend: false
 
     spacing: 8
 
-    // Slider drags would otherwise send a command per pixel; the controller
-    // only needs the value the finger stopped on, plus enough intermediate
-    // ones to look live.
-    Timer {
-        id: sendThrottle
-        interval: 60
-        onTriggered: DaemonController.testLed(root.red, root.green, root.blue,
-                                              root.rumbleLeft, root.rumbleRight)
+    // Copies what the daemon says the emulated device is asking for. Only
+    // meaningful while following -- the values are the user's own otherwise.
+    function syncFromDaemon() {
+        if (!InputMonitor.hasOutput) {
+            return;
+        }
+        root.red = InputMonitor.ledRed;
+        root.green = InputMonitor.ledGreen;
+        root.blue = InputMonitor.ledBlue;
+        root.rumbleLeft = InputMonitor.rumbleLeft;
+        root.rumbleRight = InputMonitor.rumbleRight;
     }
 
+    function sendNow() {
+        DaemonController.testLed(root.red, root.green, root.blue,
+                                 root.rumbleLeft, root.rumbleRight);
+    }
+
+    // Sends immediately, then rate-limits: a drag is followed live rather
+    // than only on release, without a command per pixel. The last position is
+    // always sent, so where the finger stopped is where the light bar ends up.
     function send() {
-        if (root.available) {
-            sendThrottle.restart();
+        if (!root.editable) {
+            return;
+        }
+        if (sendThrottle.running) {
+            root.pendingSend = true;
+            return;
+        }
+        root.sendNow();
+        sendThrottle.restart();
+    }
+
+    Timer {
+        id: sendThrottle
+        interval: 40
+        onTriggered: {
+            if (root.pendingSend) {
+                root.pendingSend = false;
+                root.sendNow();
+                sendThrottle.restart();
+            }
+        }
+    }
+
+    Connections {
+        target: InputMonitor
+
+        // The daemon sends this only when something actually changed, so this
+        // stays quiet while a game leaves the light bar alone -- and stops
+        // entirely when the test view is closed, since the stream is dropped
+        // with it and nothing here runs in the background.
+        function onOutputChanged() {
+            if (root.following) {
+                root.syncFromDaemon();
+            }
+        }
+
+        // Leaving the view (or losing the daemon) while driving would strand
+        // the controller on a test colour, so control goes back by itself.
+        function onActiveChanged() {
+            if (!InputMonitor.active && !root.following) {
+                driveSwitch.checked = true;
+                DaemonController.resetLed();
+            }
         }
     }
 
@@ -73,6 +132,43 @@ ColumnLayout {
             text: level.value
             horizontalAlignment: Text.AlignRight
             Layout.preferredWidth: 34
+        }
+    }
+
+    RowLayout {
+        Layout.fillWidth: true
+        spacing: 8
+
+        Switch {
+            id: driveSwitch
+            text: qsTr("Let the game drive")
+            checked: true
+            enabled: root.available
+            onToggled: {
+                if (checked) {
+                    // Hand back: the daemon re-sends what the emulated device
+                    // wants, and that state comes back on the stream as the
+                    // values the sliders then show.
+                    DaemonController.resetLed();
+                    root.syncFromDaemon();
+                } else {
+                    // Take over from exactly what is on the controller now, so
+                    // nothing jumps at the moment control changes hands.
+                    root.syncFromDaemon();
+                    root.sendNow();
+                }
+            }
+        }
+
+        Label {
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+            text: !root.available
+                ? qsTr("Needs a physical controller connected to the daemon.")
+                : root.following
+                    ? qsTr("Showing what the emulated device is asking for. Switch this off to drive the light bar and motors by hand.")
+                    : qsTr("Driving the controller directly. The game's next output report takes it back.")
+            opacity: 0.75
         }
     }
 
@@ -115,7 +211,7 @@ ColumnLayout {
                 delegate: Button {
                     required property var modelData
                     text: modelData.name
-                    enabled: root.available
+                    enabled: root.editable
                     onClicked: {
                         root.red = modelData.r;
                         root.green = modelData.g;
@@ -130,62 +226,42 @@ ColumnLayout {
     LevelSlider {
         label: qsTr("Red")
         value: root.red
-        enabled: root.available
+        enabled: root.editable
         onMoved: value => { root.red = value; root.send(); }
     }
     LevelSlider {
         label: qsTr("Green")
         value: root.green
-        enabled: root.available
+        enabled: root.editable
         onMoved: value => { root.green = value; root.send(); }
     }
     LevelSlider {
         label: qsTr("Blue")
         value: root.blue
-        enabled: root.available
+        enabled: root.editable
         onMoved: value => { root.blue = value; root.send(); }
     }
 
     LevelSlider {
         label: qsTr("Rumble heavy")
         value: root.rumbleLeft
-        enabled: root.available
+        enabled: root.editable
         onMoved: value => { root.rumbleLeft = value; root.send(); }
     }
     LevelSlider {
         label: qsTr("Rumble light")
         value: root.rumbleRight
-        enabled: root.available
+        enabled: root.editable
         onMoved: value => { root.rumbleRight = value; root.send(); }
     }
 
-    RowLayout {
-        Layout.fillWidth: true
-        spacing: 8
-
-        Button {
-            text: qsTr("Stop rumble")
-            enabled: root.available && (root.rumbleLeft > 0 || root.rumbleRight > 0)
-            onClicked: {
-                root.rumbleLeft = 0;
-                root.rumbleRight = 0;
-                root.send();
-            }
-        }
-
-        Button {
-            text: qsTr("Hand back")
-            enabled: root.available
-            onClicked: DaemonController.resetLed()
-        }
-
-        Label {
-            Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            text: root.available
-                ? qsTr("Sent straight to the physical controller. A game's own light bar and rumble take over again on its next output report.")
-                : qsTr("Needs a physical controller connected to the daemon.")
-            opacity: 0.75
+    Button {
+        text: qsTr("Stop rumble")
+        enabled: root.editable && (root.rumbleLeft > 0 || root.rumbleRight > 0)
+        onClicked: {
+            root.rumbleLeft = 0;
+            root.rumbleRight = 0;
+            root.send();
         }
     }
 }

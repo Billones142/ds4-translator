@@ -99,6 +99,10 @@ void InputMonitor::disconnectStream() {
         emit connectedChanged();
     }
     m_buffer.clear();
+    if (m_hasOutput) {
+        m_hasOutput = false;
+        emit outputChanged();
+    }
     clearStates();
 }
 
@@ -214,6 +218,14 @@ void InputMonitor::applyTiming(const ds4ipc::TimingStats &window) {
 }
 
 void InputMonitor::handleLine(const std::string &line) {
+    ds4ipc::OutputState output;
+    if (ds4ipc::parse_output(line, &output)) {
+        m_output = output;
+        m_hasOutput = true;
+        emit outputChanged();
+        return;
+    }
+
     ds4ipc::TimingStats window;
     if (ds4ipc::parse_timing(line, &window)) {
         applyTiming(window);
