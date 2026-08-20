@@ -56,6 +56,7 @@ qt_add_qml_module(ds4-translator-ui
         qml/OptionSelector.qml
         qml/NameEditor.qml
         qml/ControllerView.qml
+        qml/ControllerPaths.qml
         qml/MotionView.qml
         qml/LedTester.qml
         qml/ColorWheel.qml

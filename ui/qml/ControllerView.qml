@@ -8,14 +8,14 @@ import Ds4Translator
 
 // The controller drawing, with every control lit up while it is pressed.
 //
-// The artwork carries no usable element ids, so the overlays are placed by
-// coordinate in the SVG's own 600x400 space: the whole group is laid out at
-// that size and scaled as one, which keeps the hit shapes glued to the drawing
-// at any window size.
+// A pressed control is lit by filling its own outline, taken from the artwork
+// (see ControllerPaths.qml), so the highlight is the shape of the button
+// rather than a rectangle sitting near it. Everything is laid out in the SVG's
+// own 600x400 space and scaled as one group, which keeps the two glued
+// together at any window size.
 //
-// It is drawn from two files cut out of assets/Dualshock_4_Layout.svg (kept as
-// the original): a base with the stick knobs removed, and the knob on its own,
-// which the sticks below move.
+// The drawing itself is the layout SVG with the stick knobs removed; the
+// sticks are drawn on top so they can lean.
 Item {
     id: root
 
@@ -34,17 +34,21 @@ Item {
     implicitWidth: designWidth
     implicitHeight: designHeight
 
-    // A lit control. Circular ones set radius to half their width.
-    component Spot: Rectangle {
-        id: spot
+    // A control lit while it is pressed, filled along the outline the artwork
+    // draws it with.
+    component Hit: ShapePath {
+        id: hit
 
+        required property string outline
         property bool pressed: false
-        color: root.accent
-        opacity: spot.pressed ? 0.55 : 0
-        border.width: 2
-        border.color: root.accent
-        visible: spot.opacity > 0
-        Behavior on opacity { NumberAnimation { duration: 70 } }
+        property real alpha: hit.pressed ? 0.55 : 0
+
+        fillColor: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, hit.alpha)
+        strokeColor: "transparent"
+
+        Behavior on alpha { NumberAnimation { duration: 70 } }
+
+        PathSvg { path: hit.outline }
     }
 
     component TriggerBar: Item {
@@ -88,11 +92,13 @@ Item {
         property bool active: false
         property int padX: 0
         property int padY: 0
-        // The touchpad area of the drawing, in artwork coordinates.
-        readonly property real areaX: 211
-        readonly property real areaY: 44
-        readonly property real areaWidth: 181
-        readonly property real areaHeight: 99
+        // The dotted part of the drawn pad, which is the part that actually
+        // senses -- the rounded surround is the frame around it. Taken from
+        // the bounding box of the artwork's dot grid.
+        readonly property real areaX: 215.4
+        readonly property real areaY: 61.2
+        readonly property real areaWidth: 170.8
+        readonly property real areaHeight: 77.9
 
         width: 18
         height: 18
@@ -223,6 +229,8 @@ Item {
 
     }
 
+    ControllerPaths { id: paths }
+
     Item {
         id: art
         width: root.designWidth
@@ -240,63 +248,64 @@ Item {
             fillMode: Image.PreserveAspectFit
         }
 
-        // ----------------------------------------------------- face buttons
+        // Every button lights up as its own outline. One Shape draws them
+        // all: they never overlap, and the renderer only has to walk one list.
+        Shape {
+            anchors.fill: parent
+            preferredRendererType: Shape.CurveRenderer
 
-        Spot {
-            x: 445; y: 65; width: 44; height: 44; radius: 22
-            pressed: (root.buttons & InputMonitor.Triangle) !== 0
-        }
-        Spot {
-            x: 407; y: 103; width: 44; height: 44; radius: 22
-            pressed: (root.buttons & InputMonitor.Square) !== 0
-        }
-        Spot {
-            x: 484; y: 103; width: 44; height: 44; radius: 22
-            pressed: (root.buttons & InputMonitor.Circle) !== 0
-        }
-        Spot {
-            x: 445; y: 145; width: 44; height: 44; radius: 22
-            pressed: (root.buttons & InputMonitor.Cross) !== 0
-        }
+            Hit {
+                outline: paths.triangle
+                pressed: (root.buttons & InputMonitor.Triangle) !== 0
+            }
+            Hit {
+                outline: paths.square
+                pressed: (root.buttons & InputMonitor.Square) !== 0
+            }
+            Hit {
+                outline: paths.circle
+                pressed: (root.buttons & InputMonitor.Circle) !== 0
+            }
+            Hit {
+                outline: paths.cross
+                pressed: (root.buttons & InputMonitor.Cross) !== 0
+            }
 
-        // ------------------------------------------------------------ d-pad
-        // The hat is a single value, not four bits: diagonals light both of
-        // the arms they lie between.
+            // The hat is a single value, not four bits: diagonals light both
+            // of the arms they lie between.
+            Hit {
+                outline: paths.dpadUp
+                pressed: root.dpad === 7 || root.dpad === 0 || root.dpad === 1
+            }
+            Hit {
+                outline: paths.dpadRight
+                pressed: root.dpad === 1 || root.dpad === 2 || root.dpad === 3
+            }
+            Hit {
+                outline: paths.dpadDown
+                pressed: root.dpad === 3 || root.dpad === 4 || root.dpad === 5
+            }
+            Hit {
+                outline: paths.dpadLeft
+                pressed: root.dpad === 5 || root.dpad === 6 || root.dpad === 7
+            }
 
-        Spot {
-            x: 108; y: 85; width: 29; height: 36; radius: 6
-            pressed: root.dpad === 7 || root.dpad === 0 || root.dpad === 1
-        }
-        Spot {
-            x: 125; y: 111; width: 36; height: 29; radius: 6
-            pressed: root.dpad === 1 || root.dpad === 2 || root.dpad === 3
-        }
-        Spot {
-            x: 108; y: 130; width: 29; height: 36; radius: 6
-            pressed: root.dpad === 3 || root.dpad === 4 || root.dpad === 5
-        }
-        Spot {
-            x: 84; y: 111; width: 36; height: 29; radius: 6
-            pressed: root.dpad === 5 || root.dpad === 6 || root.dpad === 7
-        }
-
-        // -------------------------------------------- share/options/PS/pad
-
-        Spot {
-            x: 177; y: 56; width: 16; height: 35; radius: 8
-            pressed: (root.buttons & InputMonitor.Share) !== 0
-        }
-        Spot {
-            x: 400; y: 56; width: 16; height: 35; radius: 8
-            pressed: (root.buttons & InputMonitor.Options) !== 0
-        }
-        Spot {
-            x: 284; y: 185; width: 32; height: 32; radius: 16
-            pressed: (root.buttons & InputMonitor.Ps) !== 0
-        }
-        Spot {
-            x: 211; y: 44; width: 181; height: 99; radius: 10
-            pressed: (root.buttons & InputMonitor.Touchpad) !== 0
+            Hit {
+                outline: paths.share
+                pressed: (root.buttons & InputMonitor.Share) !== 0
+            }
+            Hit {
+                outline: paths.options
+                pressed: (root.buttons & InputMonitor.Options) !== 0
+            }
+            Hit {
+                outline: paths.ps
+                pressed: (root.buttons & InputMonitor.Ps) !== 0
+            }
+            Hit {
+                outline: paths.touchpad
+                pressed: (root.buttons & InputMonitor.Touchpad) !== 0
+            }
         }
 
         Contact {
@@ -311,26 +320,36 @@ Item {
         }
 
         // ------------------------------------------------ shoulders/triggers
-        // L1/R1 sit on the shoulder tabs the top view actually shows. L2/R2
-        // are behind the controller from here, so they get analog bars in the
-        // empty margin directly above their side.
+        // L1/R1 sit on the shoulder tabs, which the top view shows nearly
+        // edge-on: barely a sliver of colour. Their own Shape stretches them
+        // away from the body into the empty margin, so a press reads at a
+        // glance without the highlight leaving the button it belongs to.
 
-        Spot {
-            x: 101; y: 30; width: 66; height: 14; radius: 6
-            pressed: (root.buttons & InputMonitor.L1) !== 0
-        }
-        Spot {
-            x: 433; y: 30; width: 66; height: 14; radius: 6
-            pressed: (root.buttons & InputMonitor.R1) !== 0
+        Shape {
+            anchors.fill: parent
+            preferredRendererType: Shape.CurveRenderer
+            // Anchored on the tabs' lower edge, so only the far side grows.
+            transform: Scale { origin.y: 51.4; yScale: 1.55 }
+
+            Hit {
+                outline: paths.l1
+                pressed: (root.buttons & InputMonitor.L1) !== 0
+            }
+            Hit {
+                outline: paths.r1
+                pressed: (root.buttons & InputMonitor.R1) !== 0
+            }
         }
 
+        // L2/R2 are behind the controller from here, so they get analog bars
+        // in the margin above their side.
         TriggerBar {
-            x: 101; y: 10
+            x: 101; y: 1
             label: "L2"
             value: root.live ? InputMonitor.l2 : 0
         }
         TriggerBar {
-            x: 433; y: 10
+            x: 433; y: 1
             label: "R2"
             value: root.live ? InputMonitor.r2 : 0
         }
