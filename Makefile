@@ -143,9 +143,10 @@ clean:
 	rm -rf $(BUILD_DIR)
 	rm -rf $(UI_BUILD_DIR)
 
-# Qt 6 settings GUI (ui/). Deliberately kept out of `all` and `install`:
-# it needs Qt 6 + CMake, which the daemon itself does not, so a machine
-# without them still builds and installs the daemon exactly as before.
+# Qt 6 settings GUI (ui/). Deliberately kept out of `all`: it needs Qt 6 +
+# CMake, which the daemon itself does not, so a plain `make` still builds the
+# daemon on a machine without them. `install` does include it -- use
+# `install-cli` there instead.
 # Always delegated: CMake already does its own up-to-date checking, so
 # there is nothing for make to track here.
 ui:
@@ -189,7 +190,12 @@ uninstall-ui-user:
 	rm -f $(USER_AUTOSTART)/ds4-translator-applet.desktop
 	update-desktop-database $(USER_APPDIR) 2>/dev/null || true
 
-install: all
+# Everything: daemon, CLI and the Qt settings UI. `install-cli` below is the
+# same thing without the UI, for machines with no Qt 6 / CMake (the UI is the
+# only part that needs them) or where a GUI has no place at all.
+install: install-cli install-ui
+
+install-cli: all
 	install -D -m 755 $(TARGET_DAEMON) $(DESTDIR)$(BINDIR)/$(notdir $(TARGET_DAEMON))
 	install -D -m 755 $(TARGET_CTL) $(DESTDIR)$(BINDIR)/$(notdir $(TARGET_CTL))
 	install -D -m 755 $(TARGET_SPOOF) $(DESTDIR)/usr/lib/$(notdir $(TARGET_SPOOF))
@@ -210,7 +216,10 @@ ifdef SUDO_USER
 	chown -R $(SUDO_USER):$(SUDO_USER) $(BUILD_DIR)
 endif
 
-uninstall:
+# Mirrors install: removes the UI too. uninstall-cli leaves it in place.
+uninstall: uninstall-ui uninstall-cli
+
+uninstall-cli:
 	systemctl disable --now ds4-translator.service || true
 	rm -f $(DESTDIR)$(BINDIR)/$(notdir $(TARGET_DAEMON))
 	rm -f $(DESTDIR)$(BINDIR)/$(notdir $(TARGET_CTL))
@@ -227,5 +236,5 @@ uninstall:
 	udevadm trigger
 	systemctl daemon-reload
 
-.PHONY: all debug clean install uninstall ui install-ui uninstall-ui \
-        install-ui-user uninstall-ui-user
+.PHONY: all debug clean install install-cli uninstall uninstall-cli \
+        ui install-ui uninstall-ui install-ui-user uninstall-ui-user
