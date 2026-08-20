@@ -24,6 +24,8 @@
 #include <cstdlib>
 #include <cerrno>
 #include <climits>
+#include <condition_variable>
+#include <mutex>
 
 #include "descriptors.h"
 #include "functionfs-backend.h"
@@ -627,12 +629,23 @@ int open_and_hide_physical_unbind(const std::string& hid_id, std::vector<Physica
     return fd;
 }
 
+// Both defined next to the Bluetooth output pacer further down, whose
+// queued state they drop (on disconnect) and whose flush thread they stop
+// (on daemon shutdown).
+void discard_pending_bt_output();
+void stop_bt_output_pacer();
+
 // Releases a physical connection previously set up by open_and_hide_physical():
 // ungrabs/closes its event nodes, restores their and the hidraw node's
 // original permissions, and closes fd. Safe to call with fd < 0 or an
 // already-empty hidden_nodes (no-op in that case beyond the mode restore).
 void release_physical_connection(int fd, const std::string& path, mode_t orig_mode,
                                   std::vector<PhysicalNode>& hidden_nodes) {
+    // Before fd is closed: a Bluetooth rumble/LED report may still be
+    // queued for it, and the pacer's flush thread must not write to a
+    // closed (possibly already reused) descriptor.
+    discard_pending_bt_output();
+
     for (auto& node : hidden_nodes) {
         if (node.is_grabbed && node.fd >= 0) {
             ioctl(node.fd, EVIOCGRAB, 0);
@@ -802,8 +815,38 @@ bool rebind_physical_hid_driver(const std::string& hidraw_name) {
     return true;
 }
 
-// Send output report to physical controller
-extern "C" void send_physical_output_report(int fd, bool is_bluetooth, uint8_t motor_left, uint8_t motor_right, uint8_t r, uint8_t g, uint8_t b) {
+namespace {
+
+// Rate-limits how often a write failure to the physical controller is
+// logged: the callers below sit on the rumble/LED hot path, so a
+// persistent failure (controller gone mid-write) otherwise produces one
+// line per report -- 100+ lines a second into the journal, which is how
+// the Bluetooth teardown described by BtOutputPacer first showed up.
+void log_physical_write_error(const char* what) {
+    static std::mutex mutex;
+    static std::chrono::steady_clock::time_point last_logged{};
+    static unsigned suppressed = 0;
+    constexpr auto kQuietPeriod = std::chrono::seconds(5);
+
+    std::lock_guard<std::mutex> lock(mutex);
+    auto now = std::chrono::steady_clock::now();
+    if (last_logged.time_since_epoch().count() != 0 && now - last_logged < kQuietPeriod) {
+        ++suppressed;
+        return;
+    }
+    std::cerr << what << ": " << strerror(errno);
+    if (suppressed > 0) {
+        std::cerr << " (" << suppressed << " identical failures suppressed)";
+    }
+    std::cerr << std::endl;
+    last_logged = now;
+    suppressed = 0;
+}
+
+// Performs the actual output report write. Bluetooth reports go through
+// BtOutputPacer below; USB ones are written straight from
+// send_physical_output_report().
+void write_physical_output_report(int fd, bool is_bluetooth, uint8_t motor_left, uint8_t motor_right, uint8_t r, uint8_t g, uint8_t b) {
     if (is_bluetooth) {
         uint8_t buf[78];
         memset(buf, 0, sizeof(buf));
@@ -826,7 +869,7 @@ extern "C" void send_physical_output_report(int fd, bool is_bluetooth, uint8_t m
         buf[77] = (crc >> 24) & 0xFF;
         
         if (write(fd, buf, 78) < 0) {
-            std::cerr << "Failed to write Bluetooth output report to physical controller" << std::endl;
+            log_physical_write_error("Failed to write Bluetooth output report to physical controller");
         }
     } else {
         uint8_t buf[32];
@@ -842,9 +885,154 @@ extern "C" void send_physical_output_report(int fd, bool is_bluetooth, uint8_t m
         buf[8] = b;
         
         if (write(fd, buf, 32) < 0) {
-            std::cerr << "Failed to write USB output report to physical controller" << std::endl;
+            log_physical_write_error("Failed to write USB output report to physical controller");
         }
     }
+}
+
+// Paces rumble/LED reports sent to a Bluetooth-connected controller.
+//
+// bluetoothd owns the real L2CAP session: every write to the physical
+// controller's hidraw node comes back out of the kernel's uhid device and
+// is relayed by bluetoothd via hidp_send_message() on the interrupt
+// channel. That socket is far slower than the local write path, so a game
+// driving rumble at input-report rate (~125 Hz, one changed value per
+// frame -- the existing "only send on change" filter doesn't help when
+// every frame genuinely differs) fills its send buffer. bluetoothd then
+// fails with EAGAIN and, treating that as fatal, tears the whole HID
+// session down: the controller stays ACL-connected and paired while its
+// uhid device disappears, so every input stops until it is reconnected,
+// and nothing ever recreates the session on its own. Observed live
+// 2026-08-17 (bluetoothd: "hidp_send_message() BT socket write error:
+// Resource temporarily unavailable (11)", daemon losing the hid_device in
+// the same second).
+//
+// So Bluetooth output is capped at one report per kMinInterval, always
+// carrying the newest state. USB has no such bottleneck and is written
+// straight through, unpaced.
+//
+// A burst's *last* update is the one that matters most (it is typically
+// "rumble off"), so anything arriving inside the quiet window is held as
+// pending rather than dropped, and a flush thread writes it once the
+// window expires -- otherwise a game that stops sending right after a
+// throttled report would leave the motors running forever.
+class BtOutputPacer {
+public:
+    struct State {
+        uint8_t motor_left = 0;
+        uint8_t motor_right = 0;
+        uint8_t r = 0;
+        uint8_t g = 0;
+        uint8_t b = 0;
+    };
+
+    // 40 Hz: fast enough that neither rumble nor lightbar changes feel
+    // delayed, comfortably under the rate that overruns the BT socket.
+    static constexpr std::chrono::milliseconds kMinInterval{25};
+
+    // Called from every backend's output path (main()'s UHID loop, the
+    // functionfs/raw-gadget OUT threads), so it must be thread-safe.
+    void submit(int fd, const State& state) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        auto now = std::chrono::steady_clock::now();
+        if (!pending_ && now - last_write_ >= kMinInterval) {
+            last_write_ = now;
+            write_locked(fd, state);
+            return;
+        }
+        pending_ = true;
+        pending_fd_ = fd;
+        pending_state_ = state;
+        ensure_thread_locked();
+        cond_.notify_one();
+    }
+
+    // Drops anything still queued, so the flush thread can never write to
+    // an fd that has since been closed (and possibly reused). Must be
+    // called before releasing a physical connection.
+    void discard_pending() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pending_ = false;
+        pending_fd_ = -1;
+    }
+
+    void stop() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            pending_ = false;
+            stopping_ = true;
+        }
+        cond_.notify_one();
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+private:
+    void write_locked(int fd, const State& s) {
+        write_physical_output_report(fd, true, s.motor_left, s.motor_right, s.r, s.g, s.b);
+    }
+
+    // Started on the first throttled report rather than at daemon startup,
+    // so a USB-only or controller-less session never spawns it.
+    void ensure_thread_locked() {
+        if (thread_.joinable() || stopping_) return;
+        thread_ = std::thread([this] { flush_loop(); });
+    }
+
+    void flush_loop() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        while (!stopping_) {
+            if (!pending_) {
+                cond_.wait(lock);
+                continue;
+            }
+            auto due = last_write_ + kMinInterval;
+            if (std::chrono::steady_clock::now() < due) {
+                cond_.wait_until(lock, due);
+                continue; // re-check: a newer state or a discard may have landed
+            }
+            pending_ = false;
+            last_write_ = std::chrono::steady_clock::now();
+            write_locked(pending_fd_, pending_state_);
+        }
+    }
+
+    std::mutex mutex_;
+    std::condition_variable cond_;
+    std::thread thread_;
+    bool stopping_ = false;
+    bool pending_ = false;
+    int pending_fd_ = -1;
+    State pending_state_;
+    std::chrono::steady_clock::time_point last_write_{};
+};
+
+BtOutputPacer g_bt_output_pacer;
+
+} // namespace
+
+void discard_pending_bt_output() {
+    g_bt_output_pacer.discard_pending();
+}
+
+void stop_bt_output_pacer() {
+    g_bt_output_pacer.stop();
+}
+
+// Send output report to physical controller
+extern "C" void send_physical_output_report(int fd, bool is_bluetooth, uint8_t motor_left, uint8_t motor_right, uint8_t r, uint8_t g, uint8_t b) {
+    if (!is_bluetooth) {
+        write_physical_output_report(fd, false, motor_left, motor_right, r, g, b);
+        return;
+    }
+    BtOutputPacer::State state;
+    state.motor_left = motor_left;
+    state.motor_right = motor_right;
+    state.r = r;
+    state.g = g;
+    state.b = b;
+    g_bt_output_pacer.submit(fd, state);
 }
 
 // UHID Helper to write events
@@ -2766,6 +2954,10 @@ int main(int argc, char* argv[]) {
         }
     }
     }
+
+    // Joins the Bluetooth pacer's flush thread while phy_fd is still
+    // valid, so no queued rumble/LED write can outlive it.
+    stop_bt_output_pacer();
 
     // Clean up Unix socket
     for (int fd : test_subscribers) {
