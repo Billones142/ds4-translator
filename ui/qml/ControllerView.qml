@@ -3,6 +3,7 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
+import QtQuick.Shapes
 import Ds4Translator
 
 // The controller drawing, with every control lit up while it is pressed.
@@ -108,6 +109,36 @@ Item {
         Behavior on opacity { NumberAnimation { duration: 70 } }
     }
 
+    // One ring of the stick's cap, foreshortened across the direction the
+    // stick leans. Only the radius across the lean shrinks; the outline does
+    // not, which is what a rounded rim looks like from above.
+    component Knob: ShapePath {
+        id: knob
+
+        required property real ringRadius
+        // How much the ring is foreshortened across the lean: 1 upright, less
+        // the further the stick is pushed.
+        required property real squash
+        property color tint: "#cccccc"
+        // The artwork draws the two inner rings half transparent; the L3/R3
+        // highlight fades in and out on the same property.
+        property real alpha: 1
+
+        fillColor: Qt.rgba(knob.tint.r, knob.tint.g, knob.tint.b, knob.alpha)
+        strokeColor: Qt.rgba(0, 0, 0, knob.alpha)
+        strokeWidth: 1.2
+        capStyle: ShapePath.RoundCap
+
+        PathAngleArc {
+            centerX: 34
+            centerY: 34
+            radiusY: knob.ringRadius
+            radiusX: knob.ringRadius * knob.squash
+            startAngle: 0
+            sweepAngle: 360
+        }
+    }
+
     component Stick: Item {
         id: stick
 
@@ -148,6 +179,8 @@ Item {
         readonly property real tiltDirection:
             Math.atan2(stick.deflectY, stick.deflectX) * 180 / Math.PI
         readonly property real offset: stick.armLength * Math.sin(stick.tiltRad)
+        // Seen from above, the cap is that much narrower across the lean.
+        readonly property real squash: Math.cos(stick.tiltRad)
 
         // The knob's own size in the layout's units.
         width: 68
@@ -157,49 +190,37 @@ Item {
         y: stick.centreY - height / 2
            + (stick.deflection > 0 ? stick.offset * stick.deflectY / stick.deflection : 0)
 
-        // Turn the push direction onto the x axis, foreshorten along it, turn
-        // back: the circle becomes an ellipse with its short axis pointing the
-        // way the stick leans, whatever that way is.
-        transform: [
-            Rotation {
-                origin.x: stick.width / 2
-                origin.y: stick.height / 2
-                angle: -stick.tiltDirection
-            },
-            Scale {
-                origin.x: stick.width / 2
-                origin.y: stick.height / 2
-                xScale: Math.cos(stick.tiltRad)
-            },
-            Rotation {
-                origin.x: stick.width / 2
-                origin.y: stick.height / 2
-                angle: stick.tiltDirection
+        // The knob leans as one piece, so the whole item turns with the
+        // push and the drawing below only has to foreshorten across it.
+        rotation: stick.tiltDirection
+
+        // The knob is drawn rather than lifted out of the SVG on purpose: a
+        // squashed image squashes its outlines too, and the rim of a real
+        // stick is rounded, so its edge keeps the same thickness however far
+        // it leans. Drawing it means the radii foreshorten while the strokes
+        // stay put. The circles are the ones cut out of the layout drawing --
+        // radii, fill and the two half-transparent inner rings all come from
+        // its path4031* paths.
+        Shape {
+            anchors.fill: parent
+            preferredRendererType: Shape.CurveRenderer
+
+            Knob { ringRadius: 31.9; squash: stick.squash }
+            Knob { ringRadius: 26.0; squash: stick.squash; alpha: 0.5 }
+            Knob { ringRadius: 19.5; squash: stick.squash; alpha: 0.5 }
+
+            // Lit ring for L3/R3: the click is a separate button from the
+            // deflection, so it needs its own mark. Drawn with the cap so it
+            // leans with it -- it marks the thing that was clicked.
+            Knob {
+                ringRadius: 30
+                squash: stick.squash
+                tint: root.accent
+                alpha: stick.clicked ? 0.55 : 0
+                Behavior on alpha { NumberAnimation { duration: 70 } }
             }
-        ]
-
-        // The knob itself, taken out of the layout drawing and moved as one
-        // piece -- the base artwork below has the two knobs cut out of it, so
-        // there is nothing left behind for this to slide away from.
-        Image {
-            anchors.fill: parent
-            source: "qrc:/art/Dualshock_4_Stick.svg"
-            sourceSize.width: stick.width * 4
-            sourceSize.height: stick.height * 4
-            fillMode: Image.PreserveAspectFit
         }
 
-        // Lit ring for L3/R3: the click is a separate button from the
-        // deflection, so it needs its own mark. It rides with the knob, which
-        // is the thing that was clicked.
-        Rectangle {
-            anchors.fill: parent
-            anchors.margins: 2
-            radius: width / 2
-            color: root.accent
-            opacity: stick.clicked ? 0.55 : 0
-            Behavior on opacity { NumberAnimation { duration: 70 } }
-        }
     }
 
     Item {

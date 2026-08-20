@@ -76,7 +76,6 @@ qt_add_resources(ds4-translator-ui "controller_art"
     PREFIX "/art"
     BASE ${CMAKE_CURRENT_SOURCE_DIR}/../assets
     FILES ${CMAKE_CURRENT_SOURCE_DIR}/../assets/Dualshock_4_Layout_base.svg
-          ${CMAKE_CURRENT_SOURCE_DIR}/../assets/Dualshock_4_Stick.svg
 )
 
 set_source_files_properties(
