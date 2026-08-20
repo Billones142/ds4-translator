@@ -14,8 +14,10 @@ import Ds4Translator
 // own 600x400 space and scaled as one group, which keeps the two glued
 // together at any window size.
 //
-// The drawing itself is the layout SVG with the stick knobs removed; the
-// sticks are drawn on top so they can lean.
+// The drawing itself is the layout SVG with the stick knobs and the shoulder
+// tabs removed. Those two are drawn here instead: the knobs on top, so they
+// can lean, and the tabs underneath, so the body still covers the half of them
+// it covers in the artwork.
 Item {
     id: root
 
@@ -240,6 +242,38 @@ Item {
         anchors.centerIn: parent
         scale: Math.min(root.width / root.designWidth, root.height / root.designHeight)
 
+        // The shoulder tabs, drawn before the body exactly as the artwork
+        // draws them: the body is painted over their lower half, which is why
+        // only the sliver that sticks out is visible. Lighting them on top of
+        // the body instead would paint colour over the controller itself, so
+        // they are cut out of the base drawing and reproduced here.
+        Shape {
+            anchors.fill: parent
+            preferredRendererType: Shape.CurveRenderer
+
+            ShapePath {
+                fillColor: "#cccccc"
+                strokeColor: "black"
+                strokeWidth: 1.2
+                PathSvg { path: paths.l1 }
+            }
+            ShapePath {
+                fillColor: "#cccccc"
+                strokeColor: "black"
+                strokeWidth: 1.2
+                PathSvg { path: paths.r1 }
+            }
+
+            Hit {
+                outline: paths.l1
+                pressed: (root.buttons & InputMonitor.L1) !== 0
+            }
+            Hit {
+                outline: paths.r1
+                pressed: (root.buttons & InputMonitor.R1) !== 0
+            }
+        }
+
         Image {
             anchors.fill: parent
             source: "qrc:/art/Dualshock_4_Layout_base.svg"
@@ -321,24 +355,7 @@ Item {
             padY: InputMonitor.touch2Y
         }
 
-        // ------------------------------------------------ shoulders/triggers
-        // L1/R1 light up on the shoulder tabs the drawing gives them, like
-        // every other button.
-
-        Shape {
-            anchors.fill: parent
-            preferredRendererType: Shape.CurveRenderer
-
-            Hit {
-                outline: paths.l1
-                pressed: (root.buttons & InputMonitor.L1) !== 0
-            }
-            Hit {
-                outline: paths.r1
-                pressed: (root.buttons & InputMonitor.R1) !== 0
-            }
-        }
-
+        // ------------------------------------------------------- triggers
         // L2/R2 are behind the controller from here, so they get analog bars
         // in the margin above their side.
         TriggerBar {

@@ -60,16 +60,8 @@
   <g
      id="g3324"
      style="fill:#cccccc">
-    <path
-       inkscape:connector-curvature="0"
-       style="color:#000000;fill:#cccccc;fill-opacity:1;fill-rule:nonzero;stroke:#000000;stroke-width:1.20000005000000010;stroke-linecap:butt;stroke-linejoin:miter;stroke-miterlimit:4;stroke-opacity:1;stroke-dasharray:none;stroke-dashoffset:0;marker:none;visibility:visible;display:inline;overflow:visible;enable-background:accumulate"
-       id="rect4250"
-       d="M 98.961241,39.661931 C 119.06114,28.566101 142.70298,26.469828 166.53156,35.976277 l 0,15.425142 -67.570319,0 z" />
-    <path
-       inkscape:connector-curvature="0"
-       style="color:#000000;fill:#cccccc;fill-opacity:1;fill-rule:nonzero;stroke:#000000;stroke-width:1.20000005000000010;stroke-linecap:butt;stroke-linejoin:miter;stroke-miterlimit:4;stroke-opacity:1;stroke-dasharray:none;stroke-dashoffset:0;marker:none;visibility:visible;display:inline;overflow:visible;enable-background:accumulate"
-       id="rect4250-9"
-       d="M 501.03874,39.661931 C 480.93885,28.566101 457.297,26.469828 433.46843,35.976277 l 0,15.425142 67.57031,0 z" />
+    
+    
     <path
        d="m 135.17536,37.68543 c -15.55539,-0.0442 -30.76705,2.95454 -41.972089,9.1254 -6.638555,13.43858 -24.067983,31.41091 -31.27004,60.35428 -25.705779,85.95043 -32.81272,158.57024 -36.322456,202.14445 0,33.54855 27.187916,60.74846 60.736498,60.74846 27.103537,0 48.894897,-15.7845 57.404057,-43.32181 l 24.85598,-71.37881 c 3.69721,-5.8797 12.74174,-8.2975 18.4897,-8.93431 l 225.80599,0 c 5.74795,0.63681 14.79248,3.05461 18.4897,8.93431 l 24.85597,71.37881 c 8.50916,27.53731 30.30051,43.32181 57.40405,43.32181 33.54861,0 60.7365,-27.19991 60.7365,-60.74846 -3.50973,-43.57421 -10.61665,-116.19402 -36.32245,-202.14445 -7.20206,-28.94337 -24.63149,-46.9157 -31.27004,-60.35428 -11.20504,-6.17086 -26.4167,-9.16956 -41.97209,-9.1254 -15.55535,0.0442 -31.46204,3.13115 -44.03843,9.1254 l -241.57241,0 c -12.5764,-5.99425 -28.4831,-9.08125 -44.03844,-9.1254 z"
        id="rect4272-5-1-3"
