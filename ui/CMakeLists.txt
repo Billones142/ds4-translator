@@ -52,6 +52,8 @@ qt_add_qml_module(ds4-translator-ui
         qml/NameEditor.qml
         qml/ControllerView.qml
         qml/MotionView.qml
+        qml/LedTester.qml
+        qml/TimingView.qml
     SOURCES
         src/daemoncontroller.h
         src/daemoncontroller.cpp

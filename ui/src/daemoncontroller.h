@@ -87,6 +87,14 @@ public:
     // method: legacy | unbind
     Q_INVOKABLE void setHideMethod(const QString &method);
 
+    // Hardware tests, not settings: they touch the physical controller
+    // directly and the daemon hands it straight back to the emulated device
+    // afterwards. They deliberately do not count as commands in flight -- the
+    // window must not grey itself out because a colour slider moved.
+    Q_INVOKABLE void identify();
+    Q_INVOKABLE void testLed(int red, int green, int blue, int rumbleLeft, int rumbleRight);
+    Q_INVOKABLE void resetLed();
+
     // Returns an empty string if the name is acceptable, otherwise the reason
     // it is not -- so QML can disable the Apply button before sending.
     Q_INVOKABLE QString validateName(const QString &name) const;

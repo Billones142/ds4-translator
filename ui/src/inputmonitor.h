@@ -50,6 +50,23 @@ class InputMonitor : public QObject {
     Q_PROPERTY(bool virtualLive READ virtualLive NOTIFY inputChanged)
     Q_PROPERTY(bool physicalLive READ physicalLive NOTIFY inputChanged)
 
+    // Report timing. False against a daemon that does not measure it.
+    Q_PROPERTY(bool timingSupported READ timingSupported NOTIFY timingChanged)
+    // True while measure() is collecting windows.
+    Q_PROPERTY(bool measuring READ measuring NOTIFY timingChanged)
+    // True once a measurement finished, so a view knows to show the result.
+    Q_PROPERTY(bool measured READ measured NOTIFY timingChanged)
+    // Physical reports per second over the measured span.
+    Q_PROPERTY(double reportRate READ reportRate NOTIFY timingChanged)
+    // Gap between physical reports, in milliseconds.
+    Q_PROPERTY(double intervalMeanMs READ intervalMeanMs NOTIFY timingChanged)
+    Q_PROPERTY(double intervalMinMs READ intervalMinMs NOTIFY timingChanged)
+    Q_PROPERTY(double intervalMaxMs READ intervalMaxMs NOTIFY timingChanged)
+    // What the daemon adds between reading a physical report and having
+    // written the emulated one, in milliseconds.
+    Q_PROPERTY(double latencyMeanMs READ latencyMeanMs NOTIFY timingChanged)
+    Q_PROPERTY(double latencyMaxMs READ latencyMaxMs NOTIFY timingChanged)
+
     // Axes as the controller reports them: sticks 0..255 with 128 centred,
     // triggers 0..255 with 0 released.
     Q_PROPERTY(int leftX READ leftX NOTIFY inputChanged)
@@ -159,6 +176,22 @@ public:
     int accelY() const { return selected().accel[1]; }
     int accelZ() const { return selected().accel[2]; }
 
+    bool timingSupported() const { return m_timingSupported; }
+    bool measuring() const { return m_measureWindows > 0; }
+    bool measured() const { return m_measured; }
+    double reportRate() const;
+    double intervalMeanMs() const { return m_result.interval_mean_us / 1000.0; }
+    double intervalMinMs() const { return m_result.interval_min_us / 1000.0; }
+    double intervalMaxMs() const { return m_result.interval_max_us / 1000.0; }
+    double latencyMeanMs() const { return m_result.latency_mean_us / 1000.0; }
+    double latencyMaxMs() const { return m_result.latency_max_us / 1000.0; }
+
+    // Starts a measurement: the daemon reports one window per second, and
+    // this averages a few of them so a single unlucky window (a scheduling
+    // hiccup, a controller that just woke up) does not stand for the whole
+    // connection.
+    Q_INVOKABLE void measure();
+
     // True when `bit` (a Button value) is currently held.
     Q_INVOKABLE bool isPressed(int bit) const { return (selected().buttons & bit) != 0; }
     // "Up", "Down-Left", "Neutral", ... for the current hat value.
@@ -169,6 +202,7 @@ signals:
     void connectedChanged();
     void sourceChanged();
     void noteChanged();
+    void timingChanged();
     // One signal for the whole input snapshot: every field of a STATE line
     // changes together, ~30 times a second, so splitting it into a signal per
     // property would only multiply the work with no gain.
@@ -187,6 +221,7 @@ private:
     // Index of a STATE/NOTE line's source word, or -1 when it names none.
     static int sourceIndex(const std::string &source);
     void setNote(int source, const QString &note);
+    void applyTiming(const ds4ipc::TimingStats &window);
     void setConnectionNote(const QString &note);
     void clearStates();
 
@@ -207,6 +242,15 @@ private:
     int m_fd = -1;
     bool m_active = false;
     bool m_hasState[kSourceCount] = {false, false};
+
+    // Measurement state. m_measureWindows counts down the daemon windows
+    // still to collect; m_accumulated sums them, m_result is the finished
+    // measurement the view displays.
+    int m_measureWindows = 0;
+    ds4ipc::TimingStats m_accumulated;
+    ds4ipc::TimingStats m_result;
+    bool m_timingSupported = false;
+    bool m_measured = false;
 };
 
 #endif // DS4_UI_INPUTMONITOR_H

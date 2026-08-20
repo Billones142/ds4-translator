@@ -53,10 +53,16 @@ ApplicationWindow {
     }
     readonly property string physicalSourceLabel: {
         const device = DaemonController.physicalController;
-        const label = device.length > 0
-            ? qsTr("Physical: %1").arg(device)
+        const connection = DaemonController.connectionType;
+        // The connection is half of what identifies the pad here: the same
+        // controller reports at a different rate over USB than over
+        // Bluetooth, which is exactly what the timing panel measures.
+        const named = device.length > 0
+            ? (connection.length > 0 && connection !== "N/A"
+                ? qsTr("Physical: %1 (%2)").arg(device).arg(connection)
+                : qsTr("Physical: %1").arg(device))
             : qsTr("Physical controller");
-        return InputMonitor.physicalLive ? label : qsTr("%1 — idle").arg(label);
+        return InputMonitor.physicalLive ? named : qsTr("%1 — idle").arg(named);
     }
 
     // The two touchpad slots, as coordinates or a dash while unused. Written
@@ -424,11 +430,33 @@ ApplicationWindow {
                         }
                     }
 
+                    // Which of several controllers is this one? The daemon
+                    // blinks the light bar of the pad it is actually holding.
+                    Button {
+                        text: qsTr("Identify")
+                        enabled: DaemonController.online
+                            && DaemonController.physicalController.length > 0
+                        onClicked: DaemonController.identify()
+                    }
+
                     BusyIndicator {
                         running: InputMonitor.active && !InputMonitor.hasState
                         visible: running
                         implicitWidth: 20
                         implicitHeight: 20
+                    }
+                }
+
+                // Straight under the picker: the light bar and motors belong
+                // to the physical controller named in it.
+                GroupBox {
+                    title: qsTr("Light bar and rumble test")
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+
+                    LedTester {
+                        anchors.fill: parent
                     }
                 }
 
@@ -471,9 +499,20 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     Layout.leftMargin: 12
                     Layout.rightMargin: 12
-                    Layout.bottomMargin: 12
 
                     MotionView {
+                        anchors.fill: parent
+                    }
+                }
+
+                GroupBox {
+                    title: qsTr("Report timing")
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+                    Layout.bottomMargin: 12
+
+                    TimingView {
                         anchors.fill: parent
                     }
                 }

@@ -57,6 +57,15 @@ void print_usage() {
     std::cout << "                                   commands sent to it. Shows the virtual device for ds4/" << std::endl;
     std::cout << "                                   dualsense types, or the raw physical controller for" << std::endl;
     std::cout << "                                   none/hidden (LED/rumble aren't observable for none)." << std::endl;
+    std::cout << "  identify                         Blink the physical controller's light bar (and pulse its" << std::endl;
+    std::cout << "                                   heavy motor once) so you can tell which pad the daemon is" << std::endl;
+    std::cout << "                                   actually holding" << std::endl;
+    std::cout << "  led <r> <g> <b> <left> <right>   Send a light bar colour and rumble levels (each 0-255)" << std::endl;
+    std::cout << "                                   straight to the physical controller, to test them. Not a" << std::endl;
+    std::cout << "                                   setting: the next output report from the emulated device" << std::endl;
+    std::cout << "                                   overwrites it." << std::endl;
+    std::cout << "  led --reset                      Hand the light bar and motors straight back to the" << std::endl;
+    std::cout << "                                   emulated device" << std::endl;
     std::cout << "  set-hide-method <legacy|unbind>  Change how the physical controller is hidden from other" << std::endl;
     std::cout << "                                   apps (applies on the next physical (re)connection). unbind" << std::endl;
     std::cout << "                                   (default) hides it before any other app can see it, with" << std::endl;
@@ -177,6 +186,8 @@ static const CommandSpec kCommands[] = {
     {"resume-physical",  nullptr},
     {"tap",              nullptr},
     {"test",             nullptr},
+    {"identify",         nullptr},
+    {"led",              "--reset"},
     {"set-hide-method",  "legacy unbind"},
 };
 
@@ -428,6 +439,9 @@ static int run_virtual_ui(const std::string& type, bool auto_destroy) {
 struct TestState {
     bool have_state = false;
     ds4ipc::InputState in;
+    // Physical report rate/latency of the last window the daemon measured.
+    bool have_timing = false;
+    ds4ipc::TimingStats timing;
     std::string note = "Waiting for data from daemon...";
 };
 
@@ -481,6 +495,22 @@ static void redraw_test(const std::string& header, const std::vector<std::string
         }
         std::cout << "\x1b[0KTouchpad (max " << ds4ipc::kTouchWidth << "x" << ds4ipc::kTouchHeight
                   << "):" << touch_text << "\n";
+    }
+    if (st.have_timing) {
+        char buf[192];
+        if (st.timing.reports == 0) {
+            std::cout << "\x1b[0K\nPhysical reports: none in the last second\n";
+        } else {
+            std::cout << "\x1b[0K\n";
+            (void)snprintf(buf, sizeof(buf),
+                     "Physical reports: %.0f/s  interval %.2f ms (min %.2f, max %.2f)",
+                     st.timing.reports_per_second(), st.timing.interval_mean_us / 1000.0,
+                     st.timing.interval_min_us / 1000.0, st.timing.interval_max_us / 1000.0);
+            std::cout << "\x1b[0K" << buf << "\n";
+            (void)snprintf(buf, sizeof(buf), "Translation delay: %.3f ms mean, %.3f ms worst",
+                     st.timing.latency_mean_us / 1000.0, st.timing.latency_max_us / 1000.0);
+            std::cout << "\x1b[0K" << buf << "\n";
+        }
     }
     std::cout << "\x1b[0K\n";
     std::cout << "\x1b[0KLED/rumble commands received, most recent last:\n";
@@ -578,6 +608,8 @@ static int run_test_ui() {
                             st.have_state = true;
                             st.in = parsed;
                         }
+                    } else if (ds4ipc::parse_timing(line, &st.timing)) {
+                        st.have_timing = true;
                     } else if (ds4ipc::parse_note(line, nullptr, &note_text)) {
                         // Plain `test` follows one source, so whichever note
                         // arrives is about the source being shown.
@@ -793,6 +825,27 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         full_cmd = ds4ipc::build_set_hide_method(argv[2], &build_error);
+    } else if (cmd == "led") {
+        if (argc >= 3 && std::string(argv[2]) == "--reset") {
+            full_cmd = ds4ipc::kLedResetCommand;
+        } else if (argc < 7) {
+            std::cerr << "Error: led requires <r> <g> <b> <rumble-left> <rumble-right> (each 0-255), "
+                          "or --reset" << std::endl;
+            return 1;
+        } else {
+            int values[5];
+            for (int i = 0; i < 5; ++i) {
+                char *end = nullptr;
+                long parsed = strtol(argv[2 + i], &end, 10);
+                if (end == argv[2 + i] || *end != '\0' || parsed < 0 || parsed > 255) {
+                    std::cerr << "Error: led values must be whole numbers 0-255" << std::endl;
+                    return 1;
+                }
+                values[i] = static_cast<int>(parsed);
+            }
+            full_cmd = ds4ipc::build_led(values[0], values[1], values[2], values[3], values[4],
+                                          &build_error);
+        }
     } else if (cmd == "create-virtual") {
         if (argc < 3) {
             std::cerr << "Error: create-virtual requires a target type (" << spec->arg_completions

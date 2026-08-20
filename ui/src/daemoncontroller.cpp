@@ -16,6 +16,14 @@ constexpr auto kStatusCommand = QLatin1String("status");
 // How the daemon marks a name it made up itself in its status report.
 constexpr auto kDefaultNameSuffix = QLatin1String(" (default)");
 
+// Commands that poke the hardware for a moment (see the invokables below).
+// Their replies must not queue a status refresh: the daemon's state has not
+// changed, and a colour slider would otherwise fire a poll per step.
+bool isHardwareTest(const QString &command) {
+    return command == QLatin1String(ds4ipc::kIdentifyCommand) ||
+           command.startsWith(QLatin1String("led"));
+}
+
 QStringList toStringList(const std::vector<std::string> &values) {
     QStringList list;
     list.reserve(static_cast<qsizetype>(values.size()));
@@ -39,7 +47,7 @@ DaemonController::DaemonController(QObject *parent)
 }
 
 void DaemonController::sendCommand(const QString &command) {
-    if (command != kStatusCommand) {
+    if (command != kStatusCommand && !isHardwareTest(command)) {
         setPendingCommands(m_pendingCommands + 1);
     }
     m_ipc->send(command);
@@ -119,6 +127,19 @@ void DaemonController::resetName(const QString &controller) {
                      m_buildError);
 }
 
+void DaemonController::identify() {
+    sendCommand(QString::fromLatin1(ds4ipc::kIdentifyCommand));
+}
+
+void DaemonController::testLed(int red, int green, int blue, int rumbleLeft, int rumbleRight) {
+    sendBuiltCommand(ds4ipc::build_led(red, green, blue, rumbleLeft, rumbleRight, &m_buildError),
+                     m_buildError);
+}
+
+void DaemonController::resetLed() {
+    sendCommand(QString::fromLatin1(ds4ipc::kLedResetCommand));
+}
+
 void DaemonController::setHideMethod(const QString &method) {
     sendBuiltCommand(ds4ipc::build_set_hide_method(method.toStdString(), &m_buildError),
                      m_buildError);
@@ -137,7 +158,8 @@ void DaemonController::sendBuiltCommand(const std::string &command, const std::s
 
 void DaemonController::onReplyReady(const QString &command, bool ok, const QString &response) {
     const bool isStatus = (command == kStatusCommand);
-    if (!isStatus) {
+    const bool isTest = isHardwareTest(command);
+    if (!isStatus && !isTest) {
         setPendingCommands(m_pendingCommands - 1);
     }
 
@@ -147,6 +169,15 @@ void DaemonController::onReplyReady(const QString &command, bool ok, const QStri
         // command the user actually ran, once per poll interval.
         if (!isStatus || m_lastMessage.isEmpty()) {
             setMessage(response, true);
+        }
+    } else if (isTest) {
+        setOnline(true);
+        // Nothing on the daemon changed, so no status refresh. A successful
+        // colour change is visible on the controller itself and needs no
+        // banner; a refusal (no controller connected) does.
+        const bool failed = response.startsWith(QLatin1String("Error"));
+        if (failed || command == QLatin1String(ds4ipc::kIdentifyCommand)) {
+            setMessage(response, failed);
         }
     } else if (isStatus) {
         setOnline(true);

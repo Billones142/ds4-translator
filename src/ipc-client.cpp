@@ -14,6 +14,9 @@ namespace ds4ipc {
 
 const char *const kSocketPath = "/run/ds4-translator.sock";
 
+const char *const kIdentifyCommand = "identify";
+const char *const kLedResetCommand = "led --reset";
+
 const char *const kSetNameWarning =
     "changing the controller name recreates the virtual device if that type is "
     "currently active -- any app/game reading it will see a brief input interruption.";
@@ -309,6 +312,23 @@ std::string build_set_hide_method(const std::string &method, std::string *error)
     return "set-hide-method " + method;
 }
 
+std::string build_led(int red, int green, int blue, int rumble_left, int rumble_right,
+                      std::string *error) {
+    const int values[5] = {red, green, blue, rumble_left, rumble_right};
+    for (int value : values) {
+        if (value < 0 || value > 255) {
+            if (error != nullptr) {
+                *error = "led values must be 0-255";
+            }
+            return std::string();
+        }
+    }
+    char buf[64];
+    (void)snprintf(buf, sizeof(buf), "led %d %d %d %d %d", red, green, blue, rumble_left,
+                   rumble_right);
+    return std::string(buf);
+}
+
 // -------------------------------------------------------------- live input
 
 const char *const kTestCommand = "test";
@@ -421,6 +441,48 @@ std::string format_state_line(const std::string &source, const InputState &state
                    state.touch[0].active ? 1 : 0, state.touch[0].x, state.touch[0].y,
                    state.touch[1].active ? 1 : 0, state.touch[1].x, state.touch[1].y);
     return std::string(buf);
+}
+
+double TimingStats::reports_per_second() const {
+    if (reports == 0 || window_us == 0) {
+        return 0.0;
+    }
+    return static_cast<double>(reports) * 1000000.0 / static_cast<double>(window_us);
+}
+
+std::string format_timing_line(uint32_t reports, uint64_t window_us, uint32_t interval_mean_us,
+                               uint32_t interval_min_us, uint32_t interval_max_us,
+                               uint32_t latency_mean_us, uint32_t latency_max_us) {
+    char buf[128];
+    (void)snprintf(buf, sizeof(buf), "TIMING %u %llu %u %u %u %u %u\n", reports,
+                   static_cast<unsigned long long>(window_us), interval_mean_us, interval_min_us,
+                   interval_max_us, latency_mean_us, latency_max_us);
+    return std::string(buf);
+}
+
+bool parse_timing(const std::string &line, TimingStats *out) {
+    if (out == nullptr || line.rfind("TIMING ", 0) != 0) {
+        return false;
+    }
+    unsigned reports = 0, interval_mean = 0, interval_min = 0, interval_max = 0, latency_mean = 0,
+             latency_max = 0;
+    unsigned long long window = 0;
+    int fields = sscanf(line.c_str(), // NOLINT(cert-err34-c,bugprone-unchecked-string-to-number-conversion)
+                        "TIMING %u %llu %u %u %u %u %u", &reports, &window, &interval_mean,
+                        &interval_min, &interval_max, &latency_mean, &latency_max);
+    if (fields != 7) {
+        return false;
+    }
+    TimingStats stats;
+    stats.reports = reports;
+    stats.window_us = window;
+    stats.interval_mean_us = interval_mean;
+    stats.interval_min_us = interval_min;
+    stats.interval_max_us = interval_max;
+    stats.latency_mean_us = latency_mean;
+    stats.latency_max_us = latency_max;
+    *out = stats;
+    return true;
 }
 
 bool parse_state(const std::string &line, InputState *out) {

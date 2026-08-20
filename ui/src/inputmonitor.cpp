@@ -9,6 +9,9 @@ namespace {
 // rather than reported as fatal.
 constexpr int kRetryIntervalMs = 2000;
 
+// How many one-second windows a measurement averages.
+constexpr int kMeasureWindows = 3;
+
 } // namespace
 
 InputMonitor::InputMonitor(QObject *parent)
@@ -155,7 +158,68 @@ int InputMonitor::sourceIndex(const std::string &source) {
     return -1;
 }
 
+void InputMonitor::measure() {
+    m_accumulated = ds4ipc::TimingStats();
+    m_measureWindows = kMeasureWindows;
+    m_measured = false;
+    emit timingChanged();
+}
+
+double InputMonitor::reportRate() const {
+    return m_result.reports_per_second();
+}
+
+void InputMonitor::applyTiming(const ds4ipc::TimingStats &window) {
+    if (!m_timingSupported) {
+        m_timingSupported = true;
+        emit timingChanged();
+    }
+    if (m_measureWindows <= 0) {
+        return;
+    }
+    // Windows are summed rather than averaged one by one: the mean interval
+    // of the whole span is the total time divided by the total number of
+    // reports, which a mean of means only matches when every window happens
+    // to carry the same number of them.
+    m_accumulated.reports += window.reports;
+    m_accumulated.window_us += window.window_us;
+    m_accumulated.interval_mean_us += window.interval_mean_us * window.reports;
+    if (window.reports > 0 && (m_accumulated.interval_min_us == 0 ||
+                               window.interval_min_us < m_accumulated.interval_min_us)) {
+        m_accumulated.interval_min_us = window.interval_min_us;
+    }
+    if (window.interval_max_us > m_accumulated.interval_max_us) {
+        m_accumulated.interval_max_us = window.interval_max_us;
+    }
+    m_accumulated.latency_mean_us += window.latency_mean_us * window.reports;
+    if (window.latency_max_us > m_accumulated.latency_max_us) {
+        m_accumulated.latency_max_us = window.latency_max_us;
+    }
+
+    if (--m_measureWindows > 0) {
+        emit timingChanged();
+        return;
+    }
+
+    m_result = m_accumulated;
+    if (m_accumulated.reports > 0) {
+        m_result.interval_mean_us = m_accumulated.interval_mean_us / m_accumulated.reports;
+        m_result.latency_mean_us = m_accumulated.latency_mean_us / m_accumulated.reports;
+    } else {
+        m_result.interval_mean_us = 0;
+        m_result.latency_mean_us = 0;
+    }
+    m_measured = true;
+    emit timingChanged();
+}
+
 void InputMonitor::handleLine(const std::string &line) {
+    ds4ipc::TimingStats window;
+    if (ds4ipc::parse_timing(line, &window)) {
+        applyTiming(window);
+        return;
+    }
+
     ds4ipc::InputState parsed;
     if (ds4ipc::parse_state(line, &parsed)) {
         const int index = sourceIndex(parsed.source);

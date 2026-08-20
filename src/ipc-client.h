@@ -97,6 +97,19 @@ std::string build_set_name(const std::string &controller, const std::string &nam
                            std::string *error);
 std::string build_set_hide_method(const std::string &method, std::string *error);
 
+// Flashes the physical controller's light bar so the user can tell which
+// device the daemon is actually holding.
+extern const char *const kIdentifyCommand;
+
+// Sets the physical controller's light bar and rumble motors directly, for
+// testing them. Values are 0..255. A game (or the daemon's own passthrough)
+// can overwrite this at any moment -- it is a test, not a setting.
+std::string build_led(int red, int green, int blue, int rumble_left, int rumble_right,
+                      std::string *error);
+// Hands the light bar and motors back to whatever the emulated device asks
+// for.
+extern const char *const kLedResetCommand;
+
 // Warning to show before a name change: it recreates the virtual device if
 // that type is currently active.
 extern const char *const kSetNameWarning;
@@ -184,6 +197,35 @@ void decode_buttons(const uint8_t bytes[3], uint16_t *out_buttons, uint8_t *out_
 // Decodes one contact out of its four raw HID bytes (contact id/state byte,
 // then the packed 12-bit x and y).
 TouchPoint decode_touch_point(const uint8_t bytes[4]);
+
+// Report timing of the physical controller over one measurement window, as
+// the daemon measured it.
+//
+// The interval is the gap between two consecutive physical reports: its
+// inverse is the rate the controller reports at, which is a property of the
+// controller and its connection (USB and Bluetooth differ), not something the
+// daemon picks. The latency is what the daemon adds on top: from having read
+// a physical report to having written the emulated one.
+struct TimingStats {
+    uint32_t reports = 0;          // intervals measured in the window
+    uint64_t window_us = 0;        // length of the window
+    uint32_t interval_mean_us = 0;
+    uint32_t interval_min_us = 0;
+    uint32_t interval_max_us = 0;
+    uint32_t latency_mean_us = 0;
+    uint32_t latency_max_us = 0;
+
+    // Reports per second over the window, 0 when nothing was measured.
+    double reports_per_second() const;
+};
+
+// Builds one TIMING line (daemon side), newline included.
+std::string format_timing_line(uint32_t reports, uint64_t window_us, uint32_t interval_mean_us,
+                               uint32_t interval_min_us, uint32_t interval_max_us,
+                               uint32_t latency_mean_us, uint32_t latency_max_us);
+
+// Parses a TIMING line. Returns false for any other line.
+bool parse_timing(const std::string &line, TimingStats *out);
 
 // Parses a "NOTE <SOURCE> <text>" line: why that source has nothing to show
 // right now. Returns false for any other line.
