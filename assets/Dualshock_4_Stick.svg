@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- The left stick's knob, lifted unchanged out of Dualshock_4_Layout.svg so
+     the drawing the live view moves is the drawing it was cut from. The view
+     box is the knob's own bounding box in the layout's coordinates, which is
+     why the paths below still carry their original numbers. -->
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1"
+   width="68" height="68" viewBox="179.378 163.87 68 68">
+<path
+       d="m 245.2794,197.87011 a 31.901215,31.901215 0 1 1 -63.80243,0 31.901215,31.901215 0 1 1 63.80243,0 z"
+       id="path4031-4"
+       style="color:#000000;fill:#cccccc;fill-opacity:1;fill-rule:nonzero;stroke:#000000;stroke-width:1.20000005000000010;stroke-linecap:butt;stroke-linejoin:miter;stroke-miterlimit:4;stroke-opacity:1;stroke-dasharray:none;stroke-dashoffset:0;marker:none;visibility:visible;display:inline;overflow:visible;enable-background:accumulate" />
+<path
+       d="m 239.36886,197.87011 a 25.990683,25.990683 0 1 1 -51.98136,0 25.990683,25.990683 0 1 1 51.98136,0 z"
+       id="path4031-3"
+       style="opacity:0.50000000000000000;color:#000000;fill:#cccccc;fill-opacity:1;fill-rule:nonzero;stroke:#000000;stroke-width:1.19999992999999990;stroke-linecap:butt;stroke-linejoin:miter;stroke-miterlimit:4;stroke-opacity:1;stroke-dasharray:none;stroke-dashoffset:0;marker:none;visibility:visible;display:inline;overflow:visible;enable-background:accumulate" />
+<path
+       d="m 232.92431,197.87012 a 19.54613,19.54613 0 1 1 -39.09226,0 19.54613,19.54613 0 1 1 39.09226,0 z"
+       id="path4031"
+       style="opacity:0.50000000000000000;color:#000000;fill:#cccccc;fill-opacity:1;fill-rule:nonzero;stroke:#000000;stroke-width:1.20000005000000010;stroke-linecap:butt;stroke-linejoin:miter;stroke-miterlimit:4;stroke-opacity:1;stroke-dasharray:none;stroke-dashoffset:0;marker:none;visibility:visible;display:inline;overflow:visible;enable-background:accumulate" />
+</svg>

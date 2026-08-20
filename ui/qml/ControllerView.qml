@@ -7,10 +7,14 @@ import Ds4Translator
 
 // The controller drawing, with every control lit up while it is pressed.
 //
-// The artwork (assets/Dualshock_4_Layout.svg) carries no element ids, so the
-// overlays are placed by coordinate in the SVG's own 600x400 space: the whole
-// group is laid out at that size and scaled as one, which keeps the hit
-// shapes glued to the drawing at any window size.
+// The artwork carries no usable element ids, so the overlays are placed by
+// coordinate in the SVG's own 600x400 space: the whole group is laid out at
+// that size and scaled as one, which keeps the hit shapes glued to the drawing
+// at any window size.
+//
+// It is drawn from two files cut out of assets/Dualshock_4_Layout.svg (kept as
+// the original): a base with the stick knobs removed, and the knob on its own,
+// which the sticks below move.
 Item {
     id: root
 
@@ -107,35 +111,45 @@ Item {
     component Stick: Item {
         id: stick
 
+        // Where the well's centre sits in the artwork, so the knob rests
+        // exactly where it was cut from.
+        property real centreX: 0
+        property real centreY: 0
         property int axisX: 128
         property int axisY: 128
         property bool clicked: false
-        // How far the drawn knob travels from centre at full deflection.
+        // How far the knob travels from centre at full deflection: what is
+        // left of the well once the knob is in it, so the drawing stays inside
+        // its own ring.
         readonly property real travel: 14
 
-        width: 60
-        height: 60
+        // The knob's own size in the layout's units.
+        width: 68
+        height: 68
+        x: stick.centreX - width / 2 + (stick.axisX - 128) / 127 * stick.travel
+        y: stick.centreY - height / 2 + (stick.axisY - 128) / 127 * stick.travel
 
-        // Lit ring for L3/R3: the click is a separate button from the
-        // deflection, so it needs its own mark.
-        Rectangle {
+        // The knob itself, taken out of the layout drawing and moved as one
+        // piece -- the base artwork below has the two knobs cut out of it, so
+        // there is nothing left behind for this to slide away from.
+        Image {
             anchors.fill: parent
-            radius: width / 2
-            color: "transparent"
-            border.width: 3
-            border.color: root.accent
-            opacity: stick.clicked ? 0.8 : 0
-            Behavior on opacity { NumberAnimation { duration: 70 } }
+            source: "qrc:/art/Dualshock_4_Stick.svg"
+            sourceSize.width: stick.width * 4
+            sourceSize.height: stick.height * 4
+            fillMode: Image.PreserveAspectFit
         }
 
+        // Lit ring for L3/R3: the click is a separate button from the
+        // deflection, so it needs its own mark. It rides with the knob, which
+        // is the thing that was clicked.
         Rectangle {
-            width: 36
-            height: 36
-            radius: 18
+            anchors.fill: parent
+            anchors.margins: 2
+            radius: width / 2
             color: root.accent
-            opacity: 0.75
-            x: (stick.width - width) / 2 + (stick.axisX - 128) / 127 * stick.travel
-            y: (stick.height - height) / 2 + (stick.axisY - 128) / 127 * stick.travel
+            opacity: stick.clicked ? 0.55 : 0
+            Behavior on opacity { NumberAnimation { duration: 70 } }
         }
     }
 
@@ -148,7 +162,7 @@ Item {
 
         Image {
             anchors.fill: parent
-            source: "qrc:/art/Dualshock_4_Layout.svg"
+            source: "qrc:/art/Dualshock_4_Layout_base.svg"
             // Rasterised above the on-screen size so the drawing stays sharp
             // when the window is enlarged.
             sourceSize.width: root.designWidth * 2
@@ -254,17 +268,16 @@ Item {
         // ----------------------------------------------------------- sticks
 
         Stick {
-            // Centred on the left stick well at (205, 196) in the artwork --
-            // the drawing is not perfectly mirrored, so the two sticks have
-            // separately measured centres.
-            x: 175; y: 166
+            // The well centres come from the layout file itself (the knob
+            // circles' own coordinates), not from measuring the picture: the
+            // drawing is not perfectly mirrored, so the two differ.
+            centreX: 213.4; centreY: 197.9
             axisX: root.live ? InputMonitor.leftX : 128
             axisY: root.live ? InputMonitor.leftY : 128
             clicked: (root.buttons & InputMonitor.L3) !== 0
         }
         Stick {
-            // Right stick well centre: (385, 195).
-            x: 355; y: 165
+            centreX: 388.3; centreY: 197.9
             axisX: root.live ? InputMonitor.rightX : 128
             axisY: root.live ? InputMonitor.rightY : 128
             clicked: (root.buttons & InputMonitor.R3) !== 0
