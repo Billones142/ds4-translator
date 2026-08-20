@@ -157,10 +157,12 @@ Item {
         property bool clicked: false
 
         // The view is straight down on a stick that pivots at its base, so a
-        // pushed stick is a tilted disc seen edge-on-ish: it slides away from
-        // the well's centre and narrows along the direction it was pushed,
-        // while staying full width across it. Both come from one angle.
-        readonly property real maxTiltDeg: 38
+        // pushed stick is a tilted disc: it slides away from the well's centre
+        // and narrows along the direction it was pushed, while staying full
+        // width across it. Both come from one angle -- the throw of the real
+        // stick, which is shallow, so the cap stays close to round and it is
+        // mostly the offset that shows.
+        readonly property real maxTiltDeg: 21
         // How far the knob travels at full deflection: what is left of the
         // well once the knob is in it, so the drawing stays inside its ring.
         readonly property real travel: 14
@@ -320,16 +322,12 @@ Item {
         }
 
         // ------------------------------------------------ shoulders/triggers
-        // L1/R1 sit on the shoulder tabs, which the top view shows nearly
-        // edge-on: barely a sliver of colour. Their own Shape stretches them
-        // away from the body into the empty margin, so a press reads at a
-        // glance without the highlight leaving the button it belongs to.
+        // L1/R1 light up on the shoulder tabs the drawing gives them, like
+        // every other button.
 
         Shape {
             anchors.fill: parent
             preferredRendererType: Shape.CurveRenderer
-            // Anchored on the tabs' lower edge, so only the far side grows.
-            transform: Scale { origin.y: 51.4; yScale: 1.55 }
 
             Hit {
                 outline: paths.l1
@@ -344,12 +342,12 @@ Item {
         // L2/R2 are behind the controller from here, so they get analog bars
         // in the margin above their side.
         TriggerBar {
-            x: 101; y: 1
+            x: 101; y: 10
             label: "L2"
             value: root.live ? InputMonitor.l2 : 0
         }
         TriggerBar {
-            x: 433; y: 1
+            x: 433; y: 10
             label: "R2"
             value: root.live ? InputMonitor.r2 : 0
         }
