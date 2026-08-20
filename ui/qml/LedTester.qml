@@ -46,6 +46,7 @@ ColumnLayout {
         root.blue = InputMonitor.ledBlue;
         root.rumbleLeft = InputMonitor.rumbleLeft;
         root.rumbleRight = InputMonitor.rumbleRight;
+        root.syncWheelFromLevels();
     }
 
     // The light bar is a lamp, not a painted surface: half power still looks
@@ -57,6 +58,43 @@ ColumnLayout {
     // swatch back where the eye expects it.
     function lit(level) {
         return Math.pow(level / 255, 1 / 2.2);
+    }
+
+    // Inverse of lit(): a colour picked on screen becomes the LED level that
+    // shows up as that colour, so the wheel, the swatch and the hardware agree.
+    function level(light) {
+        return Math.round(Math.pow(Math.max(0, Math.min(1, light)), 2.2) * 255);
+    }
+
+    // The wheel's own state. It cannot be derived from the levels alone: black
+    // and white have no hue, so dragging the brightness slider to either end
+    // would lose the colour the user picked and never give it back. The levels
+    // stay authoritative, and these follow them whenever they say something
+    // about hue.
+    property real hue: 0.66
+    property real saturation: 1
+    property real brightness: 1
+
+    function syncWheelFromLevels() {
+        const colour = Qt.rgba(root.lit(root.red), root.lit(root.green),
+                               root.lit(root.blue), 1);
+        // hsvHue is -1 for greys, where the hue genuinely has no value; keep
+        // the one the user last chose.
+        if (colour.hsvHue >= 0) {
+            root.hue = colour.hsvHue;
+        }
+        if (colour.hsvValue > 0) {
+            root.saturation = colour.hsvSaturation;
+        }
+        root.brightness = colour.hsvValue;
+    }
+
+    function applyWheel() {
+        const colour = Qt.hsva(root.hue, root.saturation, root.brightness, 1);
+        root.red = root.level(colour.r);
+        root.green = root.level(colour.g);
+        root.blue = root.level(colour.b);
+        root.send();
     }
 
     function sendNow() {
@@ -250,8 +288,71 @@ ColumnLayout {
                         root.red = modelData.r;
                         root.green = modelData.g;
                         root.blue = modelData.b;
+                        root.syncWheelFromLevels();
                         root.send();
                     }
+                }
+            }
+        }
+    }
+
+    RowLayout {
+        Layout.fillWidth: true
+        spacing: 12
+
+        ColorWheel {
+            id: wheel
+            hue: root.hue
+            saturation: root.saturation
+            value: root.brightness
+            enabled: root.editable
+            opacity: root.editable ? 1 : 0.5
+            Layout.preferredWidth: 140
+            Layout.preferredHeight: 140
+            onPicked: (hue, saturation) => {
+                root.hue = hue;
+                root.saturation = saturation;
+                // Picking a colour on a light bar that is off should turn it
+                // on, otherwise the wheel looks broken.
+                if (root.brightness <= 0) {
+                    root.brightness = 1;
+                }
+                root.applyWheel();
+            }
+        }
+
+        ColumnLayout {
+            Layout.fillWidth: true
+            Layout.alignment: Qt.AlignVCenter
+            spacing: 4
+
+            Label {
+                text: qsTr("Brightness")
+                opacity: 0.75
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                // Black at one end, the picked colour at full at the other:
+                // the one axis the disc does not carry.
+                Slider {
+                    Layout.fillWidth: true
+                    from: 0
+                    to: 1
+                    enabled: root.editable
+                    value: root.brightness
+                    onMoved: {
+                        root.brightness = value;
+                        root.applyWheel();
+                    }
+                }
+
+                Label {
+                    text: qsTr("%1%").arg(Math.round(root.brightness * 100))
+                    horizontalAlignment: Text.AlignRight
+                    Layout.preferredWidth: 40
                 }
             }
         }
@@ -261,19 +362,19 @@ ColumnLayout {
         label: qsTr("Red")
         value: root.red
         enabled: root.editable
-        onMoved: value => { root.red = value; root.send(); }
+        onMoved: value => { root.red = value; root.syncWheelFromLevels(); root.send(); }
     }
     LevelSlider {
         label: qsTr("Green")
         value: root.green
         enabled: root.editable
-        onMoved: value => { root.green = value; root.send(); }
+        onMoved: value => { root.green = value; root.syncWheelFromLevels(); root.send(); }
     }
     LevelSlider {
         label: qsTr("Blue")
         value: root.blue
         enabled: root.editable
-        onMoved: value => { root.blue = value; root.send(); }
+        onMoved: value => { root.blue = value; root.syncWheelFromLevels(); root.send(); }
     }
 
     LevelSlider {
