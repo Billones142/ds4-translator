@@ -48,6 +48,17 @@ ColumnLayout {
         root.rumbleRight = InputMonitor.rumbleRight;
     }
 
+    // The light bar is a lamp, not a painted surface: half power still looks
+    // clearly coloured, and only all three channels at zero is black. Feeding
+    // the raw 0-255 values into a screen colour gets none of that -- sRGB is
+    // gamma encoded, so 128 draws at about a fifth of full brightness and every
+    // mid value reads as near-black next to the real controller. Decoding the
+    // level as light (the same 2.2 the display applies in reverse) puts the
+    // swatch back where the eye expects it.
+    function lit(level) {
+        return Math.pow(level / 255, 1 / 2.2);
+    }
+
     function sendNow() {
         DaemonController.testLed(root.red, root.green, root.blue,
                                  root.rumbleLeft, root.rumbleRight);
@@ -185,13 +196,34 @@ ColumnLayout {
 
         // What the sliders currently describe, so the swatch and the hardware
         // can be compared side by side.
-        Rectangle {
+        Item {
             Layout.preferredWidth: 48
             Layout.preferredHeight: 24
-            radius: 4
-            color: Qt.rgba(root.red / 255, root.green / 255, root.blue / 255, 1)
-            border.width: 1
-            border.color: "#40808080"
+
+            // The halo stands in for the light the bar throws on its
+            // surroundings, which is most of what makes the real one look
+            // bright. It fades out with the swatch, so "Off" is still plainly
+            // off.
+            Rectangle {
+                anchors.centerIn: parent
+                width: parent.width + 10
+                height: parent.height + 10
+                radius: 9
+                color: swatch.color
+                opacity: 0.35 * Math.max(root.lit(root.red),
+                                         Math.max(root.lit(root.green),
+                                                  root.lit(root.blue)))
+            }
+
+            Rectangle {
+                id: swatch
+                anchors.fill: parent
+                radius: 4
+                color: Qt.rgba(root.lit(root.red), root.lit(root.green),
+                               root.lit(root.blue), 1)
+                border.width: 1
+                border.color: "#40808080"
+            }
         }
 
         // Fixed colours worth having one click away: the primaries prove each
