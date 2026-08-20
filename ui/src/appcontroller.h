@@ -26,6 +26,14 @@ class AppController : public QObject {
     // hide itself on close when this is true: otherwise the process would keep
     // running with no way to get it back.
     Q_PROPERTY(bool trayActive READ trayActive NOTIFY trayActiveChanged)
+    // What closing the window does while the tray icon is active: keep the
+    // applet running (true) or quit the whole program. Persisted. Without a
+    // tray icon there is nothing to keep running, so closing always quits.
+    Q_PROPERTY(bool closeToTray READ closeToTray WRITE setCloseToTray NOTIFY closeToTrayChanged)
+    // Whether closing the window should hide it rather than end the program:
+    // the single question the window needs answered, tray availability and
+    // preference already folded in.
+    Q_PROPERTY(bool hideOnClose READ hideOnClose NOTIFY hideOnCloseChanged)
     // Whether the autostart entry exists. Off by default -- nothing is written
     // to the user's session config until they ask for it here.
     Q_PROPERTY(bool autostartEnabled READ autostartEnabled WRITE setAutostartEnabled NOTIFY
@@ -47,6 +55,13 @@ public:
 
     bool trayActive() const { return m_trayAvailable && m_trayEnabled; }
 
+    bool closeToTray() const { return m_closeToTray; }
+    void setCloseToTray(bool enabled);
+
+    // True when closing the window should hide it instead of ending the
+    // program -- the one question the window actually needs answered.
+    bool hideOnClose() const { return trayActive() && m_closeToTray; }
+
     bool autostartEnabled() const { return m_autostartEnabled; }
     void setAutostartEnabled(bool enabled);
 
@@ -62,6 +77,8 @@ signals:
     void trayAvailableChanged();
     void trayEnabledChanged();
     void trayActiveChanged();
+    void closeToTrayChanged();
+    void hideOnCloseChanged();
     void autostartEnabledChanged();
     void settingsErrorChanged();
     void showWindowRequested();
@@ -75,6 +92,7 @@ private:
 
     bool m_trayAvailable = false;
     bool m_trayEnabled = false;
+    bool m_closeToTray = true;
     bool m_autostartEnabled = false;
     bool m_startHidden = false;
     QString m_settingsError;

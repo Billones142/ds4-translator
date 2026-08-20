@@ -7,6 +7,7 @@
 
 #include "appcontroller.h"
 #include "daemoncontroller.h"
+#include "singleinstance.h"
 #include "trayicon.h"
 
 int main(int argc, char *argv[]) {
@@ -30,6 +31,17 @@ int main(int argc, char *argv[]) {
                        "(ignored when the session has no tray)."));
     parser.addOption(backgroundOption);
     parser.process(app);
+
+    // With the applet running, the window is usually hidden rather than
+    // closed, so launching the app again means "show me the window I already
+    // have", not "start a second copy that fights this one for the tray".
+    if (SingleInstance::notifyRunningInstance()) {
+        return 0;
+    }
+    SingleInstance instance;
+    // A guard that could not be installed is not worth refusing to start
+    // over; the app simply loses the protection.
+    (void)instance.listen();
 
     QQmlApplicationEngine engine;
     QObject::connect(
@@ -65,25 +77,41 @@ int main(int argc, char *argv[]) {
     }
 
     const auto applyTrayState = [&app, appController, &trayIcon]() {
-        const bool active = appController->trayActive();
         if (trayIcon) {
-            trayIcon->setVisible(active);
+            trayIcon->setVisible(appController->trayActive());
         }
-        app.setQuitOnLastWindowClosed(!active);
+        // Closing the last window ends the program unless the applet is meant
+        // to carry on without it -- the window hides itself in that case, so
+        // Qt would not see a close at all, but a window that fails to hide
+        // must not take the applet down with it.
+        app.setQuitOnLastWindowClosed(!appController->hideOnClose());
     };
-    // The lambda holds references to locals of this function, so the
-    // connection is dropped before any of them go out of scope.
+    // The lambdas hold references to locals of this function, so the
+    // connections are dropped before any of them go out of scope.
     const QMetaObject::Connection trayStateConnection =
         QObject::connect(appController, &AppController::trayActiveChanged, &app, applyTrayState);
+    const QMetaObject::Connection closeBehaviourConnection =
+        QObject::connect(appController, &AppController::closeToTrayChanged, &app, applyTrayState);
     applyTrayState();
 
+    // Another launch asking for the window: the same request the tray menu's
+    // "Settings…" entry makes.
+    const QMetaObject::Connection showRequestConnection = QObject::connect(
+        &instance, &SingleInstance::showRequested, appController,
+        [appController]() { appController->requestShowWindow(); });
+
     engine.loadFromModule("Ds4Translator", "Main");
-    if (engine.rootObjects().isEmpty()) {
+    const auto dropConnections = [&]() {
         QObject::disconnect(trayStateConnection);
+        QObject::disconnect(closeBehaviourConnection);
+        QObject::disconnect(showRequestConnection);
+    };
+    if (engine.rootObjects().isEmpty()) {
+        dropConnections();
         return 1;
     }
 
     const int status = app.exec();
-    QObject::disconnect(trayStateConnection);
+    dropConnections();
     return status;
 }

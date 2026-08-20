@@ -13,6 +13,7 @@ namespace {
 // QSettings keys. Kept in one place so the stored file stays stable if the
 // property names ever change.
 const char *const kTrayEnabledKey = "ui/trayEnabled";
+const char *const kCloseToTrayKey = "ui/closeToTray";
 
 // Basename of the XDG autostart entry, without the .desktop suffix. Matches
 // the file the Makefile's uninstall targets clean up.
@@ -24,6 +25,9 @@ AppController::AppController(QObject *parent) : QObject(parent) {
     QSettings settings;
     // Default false: the applet is opt-in, both here and for autostart.
     m_trayEnabled = settings.value(QLatin1String(kTrayEnabledKey), false).toBool();
+    // Default true: someone who turned the tray icon on wants the applet to
+    // outlive the window, which is the whole point of having one.
+    m_closeToTray = settings.value(QLatin1String(kCloseToTrayKey), true).toBool();
     // The autostart state is not stored in QSettings -- the file on disk is
     // the truth, since the user (or a package) can add or remove it directly.
     m_autostartEnabled = QFileInfo::exists(autostartFilePath());
@@ -36,6 +40,7 @@ void AppController::setTrayAvailable(bool available) {
     m_trayAvailable = available;
     emit trayAvailableChanged();
     emit trayActiveChanged();
+    emit hideOnCloseChanged();
 }
 
 void AppController::setTrayEnabled(bool enabled) {
@@ -55,6 +60,7 @@ void AppController::setTrayEnabled(bool enabled) {
 
     emit trayEnabledChanged();
     emit trayActiveChanged();
+    emit hideOnCloseChanged();
 
     // Autostart launches the applet with --background, which only makes sense
     // with a tray icon to land in; without one the session would just open a
@@ -62,6 +68,25 @@ void AppController::setTrayEnabled(bool enabled) {
     if (!enabled) {
         setAutostartEnabled(false);
     }
+}
+
+void AppController::setCloseToTray(bool enabled) {
+    if (m_closeToTray == enabled) {
+        return;
+    }
+    m_closeToTray = enabled;
+
+    QSettings settings;
+    settings.setValue(QLatin1String(kCloseToTrayKey), enabled);
+    settings.sync();
+    if (settings.status() != QSettings::NoError) {
+        setSettingsError(tr("Could not save the close behaviour to %1.").arg(settings.fileName()));
+    } else {
+        setSettingsError(QString());
+    }
+
+    emit closeToTrayChanged();
+    emit hideOnCloseChanged();
 }
 
 QString AppController::autostartFilePath() {

@@ -39,6 +39,8 @@ qt_add_executable(ds4-translator-ui
     src/ipcclient.h
     src/trayicon.cpp
     src/trayicon.h
+    src/singleinstance.cpp
+    src/singleinstance.h
     ${DS4_SHARED_DIR}/ipc-client.cpp
     ${DS4_SHARED_DIR}/ipc-client.h
 )
@@ -48,6 +50,9 @@ qt_add_qml_module(ds4-translator-ui
     VERSION 1.0
     QML_FILES
         qml/Main.qml
+        qml/EmulationPage.qml
+        qml/TestPage.qml
+        qml/AppSettingsPage.qml
         qml/OptionSelector.qml
         qml/NameEditor.qml
         qml/ControllerView.qml
@@ -75,6 +80,7 @@ qt_add_resources(ds4-translator-ui "controller_art"
 set_source_files_properties(
     src/main.cpp src/ipcclient.cpp src/daemoncontroller.cpp
     src/trayicon.cpp src/appcontroller.cpp src/inputmonitor.cpp
+    src/singleinstance.cpp
     ${DS4_SHARED_DIR}/ipc-client.cpp
     PROPERTIES COMPILE_OPTIONS "${DS4_UI_STRICT_WARNINGS}"
 )

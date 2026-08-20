@@ -165,9 +165,11 @@ ColumnLayout {
             wrapMode: Text.Wrap
             text: !root.available
                 ? qsTr("Needs a physical controller connected to the daemon.")
-                : root.following
-                    ? qsTr("Showing what the emulated device is asking for. Switch this off to drive the light bar and motors by hand.")
-                    : qsTr("Driving the controller directly. The game's next output report takes it back.")
+                : !InputMonitor.hasOutput
+                    ? qsTr("This daemon does not report the light bar state, so the values below are only what is sent from here. Restart ds4-translator after updating it.")
+                    : root.following
+                        ? qsTr("Showing what the emulated device is asking for. Switch this off to drive the light bar and motors by hand.")
+                        : qsTr("Driving the controller directly. The game's next output report takes it back.")
             opacity: 0.75
         }
     }
