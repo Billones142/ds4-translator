@@ -29,6 +29,8 @@ STRICT_WARNINGS = -Wall -Wextra -Werror -Wshadow -Wformat=2 -Wformat-security \
                    -Wno-missing-field-initializers
 
 BUILD_DIR = build
+UI_BUILD_DIR = ui/build
+UI_BINARY    = $(UI_BUILD_DIR)/ds4-translator-ui
 
 # Full HID-driver unbind + libusb raw-interrupt transport (see
 # src/usb-hid-transport.* and src/hid-unbind-detect.*), the hide method
@@ -76,12 +78,18 @@ TARGET_CTL    = $(BUILD_DIR)/ds4-ctl
 TARGET_SPOOF  = $(BUILD_DIR)/libudev-sony-spoof.so
 TARGET_SPOOF32 = $(BUILD_DIR)/libudev-sony-spoof32.so
 
-DAEMON_SRC = src/main.cpp src/functionfs-backend.c $(UNBIND_SRC)
-CTL_SRC    = src/ctl.cpp
+DAEMON_SRC = src/main.cpp src/functionfs-backend.c $(UNBIND_SRC) $(IPC_SRC)
+# The control protocol itself: the client transport/command rules used by
+# ds4-ctl and the Qt UI in ui/ (which compiles src/ipc-client.cpp into its
+# own binary), plus the live-monitor STATE line format, which the daemon
+# writes and both front-ends parse -- so the daemon links it too.
+IPC_SRC    = src/ipc-client.cpp
+CTL_SRC    = src/ctl.cpp $(IPC_SRC)
 SPOOF_SRC  = src/udev-spoof.c
 
-DAEMON_OBJ = $(BUILD_DIR)/main.o $(BUILD_DIR)/functionfs-backend.o $(UNBIND_OBJ) $(HIDBPF_OBJ)
-CTL_OBJ    = $(BUILD_DIR)/ctl.o
+DAEMON_OBJ = $(BUILD_DIR)/main.o $(BUILD_DIR)/functionfs-backend.o $(UNBIND_OBJ) $(HIDBPF_OBJ) \
+             $(BUILD_DIR)/ipc-client.o
+CTL_OBJ    = $(BUILD_DIR)/ctl.o $(BUILD_DIR)/ipc-client.o
 
 all: $(TARGET_DAEMON) $(TARGET_CTL) $(TARGET_SPOOF) $(TARGET_SPOOF32) $(HIDBPF_BPF_OBJ)
 
@@ -133,8 +141,61 @@ $(HIDBPF_BPF_OBJ): src/hid-bpf/hid-bpf-transport.bpf.c src/hid-bpf/hid_bpf.h \
 
 clean:
 	rm -rf $(BUILD_DIR)
+	rm -rf $(UI_BUILD_DIR)
 
-install: all
+# Qt 6 settings GUI (ui/). Deliberately kept out of `all`: it needs Qt 6 +
+# CMake, which the daemon itself does not, so a plain `make` still builds the
+# daemon on a machine without them. `install` does include it -- use
+# `install-cli` there instead.
+# Always delegated: CMake already does its own up-to-date checking, so
+# there is nothing for make to track here.
+ui:
+	cmake -S ui -B $(UI_BUILD_DIR) -DCMAKE_BUILD_TYPE=Release
+	cmake --build $(UI_BUILD_DIR) -j$(shell nproc)
+
+# The .desktop file is not cosmetic: the desktop portal looks the app up by
+# it, and without it every launch logs "App info not found for
+# 'ds4-translator-ui'". No autostart entry is installed: the tray applet is
+# off by default and the settings window writes ~/.config/autostart itself
+# when the user turns "Start the applet on login" on.
+install-ui: ui
+	install -D -m 755 $(UI_BINARY) $(DESTDIR)$(BINDIR)/ds4-translator-ui
+	install -D -m 644 ds4-translator-ui.desktop \
+	    $(DESTDIR)/usr/share/applications/ds4-translator-ui.desktop
+ifdef SUDO_USER
+	chown -R $(SUDO_USER):$(SUDO_USER) $(UI_BUILD_DIR)
+endif
+
+uninstall-ui:
+	rm -f $(DESTDIR)$(BINDIR)/ds4-translator-ui
+	rm -f $(DESTDIR)/usr/share/applications/ds4-translator-ui.desktop
+	# Older versions installed this; removed here so an upgrade+uninstall
+	# does not leave a system-wide autostart entry behind.
+	rm -f $(DESTDIR)/etc/xdg/autostart/ds4-translator-applet.desktop
+
+# Same thing for the current user only -- no root needed.
+USER_BINDIR      = $(HOME)/.local/bin
+USER_APPDIR      = $(HOME)/.local/share/applications
+USER_AUTOSTART   = $(HOME)/.config/autostart
+
+install-ui-user: ui
+	install -D -m 755 $(UI_BINARY) $(USER_BINDIR)/ds4-translator-ui
+	install -D -m 644 ds4-translator-ui.desktop \
+	    $(USER_APPDIR)/ds4-translator-ui.desktop
+	update-desktop-database $(USER_APPDIR) 2>/dev/null || true
+
+uninstall-ui-user:
+	rm -f $(USER_BINDIR)/ds4-translator-ui
+	rm -f $(USER_APPDIR)/ds4-translator-ui.desktop
+	rm -f $(USER_AUTOSTART)/ds4-translator-applet.desktop
+	update-desktop-database $(USER_APPDIR) 2>/dev/null || true
+
+# Everything: daemon, CLI and the Qt settings UI. `install-cli` below is the
+# same thing without the UI, for machines with no Qt 6 / CMake (the UI is the
+# only part that needs them) or where a GUI has no place at all.
+install: install-cli install-ui
+
+install-cli: all
 	install -D -m 755 $(TARGET_DAEMON) $(DESTDIR)$(BINDIR)/$(notdir $(TARGET_DAEMON))
 	install -D -m 755 $(TARGET_CTL) $(DESTDIR)$(BINDIR)/$(notdir $(TARGET_CTL))
 	install -D -m 755 $(TARGET_SPOOF) $(DESTDIR)/usr/lib/$(notdir $(TARGET_SPOOF))
@@ -155,7 +216,10 @@ ifdef SUDO_USER
 	chown -R $(SUDO_USER):$(SUDO_USER) $(BUILD_DIR)
 endif
 
-uninstall:
+# Mirrors install: removes the UI too. uninstall-cli leaves it in place.
+uninstall: uninstall-ui uninstall-cli
+
+uninstall-cli:
 	systemctl disable --now ds4-translator.service || true
 	rm -f $(DESTDIR)$(BINDIR)/$(notdir $(TARGET_DAEMON))
 	rm -f $(DESTDIR)$(BINDIR)/$(notdir $(TARGET_CTL))
@@ -172,4 +236,5 @@ uninstall:
 	udevadm trigger
 	systemctl daemon-reload
 
-.PHONY: all debug clean install uninstall
+.PHONY: all debug clean install install-cli uninstall uninstall-cli \
+        ui install-ui uninstall-ui install-ui-user uninstall-ui-user

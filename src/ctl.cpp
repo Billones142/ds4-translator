@@ -7,11 +7,10 @@
 #include <cstdint>
 #include <ctime>
 #include <unistd.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <sys/time.h>
 #include <termios.h>
 #include <poll.h>
+
+#include "ipc-client.h"
 
 static std::string button_names_joined();
 
@@ -58,6 +57,15 @@ void print_usage() {
     std::cout << "                                   commands sent to it. Shows the virtual device for ds4/" << std::endl;
     std::cout << "                                   dualsense types, or the raw physical controller for" << std::endl;
     std::cout << "                                   none/hidden (LED/rumble aren't observable for none)." << std::endl;
+    std::cout << "  identify                         Blink the physical controller's light bar (and pulse its" << std::endl;
+    std::cout << "                                   heavy motor once) so you can tell which pad the daemon is" << std::endl;
+    std::cout << "                                   actually holding" << std::endl;
+    std::cout << "  led <r> <g> <b> <left> <right>   Send a light bar colour and rumble levels (each 0-255)" << std::endl;
+    std::cout << "                                   straight to the physical controller, to test them. Not a" << std::endl;
+    std::cout << "                                   setting: the next output report from the emulated device" << std::endl;
+    std::cout << "                                   overwrites it." << std::endl;
+    std::cout << "  led --reset                      Hand the light bar and motors straight back to the" << std::endl;
+    std::cout << "                                   emulated device" << std::endl;
     std::cout << "  set-hide-method <legacy|unbind>  Change how the physical controller is hidden from other" << std::endl;
     std::cout << "                                   apps (applies on the next physical (re)connection). unbind" << std::endl;
     std::cout << "                                   (default) hides it before any other app can see it, with" << std::endl;
@@ -71,53 +79,11 @@ void print_usage() {
     std::cout << "                                   permission-blocked, for both USB and Bluetooth." << std::endl;
 }
 
-// Connect to the daemon's Unix socket, send one command, return its response.
-// Returns false if the connection/send/recv itself failed (daemon unreachable).
+// One command/response exchange, using the shared client in ipc-client.cpp
+// so ds4-ctl and the settings UI speak to the daemon through exactly the same
+// code path.
 static bool send_command(const std::string& cmd, std::string& out_response) {
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) {
-        out_response = std::string("Failed to create socket: ") + strerror(errno);
-        return false;
-    }
-
-    struct timeval tv;
-    tv.tv_sec = 3;
-    tv.tv_usec = 0;
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, "/run/ds4-translator.sock", sizeof(addr.sun_path) - 1);
-
-    if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        out_response = std::string("Failed to connect to translation daemon (is the ds4-translator service running?): ") + strerror(errno);
-        close(fd);
-        return false;
-    }
-
-    if (write(fd, cmd.c_str(), cmd.size()) < 0) {
-        out_response = std::string("Failed to write to daemon: ") + strerror(errno);
-        close(fd);
-        return false;
-    }
-
-    char rx_buf[1024];
-    memset(rx_buf, 0, sizeof(rx_buf));
-    ssize_t bytes_read = read(fd, rx_buf, sizeof(rx_buf) - 1);
-    close(fd);
-
-    if (bytes_read <= 0) {
-        out_response = "Error: No response from daemon (connection timed out or closed).";
-        return false;
-    }
-
-    out_response = rx_buf;
-    while (!out_response.empty() && (out_response.back() == '\n' || out_response.back() == '\r')) {
-        out_response.pop_back();
-    }
-    return true;
+    return ds4ipc::send_command(cmd, out_response);
 }
 
 static void print_daemon_unreachable_help() {
@@ -140,21 +106,23 @@ static void print_daemon_unreachable_help() {
 // keyboard. Analog sticks are intentionally left fixed at center (128,128)
 // rather than half-implemented with awkward toggle semantics.
 
+// Same bits the daemon's live STATE line decodes to, so the synthetic
+// tester below and the live monitor speak one vocabulary.
 enum {
-    SYN_BTN_SQUARE   = 1 << 0,
-    SYN_BTN_CROSS    = 1 << 1,
-    SYN_BTN_CIRCLE   = 1 << 2,
-    SYN_BTN_TRIANGLE = 1 << 3,
-    SYN_BTN_L1       = 1 << 4,
-    SYN_BTN_R1       = 1 << 5,
-    SYN_BTN_L2       = 1 << 6,
-    SYN_BTN_R2       = 1 << 7,
-    SYN_BTN_SHARE    = 1 << 8,
-    SYN_BTN_OPTIONS  = 1 << 9,
-    SYN_BTN_L3       = 1 << 10,
-    SYN_BTN_R3       = 1 << 11,
-    SYN_BTN_PS       = 1 << 12,
-    SYN_BTN_TOUCHPAD = 1 << 13,
+    SYN_BTN_SQUARE   = ds4ipc::kBtnSquare,
+    SYN_BTN_CROSS    = ds4ipc::kBtnCross,
+    SYN_BTN_CIRCLE   = ds4ipc::kBtnCircle,
+    SYN_BTN_TRIANGLE = ds4ipc::kBtnTriangle,
+    SYN_BTN_L1       = ds4ipc::kBtnL1,
+    SYN_BTN_R1       = ds4ipc::kBtnR1,
+    SYN_BTN_L2       = ds4ipc::kBtnL2,
+    SYN_BTN_R2       = ds4ipc::kBtnR2,
+    SYN_BTN_SHARE    = ds4ipc::kBtnShare,
+    SYN_BTN_OPTIONS  = ds4ipc::kBtnOptions,
+    SYN_BTN_L3       = ds4ipc::kBtnL3,
+    SYN_BTN_R3       = ds4ipc::kBtnR3,
+    SYN_BTN_PS       = ds4ipc::kBtnPs,
+    SYN_BTN_TOUCHPAD = ds4ipc::kBtnTouchpad,
 };
 
 // Single source of truth for `tap`'s button/dpad names, shared by run_tap(),
@@ -218,6 +186,8 @@ static const CommandSpec kCommands[] = {
     {"resume-physical",  nullptr},
     {"tap",              nullptr},
     {"test",             nullptr},
+    {"identify",         nullptr},
+    {"led",              "--reset"},
     {"set-hide-method",  "legacy unbind"},
 };
 
@@ -244,20 +214,6 @@ struct UiState {
     uint16_t buttons = 0;
     uint8_t dpad = 8; // 0=up..7=up-left clockwise, 8=neutral
 };
-
-static const char *dpad_name(uint8_t dpad) {
-    switch (dpad) {
-        case 0: return "Up";
-        case 1: return "Up-Right";
-        case 2: return "Right";
-        case 3: return "Down-Right";
-        case 4: return "Down";
-        case 5: return "Down-Left";
-        case 6: return "Left";
-        case 7: return "Up-Left";
-        default: return "Neutral";
-    }
-}
 
 static std::string mark(uint16_t buttons, uint16_t bit, const char *label) {
     return (buttons & bit) ? (std::string("[") + label + "]") : (std::string(" ") + label + " ");
@@ -286,7 +242,7 @@ static void redraw(const UiState& s, const std::string& daemon_status, bool stat
     std::cout << "\x1b[0K   " << mark(s.buttons, SYN_BTN_SQUARE, "Square(J)") << "                      " << mark(s.buttons, SYN_BTN_CIRCLE, "Circle(L)") << "\n";
     std::cout << "\x1b[0K              " << mark(s.buttons, SYN_BTN_CROSS, "Cross(K)") << "\n";
     std::cout << "\x1b[0K\n";
-    std::cout << "\x1b[0KD-Pad (arrow keys): " << dpad_name(s.dpad) << "\n";
+    std::cout << "\x1b[0KD-Pad (arrow keys): " << ds4ipc::dpad_name(s.dpad) << "\n";
     std::cout << "\x1b[0K\n";
     std::cout << "\x1b[0K   " << mark(s.buttons, SYN_BTN_L1, "L1(Q)") << "  " << mark(s.buttons, SYN_BTN_R1, "R1(E)")
               << "      " << mark(s.buttons, SYN_BTN_L2, "L2(1)") << "  " << mark(s.buttons, SYN_BTN_R2, "R2(2)")
@@ -480,31 +436,12 @@ static int run_virtual_ui(const std::string& type, bool auto_destroy) {
 // hidden — currently looks like, plus a scrolling log of LED/rumble
 // output commands it observed being sent to it.
 
-static UiState decode_raw_state(uint8_t b0, uint8_t b1, uint8_t b2) {
-    UiState s;
-    s.dpad = b0 & 0x0F;
-    if (b0 & 0x10) s.buttons |= SYN_BTN_SQUARE;
-    if (b0 & 0x20) s.buttons |= SYN_BTN_CROSS;
-    if (b0 & 0x40) s.buttons |= SYN_BTN_CIRCLE;
-    if (b0 & 0x80) s.buttons |= SYN_BTN_TRIANGLE;
-    if (b1 & 0x01) s.buttons |= SYN_BTN_L1;
-    if (b1 & 0x02) s.buttons |= SYN_BTN_R1;
-    if (b1 & 0x04) s.buttons |= SYN_BTN_L2;
-    if (b1 & 0x08) s.buttons |= SYN_BTN_R2;
-    if (b1 & 0x10) s.buttons |= SYN_BTN_SHARE;
-    if (b1 & 0x20) s.buttons |= SYN_BTN_OPTIONS;
-    if (b1 & 0x40) s.buttons |= SYN_BTN_L3;
-    if (b1 & 0x80) s.buttons |= SYN_BTN_R3;
-    if (b2 & 0x01) s.buttons |= SYN_BTN_PS;
-    if (b2 & 0x02) s.buttons |= SYN_BTN_TOUCHPAD;
-    return s;
-}
-
 struct TestState {
     bool have_state = false;
-    std::string source;
-    UiState ui;
-    uint8_t lx = 128, ly = 128, rx = 128, ry = 128, l2 = 0, r2 = 0;
+    ds4ipc::InputState in;
+    // Physical report rate/latency of the last window the daemon measured.
+    bool have_timing = false;
+    ds4ipc::TimingStats timing;
     std::string note = "Waiting for data from daemon...";
 };
 
@@ -520,23 +457,60 @@ static void redraw_test(const std::string& header, const std::vector<std::string
     if (!st.have_state) {
         std::cout << "\x1b[0K" << st.note << "\n";
     } else {
-        std::cout << "\x1b[0KSource: " << st.source << "\n";
+        std::cout << "\x1b[0KSource: " << st.in.source << "\n";
         std::cout << "\x1b[0K\n";
-        std::cout << "\x1b[0K              " << mark(st.ui.buttons, SYN_BTN_TRIANGLE, "Triangle") << "\n";
-        std::cout << "\x1b[0K   " << mark(st.ui.buttons, SYN_BTN_SQUARE, "Square") << "                " << mark(st.ui.buttons, SYN_BTN_CIRCLE, "Circle") << "\n";
-        std::cout << "\x1b[0K              " << mark(st.ui.buttons, SYN_BTN_CROSS, "Cross") << "\n";
+        std::cout << "\x1b[0K              " << mark(st.in.buttons, SYN_BTN_TRIANGLE, "Triangle") << "\n";
+        std::cout << "\x1b[0K   " << mark(st.in.buttons, SYN_BTN_SQUARE, "Square") << "                " << mark(st.in.buttons, SYN_BTN_CIRCLE, "Circle") << "\n";
+        std::cout << "\x1b[0K              " << mark(st.in.buttons, SYN_BTN_CROSS, "Cross") << "\n";
         std::cout << "\x1b[0K\n";
-        std::cout << "\x1b[0KD-Pad: " << dpad_name(st.ui.dpad) << "\n";
-        std::cout << "\x1b[0K   " << mark(st.ui.buttons, SYN_BTN_L1, "L1") << "  " << mark(st.ui.buttons, SYN_BTN_R1, "R1")
-                  << "      " << mark(st.ui.buttons, SYN_BTN_L2, "L2") << "  " << mark(st.ui.buttons, SYN_BTN_R2, "R2")
-                  << "      " << mark(st.ui.buttons, SYN_BTN_L3, "L3") << "  " << mark(st.ui.buttons, SYN_BTN_R3, "R3") << "\n";
-        std::cout << "\x1b[0K   " << mark(st.ui.buttons, SYN_BTN_SHARE, "Share") << "  " << mark(st.ui.buttons, SYN_BTN_OPTIONS, "Options")
-                  << "      " << mark(st.ui.buttons, SYN_BTN_PS, "PS") << "  " << mark(st.ui.buttons, SYN_BTN_TOUCHPAD, "Touchpad") << "\n";
+        std::cout << "\x1b[0KD-Pad: " << ds4ipc::dpad_name(st.in.dpad) << "\n";
+        std::cout << "\x1b[0K   " << mark(st.in.buttons, SYN_BTN_L1, "L1") << "  " << mark(st.in.buttons, SYN_BTN_R1, "R1")
+                  << "      " << mark(st.in.buttons, SYN_BTN_L2, "L2") << "  " << mark(st.in.buttons, SYN_BTN_R2, "R2")
+                  << "      " << mark(st.in.buttons, SYN_BTN_L3, "L3") << "  " << mark(st.in.buttons, SYN_BTN_R3, "R3") << "\n";
+        std::cout << "\x1b[0K   " << mark(st.in.buttons, SYN_BTN_SHARE, "Share") << "  " << mark(st.in.buttons, SYN_BTN_OPTIONS, "Options")
+                  << "      " << mark(st.in.buttons, SYN_BTN_PS, "PS") << "  " << mark(st.in.buttons, SYN_BTN_TOUCHPAD, "Touchpad") << "\n";
         std::cout << "\x1b[0K\n";
-        char buf[128];
+        char buf[160];
         (void)snprintf(buf, sizeof(buf), "LX=%3u LY=%3u   RX=%3u RY=%3u   L2=%3u R2=%3u",
-                 st.lx, st.ly, st.rx, st.ry, st.l2, st.r2);
+                 st.in.lx, st.in.ly, st.in.rx, st.in.ry, st.in.l2, st.in.r2);
         std::cout << "\x1b[0K" << buf << "\n";
+        // Raw sensor counts, as the controller reports them -- no scaling to
+        // degrees/s or g, which would need per-unit calibration data.
+        (void)snprintf(buf, sizeof(buf), "Gyro  P=%6d Y=%6d R=%6d   Accel X=%6d Y=%6d Z=%6d",
+                 st.in.gyro[0], st.in.gyro[1], st.in.gyro[2],
+                 st.in.accel[0], st.in.accel[1], st.in.accel[2]);
+        std::cout << "\x1b[0K" << buf << "\n";
+        // The touchpad tracks two fingers; a slot keeps its last coordinates
+        // after the finger leaves, so only the active ones are worth showing.
+        std::string touch_text;
+        for (int i = 0; i < 2; ++i) {
+            const ds4ipc::TouchPoint& point = st.in.touch[i];
+            (void)snprintf(buf, sizeof(buf), "  #%d %s", i + 1,
+                     point.active ? "" : "-");
+            touch_text += buf;
+            if (point.active) {
+                (void)snprintf(buf, sizeof(buf), "%4d,%3d", point.x, point.y);
+                touch_text += buf;
+            }
+        }
+        std::cout << "\x1b[0KTouchpad (max " << ds4ipc::kTouchWidth << "x" << ds4ipc::kTouchHeight
+                  << "):" << touch_text << "\n";
+    }
+    if (st.have_timing) {
+        char buf[192];
+        if (st.timing.reports == 0) {
+            std::cout << "\x1b[0K\nPhysical reports: none in the last second\n";
+        } else {
+            std::cout << "\x1b[0K\n";
+            (void)snprintf(buf, sizeof(buf),
+                     "Physical reports: %.0f/s  interval %.2f ms (min %.2f, max %.2f)",
+                     st.timing.reports_per_second(), st.timing.interval_mean_us / 1000.0,
+                     st.timing.interval_min_us / 1000.0, st.timing.interval_max_us / 1000.0);
+            std::cout << "\x1b[0K" << buf << "\n";
+            (void)snprintf(buf, sizeof(buf), "Translation delay: %.3f ms mean, %.3f ms worst",
+                     st.timing.latency_mean_us / 1000.0, st.timing.latency_max_us / 1000.0);
+            std::cout << "\x1b[0K" << buf << "\n";
+        }
     }
     std::cout << "\x1b[0K\n";
     std::cout << "\x1b[0KLED/rumble commands received, most recent last:\n";
@@ -551,27 +525,19 @@ static void redraw_test(const std::string& header, const std::vector<std::string
 }
 
 static int run_test_ui() {
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    // "test" is the one command whose connection stays open: the daemon
+    // promotes this socket into its broadcast subscriber list, so the
+    // exchange is driven here rather than through send_command().
+    std::string error;
+    int fd = ds4ipc::connect_socket(&error);
     if (fd < 0) {
-        std::cerr << "Failed to create socket: " << strerror(errno) << std::endl;
-        return 1;
-    }
-
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, "/run/ds4-translator.sock", sizeof(addr.sun_path) - 1);
-
-    if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        std::cerr << "Failed to connect to translation daemon (is the ds4-translator service running?): " << strerror(errno) << std::endl;
-        close(fd);
+        std::cerr << error << std::endl;
         print_daemon_unreachable_help();
         return 1;
     }
 
-    std::string req = "test";
-    if (write(fd, req.c_str(), req.size()) < 0) {
-        std::cerr << "Failed to write to daemon: " << strerror(errno) << std::endl;
+    if (!ds4ipc::write_command(fd, ds4ipc::kTestCommand, &error)) {
+        std::cerr << error << std::endl;
         close(fd);
         return 1;
     }
@@ -597,6 +563,7 @@ static int run_test_ui() {
     const size_t MAX_EVENTS = 12;
 
     std::string rx_accum;
+    std::string note_text;
     bool quit = false;
     bool need_redraw = true;
 
@@ -618,15 +585,13 @@ static int run_test_ui() {
         }
 
         if (pr > 0 && (pfds[0].revents & POLLIN)) {
-            char buf[1024];
-            ssize_t n = read(fd, buf, sizeof(buf));
-            if (n <= 0) {
-                if (!(n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) {
-                    std::cout << "\nDaemon connection closed." << std::endl;
-                    break;
-                }
-            } else {
-                rx_accum.append(buf, (size_t)n);
+            std::string read_error;
+            ds4ipc::ReadStatus status = ds4ipc::read_available(fd, &rx_accum, &read_error);
+            if (status == ds4ipc::ReadStatus::Eof || status == ds4ipc::ReadStatus::Error) {
+                std::cout << "\nDaemon connection closed." << std::endl;
+                break;
+            }
+            if (status == ds4ipc::ReadStatus::Data) {
                 size_t nl;
                 while ((nl = rx_accum.find('\n')) != std::string::npos) {
                     std::string line = rx_accum.substr(0, nl);
@@ -638,26 +603,18 @@ static int run_test_ui() {
                     } else if (line.rfind("CAVEAT ", 0) == 0) {
                         caveats.push_back(line.substr(7));
                     } else if (line.rfind("STATE ", 0) == 0) {
-                        char source[16];
-                        unsigned x, y, rxv, ry, z, rz, b0, b1, b2;
-                        // sscanf over strtoul: this is our own daemon's line-oriented
-                        // status protocol over a local control socket, not adversarial
-                        // input -- the nf==10 field-count check below is the validation
-                        // that matters here, and a strtoul-chain rewrite for 10 fields
-                        // buys no real safety over that.
-                        int nf = sscanf(line.c_str(), "STATE %15s %u %u %u %u %u %u %x %x %x", // NOLINT(cert-err34-c,bugprone-unchecked-string-to-number-conversion)
-                                        source, &x, &y, &rxv, &ry, &z, &rz, &b0, &b1, &b2);
-                        if (nf == 10) {
+                        ds4ipc::InputState parsed;
+                        if (ds4ipc::parse_state(line, &parsed)) {
                             st.have_state = true;
-                            st.source = source;
-                            st.lx = (uint8_t)x;  st.ly = (uint8_t)y;
-                            st.rx = (uint8_t)rxv; st.ry = (uint8_t)ry;
-                            st.l2 = (uint8_t)z;  st.r2 = (uint8_t)rz;
-                            st.ui = decode_raw_state((uint8_t)b0, (uint8_t)b1, (uint8_t)b2);
+                            st.in = parsed;
                         }
-                    } else if (line.rfind("NOTE ", 0) == 0) {
+                    } else if (ds4ipc::parse_timing(line, &st.timing)) {
+                        st.have_timing = true;
+                    } else if (ds4ipc::parse_note(line, nullptr, &note_text)) {
+                        // Plain `test` follows one source, so whichever note
+                        // arrives is about the source being shown.
                         st.have_state = false;
-                        st.note = line.substr(5);
+                        st.note = note_text;
                     } else if (line.rfind("EVENT ", 0) == 0) {
                         time_t t = time(nullptr);
                         struct tm tmv;
@@ -787,10 +744,6 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         std::string ctrl = argv[2];
-        if (ctrl != "ds4" && ctrl != "dualsense") {
-            std::cerr << "Error: Invalid controller type. Supported: ds4 dualsense" << std::endl;
-            return 1;
-        }
         std::string name_arg;
         if (std::string(argv[3]) == "--reset") {
             name_arg = "--reset";
@@ -799,20 +752,16 @@ int main(int argc, char* argv[]) {
                 if (i > 3) name_arg += " ";
                 name_arg += argv[i];
             }
-            if (name_arg.find('\n') != std::string::npos || name_arg.find('\r') != std::string::npos) {
-                std::cerr << "Error: name cannot contain newline characters." << std::endl;
-                return 1;
-            }
-            if (name_arg.size() > 63) {
-                std::cerr << "Error: name too long (" << name_arg.size() << " bytes, max 63)." << std::endl;
-                return 1;
-            }
         }
-        std::cerr << "Warning: changing the controller name recreates the virtual device if that type is "
-                      "currently active -- any app/game reading it will see a brief input interruption."
-                   << std::endl;
+        std::string build_error;
+        std::string command = ds4ipc::build_set_name(ctrl, name_arg, &build_error);
+        if (command.empty()) {
+            std::cerr << "Error: " << build_error << std::endl;
+            return 1;
+        }
+        std::cerr << "Warning: " << ds4ipc::kSetNameWarning << std::endl;
         std::string response;
-        if (!send_command("set-name " + ctrl + " " + name_arg, response)) {
+        if (!send_command(command, response)) {
             std::cerr << response << std::endl;
             print_daemon_unreachable_help();
             return 1;
@@ -850,26 +799,57 @@ int main(int argc, char* argv[]) {
         return run_test_ui();
     }
 
+    // The set-* commands build their command string through ds4ipc so their
+    // accepted values are defined once, for every front-end. create-virtual
+    // keeps the spec table: it shares set-type's argument name but not its
+    // value list (no none/hidden).
     std::string full_cmd = cmd;
+    std::string build_error;
     if (cmd == "set-backend") {
         if (argc < 4) {
             std::cerr << "Error: set-backend requires <ds4|dualsense> <uhid|functionfs>" << std::endl;
             return 1;
         }
-        std::string ctrl = argv[2];
-        std::string backend = argv[3];
-        if (ctrl != "ds4" && ctrl != "dualsense") {
-            std::cerr << "Error: Invalid controller type. Supported: ds4 dualsense" << std::endl;
-            return 1;
-        }
-        if (backend != "uhid" && backend != "functionfs") {
-            std::cerr << "Error: Invalid backend. Supported: uhid functionfs" << std::endl;
-            return 1;
-        }
-        full_cmd += " " + ctrl + " " + backend;
-    } else if (cmd == "set-type" || cmd == "create-virtual") {
+        full_cmd = ds4ipc::build_set_backend(argv[2], argv[3], &build_error);
+    } else if (cmd == "set-type") {
         if (argc < 3) {
-            std::cerr << "Error: " << cmd << " requires a target type (" << spec->arg_completions << ")" << std::endl;
+            std::cerr << "Error: set-type requires a target type ("
+                      << ds4ipc::join_values(ds4ipc::type_values()) << ")" << std::endl;
+            return 1;
+        }
+        full_cmd = ds4ipc::build_set_type(argv[2], &build_error);
+    } else if (cmd == "set-hide-method") {
+        if (argc < 3) {
+            std::cerr << "Error: set-hide-method requires "
+                      << ds4ipc::join_values(ds4ipc::hide_method_values()) << std::endl;
+            return 1;
+        }
+        full_cmd = ds4ipc::build_set_hide_method(argv[2], &build_error);
+    } else if (cmd == "led") {
+        if (argc >= 3 && std::string(argv[2]) == "--reset") {
+            full_cmd = ds4ipc::kLedResetCommand;
+        } else if (argc < 7) {
+            std::cerr << "Error: led requires <r> <g> <b> <rumble-left> <rumble-right> (each 0-255), "
+                          "or --reset" << std::endl;
+            return 1;
+        } else {
+            int values[5];
+            for (int i = 0; i < 5; ++i) {
+                char *end = nullptr;
+                long parsed = strtol(argv[2 + i], &end, 10);
+                if (end == argv[2 + i] || *end != '\0' || parsed < 0 || parsed > 255) {
+                    std::cerr << "Error: led values must be whole numbers 0-255" << std::endl;
+                    return 1;
+                }
+                values[i] = static_cast<int>(parsed);
+            }
+            full_cmd = ds4ipc::build_led(values[0], values[1], values[2], values[3], values[4],
+                                          &build_error);
+        }
+    } else if (cmd == "create-virtual") {
+        if (argc < 3) {
+            std::cerr << "Error: create-virtual requires a target type (" << spec->arg_completions
+                      << ")" << std::endl;
             return 1;
         }
         std::string type = argv[2];
@@ -878,17 +858,10 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         full_cmd += " " + type;
-    } else if (cmd == "set-hide-method") {
-        if (argc < 3) {
-            std::cerr << "Error: set-hide-method requires " << spec->arg_completions << std::endl;
-            return 1;
-        }
-        std::string method = argv[2];
-        if (!is_in_list(method, spec->arg_completions)) {
-            std::cerr << "Error: Invalid hide method. Supported: " << spec->arg_completions << std::endl;
-            return 1;
-        }
-        full_cmd += " " + method;
+    }
+    if (full_cmd.empty()) {
+        std::cerr << "Error: " << build_error << std::endl;
+        return 1;
     }
     // status/destroy-virtual/release-physical/resume-physical take no args;
     // full_cmd is already just the command name.

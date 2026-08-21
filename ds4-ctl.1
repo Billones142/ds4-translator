@@ -30,6 +30,18 @@ Overrides the controller name/product string reported to the OS for that control
 .B set-name <ds4|dualsense> --reset
 Restores the default Sony name for that controller type.
 .TP
+.B identify
+Blinks the physical controller's light bar three times and pulses its heavy motor once, so you can tell which pad the daemon is holding.
+.TP
+.B led <r> <g> <b> <rumble-left> <rumble-right>
+Sends a light bar colour and rumble levels (each 0-255) straight to the physical controller, to test them. Not a setting: the next output report from the emulated device overwrites it.
+.TP
+.B led --reset
+Hands the light bar and motors straight back to the emulated device.
+.TP
+.B test
+Live-monitors the active controller: button, stick, touchpad and motion state, the physical controller's report rate and the delay the daemon adds, plus a log of the LED/rumble commands sent to it.
+.TP
 .B help
 Shows basic usage and command synopsis.
 .SH FILES

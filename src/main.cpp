@@ -33,6 +33,7 @@
 #include "hid-unbind-detect.h"
 #include "usb-hid-transport.h"
 #include "hid-bpf-transport.h"
+#include "ipc-client.h"
 
 #ifndef DS4_VERSION
 #define DS4_VERSION "unknown"
@@ -1229,6 +1230,9 @@ uint8_t sequence_number = 0;
 // can inspect what a game would currently see without needing its own
 // separate read path into the report-forwarding logic below.
 struct dualshock4_input_report_common last_virtual_common;
+// Newest touch report of the batch that came with it (the pad reports up to
+// two contacts per report, and several timestamped reports per packet).
+struct dualshock4_touch_report last_virtual_touch;
 bool last_virtual_valid = false;
 // Mirrors `!test_subscribers.empty()` so emit_input_report() (a free
 // function with no access to main()'s locals) can skip the copy above
@@ -1409,6 +1413,19 @@ void emit_input_report(ControllerType type, const struct dualshock4_input_report
                         bool has_real_battery) {
     if (g_has_test_subscribers) {
         last_virtual_common = common;
+        // Only the newest report of the batch: the older ones are the same
+        // fingers a few milliseconds earlier.
+        memset(&last_virtual_touch, 0, sizeof(last_virtual_touch));
+        if (num_touch > 0) {
+            int newest = num_touch - 1;
+            if (newest > 3) newest = 3;
+            last_virtual_touch = touch_reps[newest];
+        } else {
+            // No contact data at all: mark both slots as not touched, which is
+            // the 0x80 bit rather than the zero memset above.
+            last_virtual_touch.points[0].contact = 0x80;
+            last_virtual_touch.points[1].contact = 0x80;
+        }
         last_virtual_valid = true;
     }
 
@@ -1763,12 +1780,55 @@ int main(int argc, char* argv[]) {
     // physical passthrough — currently looks like) plus an EVENT line
     // whenever an LED/rumble output report actually changes something.
     // Kept local to main() since nothing outside the poll loop touches it.
-    std::vector<int> test_subscribers;
+    //
+    // `all` subscribers (the "test all" command, used by the Qt UI's test
+    // view) get both sources every tick and choose between them themselves;
+    // plain `test` keeps sending only the active one, which is what ds4-ctl's
+    // terminal monitor has always shown.
+    struct TestSubscriber {
+        int fd;
+        bool all;
+    };
+    std::vector<TestSubscriber> test_subscribers;
+
+    // Report timing of the physical controller, measured only while someone
+    // is watching (a clock read per report is cheap, but the hot path stays
+    // untouched when nothing needs the numbers).
+    //
+    // "interval" is the gap between two physical reports -- its inverse is the
+    // rate the controller actually reports at, which differs by connection
+    // (USB and Bluetooth are not the same) and is not something the daemon
+    // gets to choose. "latency" is what the daemon itself adds: the time from
+    // having read a physical report to having written the emulated one.
+    struct TimingWindow {
+        uint32_t reports = 0;
+        uint64_t interval_sum_us = 0;
+        uint32_t interval_min_us = 0;
+        uint32_t interval_max_us = 0;
+        uint64_t latency_sum_us = 0;
+        uint32_t latency_max_us = 0;
+        uint32_t latency_samples = 0;
+    };
+    TimingWindow timing;
+
+    // Last light bar/rumble state sent to subscribers. The values only change
+    // when a game (or the daemon itself) asks for something new, so they are
+    // broadcast on change rather than every tick.
+    ds4ipc::OutputState broadcast_output;
+    bool broadcast_output_valid = false;
+    auto timing_window_start = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point last_report_time;
+    bool have_last_report_time = false;
+    constexpr auto TIMING_WINDOW = std::chrono::seconds(1);
     std::deque<std::string> test_event_log; // small ring buffer replayed to new subscribers
     constexpr size_t TEST_EVENT_LOG_MAX = 20;
 
     struct dualshock4_input_report_common last_phy_common;
+    struct dualshock4_touch_report last_phy_touch;
     memset(&last_phy_common, 0, sizeof(last_phy_common));
+    memset(&last_phy_touch, 0, sizeof(last_phy_touch));
+    last_phy_touch.points[0].contact = 0x80;
+    last_phy_touch.points[1].contact = 0x80;
     bool last_phy_valid = false;
 
     auto test_log_event = [&](const std::string& line) {
@@ -1776,8 +1836,8 @@ int main(int argc, char* argv[]) {
         if (test_event_log.size() > TEST_EVENT_LOG_MAX) test_event_log.pop_front();
         std::string msg = "EVENT " + line + "\n";
         for (auto it = test_subscribers.begin(); it != test_subscribers.end(); ) {
-            if (write(*it, msg.c_str(), msg.size()) < 0) {
-                close(*it);
+            if (write(it->fd, msg.c_str(), msg.size()) < 0) {
+                close(it->fd);
                 it = test_subscribers.erase(it);
             } else {
                 ++it;
@@ -1788,32 +1848,108 @@ int main(int argc, char* argv[]) {
 
     auto test_broadcast_state = [&]() {
         if (test_subscribers.empty()) return;
-        std::string line;
+        // Formatted by the shared protocol client, the same code the readers
+        // (ds4-ctl test, the Qt live view) parse it with.
+        auto state_line = [](const char *source, const struct dualshock4_input_report_common& c,
+                              const struct dualshock4_touch_report& t) {
+            // Copied out field by field: the report is packed, so passing
+            // pointers into it would mean taking the address of a possibly
+            // unaligned member.
+            ds4ipc::InputState state;
+            state.lx = c.x;
+            state.ly = c.y;
+            state.rx = c.rx;
+            state.ry = c.ry;
+            state.l2 = c.z;
+            state.r2 = c.rz;
+            const uint8_t button_bytes[3] = {c.buttons[0], c.buttons[1], c.buttons[2]};
+            ds4ipc::decode_buttons(button_bytes, &state.buttons, &state.dpad);
+            for (int i = 0; i < 3; ++i) {
+                state.gyro[i] = c.gyro[i];
+                state.accel[i] = c.accel[i];
+            }
+            for (int i = 0; i < 2; ++i) {
+                const struct dualshock4_touch_point& p = t.points[i];
+                const uint8_t point_bytes[4] = {
+                    p.contact, p.x_lo, static_cast<uint8_t>(p.x_hi | (p.y_lo << 4)), p.y_hi};
+                state.touch[i] = ds4ipc::decode_touch_point(point_bytes);
+            }
+            return ds4ipc::format_state_line(source, state);
+        };
+        // Both sources are prepared every tick: the emulated device and the
+        // physical controller are independent things to look at, and which
+        // one a subscriber wants is its own business.
+        std::string virtual_line;
         if (controller_type_emulates(target_type)) {
             bool vdev_exists = (backend_type == BACKEND_FUNCTIONFS) ? virtual_functionfs.device_open : (uhid_fd >= 0);
             if (vdev_exists && last_virtual_valid) {
-                char buf[160];
-                (void)snprintf(buf, sizeof(buf), "STATE VIRTUAL %u %u %u %u %u %u %02x %02x %02x\n",
-                         last_virtual_common.x, last_virtual_common.y, last_virtual_common.rx, last_virtual_common.ry,
-                         last_virtual_common.z, last_virtual_common.rz,
-                         last_virtual_common.buttons[0], last_virtual_common.buttons[1], last_virtual_common.buttons[2]);
-                line = buf;
+                virtual_line = state_line("VIRTUAL", last_virtual_common, last_virtual_touch);
             } else {
-                line = "NOTE No active virtual controller yet (connect the physical controller, or run 'ds4-ctl create-virtual').\n";
+                virtual_line = "NOTE VIRTUAL No active virtual controller yet (connect the physical controller, or run 'ds4-ctl create-virtual').\n";
             }
-        } else if (last_phy_valid) {
-            char buf[160];
-            (void)snprintf(buf, sizeof(buf), "STATE PHYSICAL %u %u %u %u %u %u %02x %02x %02x\n",
-                     last_phy_common.x, last_phy_common.y, last_phy_common.rx, last_phy_common.ry,
-                     last_phy_common.z, last_phy_common.rz,
-                     last_phy_common.buttons[0], last_phy_common.buttons[1], last_phy_common.buttons[2]);
-            line = buf;
         } else {
-            line = "NOTE No physical controller connected.\n";
+            virtual_line = "NOTE VIRTUAL Emulation is off (type=" + std::string(controller_type_config_str(target_type)) +
+                            "); the physical controller is passed through instead.\n";
         }
+        std::string physical_line;
+        if (last_phy_valid) {
+            physical_line = state_line("PHYSICAL", last_phy_common, last_phy_touch);
+        } else if (phy_fd < 0) {
+            physical_line = "NOTE PHYSICAL No physical controller connected.\n";
+        } else {
+            // Open but silent: Bluetooth under the unbind hide method has no
+            // live transport, so its reports never reach us.
+            physical_line = "NOTE PHYSICAL No reports from the physical controller yet.\n";
+        }
+        // What plain `test` has always sent: whichever source is the active
+        // one, on its own.
+        const std::string& active_line = controller_type_emulates(target_type) ? virtual_line : physical_line;
+        std::string both_lines = virtual_line + physical_line;
+
+        // What the emulated device is asking the light bar and motors to do.
+        // Sent on change: a view that mirrors it (the UI's light bar tester)
+        // needs to follow a game moving it, without a line per tick.
+        ds4ipc::OutputState output;
+        output.red = cur_r;
+        output.green = cur_g;
+        output.blue = cur_b;
+        output.rumble_left = cur_motor_left;
+        output.rumble_right = cur_motor_right;
+        std::string output_line;
+        if (!broadcast_output_valid || output.red != broadcast_output.red ||
+            output.green != broadcast_output.green || output.blue != broadcast_output.blue ||
+            output.rumble_left != broadcast_output.rumble_left ||
+            output.rumble_right != broadcast_output.rumble_right) {
+            broadcast_output = output;
+            broadcast_output_valid = true;
+            output_line = ds4ipc::format_output_line(output);
+        }
+
+        // Once a second, what the last window of physical reports looked like.
+        // Sent to every subscriber: an older reader ignores lines it does not
+        // recognise, exactly as it already does for EVENT.
+        std::string timing_line;
+        auto now = std::chrono::steady_clock::now();
+        if (now - timing_window_start >= TIMING_WINDOW) {
+            auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                  now - timing_window_start).count();
+            timing_line = ds4ipc::format_timing_line(
+                timing.reports, static_cast<uint64_t>(elapsed_us),
+                timing.reports > 0 ? static_cast<uint32_t>(timing.interval_sum_us / timing.reports) : 0,
+                timing.interval_min_us, timing.interval_max_us,
+                timing.latency_samples > 0
+                    ? static_cast<uint32_t>(timing.latency_sum_us / timing.latency_samples) : 0,
+                timing.latency_max_us);
+            timing = TimingWindow();
+            timing_window_start = now;
+        }
+        both_lines += output_line + timing_line;
+
+        const std::string single_payload = active_line + output_line + timing_line;
         for (auto it = test_subscribers.begin(); it != test_subscribers.end(); ) {
-            if (write(*it, line.c_str(), line.size()) < 0) {
-                close(*it);
+            const std::string& payload = it->all ? both_lines : single_payload;
+            if (write(it->fd, payload.c_str(), payload.size()) < 0) {
+                close(it->fd);
                 it = test_subscribers.erase(it);
             } else {
                 ++it;
@@ -2407,7 +2543,76 @@ int main(int argc, char* argv[]) {
                                 response = "Error: failed to open HID-bus uevent monitor; staying on legacy hide method.";
                             }
                         }
-                    } else if (cmd == "test") {
+                    } else if (cmd == "identify") {
+                        if (phy_fd < 0) {
+                            response = "Error: No physical controller connected.";
+                        } else {
+                            // Detached, like the reconnect path above: this
+                            // blinks over about a second, and a Bluetooth
+                            // hidraw write can block for a while on its own.
+                            // The light bar is handed back to cur_r/g/b at the
+                            // end, so a game's colour survives the blinking.
+                            int dup_fd = dup(phy_fd);
+                            if (dup_fd < 0) {
+                                response = "Error: failed to open the controller for writing.";
+                            } else {
+                                std::thread([fd = dup_fd, bt = is_bluetooth]() {
+                                    for (int i = 0; i < 3; ++i) {
+                                        // First blink also pulses the heavy
+                                        // motor: on a controller across the
+                                        // room the light alone is easy to miss.
+                                        send_physical_output_report(fd, bt, i == 0 ? 160 : 0, 0,
+                                                                     255, 255, 255);
+                                        usleep(180000);
+                                        send_physical_output_report(fd, bt, 0, 0, 0, 0, 0);
+                                        usleep(180000);
+                                    }
+                                    send_physical_output_report(fd, bt, cur_motor_left,
+                                                                 cur_motor_right, cur_r, cur_g,
+                                                                 cur_b);
+                                    close(fd);
+                                }).detach();
+                                response = "OK: Light bar blinking on the physical controller.";
+                            }
+                        }
+                    } else if (cmd == "led --reset") {
+                        if (phy_fd < 0) {
+                            response = "Error: No physical controller connected.";
+                        } else {
+                            // Back to whatever the emulated device last asked
+                            // for; the next output report from a game replaces
+                            // it anyway.
+                            send_physical_output_report(phy_fd, is_bluetooth, cur_motor_left,
+                                                         cur_motor_right, cur_r, cur_g, cur_b);
+                            response = "OK: Light bar and motors handed back to the emulated device.";
+                        }
+                    } else if (cmd.rfind("led ", 0) == 0) {
+                        unsigned int red = 0, green = 0, blue = 0, left = 0, right = 0;
+                        std::istringstream iss(cmd.substr(4));
+                        std::vector<std::string> toks;
+                        for (std::string t; iss >> t; ) toks.push_back(t);
+                        bool parsed = toks.size() == 5 &&
+                            parse_unsigned_token(toks[0], 10, red) &&
+                            parse_unsigned_token(toks[1], 10, green) &&
+                            parse_unsigned_token(toks[2], 10, blue) &&
+                            parse_unsigned_token(toks[3], 10, left) &&
+                            parse_unsigned_token(toks[4], 10, right);
+                        if (!parsed || red > 255 || green > 255 || blue > 255 || left > 255 ||
+                            right > 255) {
+                            response = "Error: led takes <r> <g> <b> <rumble-left> <rumble-right>, each 0-255";
+                        } else if (phy_fd < 0) {
+                            response = "Error: No physical controller connected.";
+                        } else {
+                            // Deliberately does not touch cur_r/g/b: this is a
+                            // test of the hardware, not a new state to keep --
+                            // the next output report from the emulated device
+                            // takes the controller straight back.
+                            send_physical_output_report(phy_fd, is_bluetooth, (uint8_t)left,
+                                                         (uint8_t)right, (uint8_t)red,
+                                                         (uint8_t)green, (uint8_t)blue);
+                            response = "OK: Sent to the physical controller.";
+                        }
+                    } else if (cmd == "test" || cmd == "test all") {
                         // Turns this connection into a live push stream instead of a
                         // one-shot request/response: client_fd is handed off to
                         // test_subscribers (see the lambdas declared near the top of
@@ -2415,6 +2620,11 @@ int main(int argc, char* argv[]) {
                         // line plus an EVENT line on every LED/rumble change until it
                         // disconnects (ds4-ctl's `test` command runs until Ctrl+C).
                         fcntl(client_fd, F_SETFL, O_NONBLOCK);
+                        // "test all": the subscriber follows both the emulated
+                        // and the physical controller and picks between them
+                        // itself, so the header names the active one only as
+                        // information.
+                        const bool wants_all = (cmd == "test all");
                         std::string header = "OK: Test monitor active. Type=" + std::string(controller_type_name(target_type));
                         if (controller_type_emulates(target_type)) {
                             header += " Source=Virtual controller\n";
@@ -2426,13 +2636,24 @@ int main(int argc, char* argv[]) {
                                       "CAVEAT type=none is full passthrough -- LED/rumble commands other apps send directly\n"
                                       "CAVEAT to the physical controller can't be observed here.\n";
                         }
+                        // Current light bar/rumble state up front: it is only
+                        // broadcast on change, so a subscriber that connects
+                        // between changes would otherwise wait for a game to
+                        // touch it before knowing anything.
+                        ds4ipc::OutputState current_output;
+                        current_output.red = cur_r;
+                        current_output.green = cur_g;
+                        current_output.blue = cur_b;
+                        current_output.rumble_left = cur_motor_left;
+                        current_output.rumble_right = cur_motor_right;
+                        header += ds4ipc::format_output_line(current_output);
                         keep_open = true;
                         if (write(client_fd, header.c_str(), header.size()) >= 0) {
                             for (const auto& ev : test_event_log) {
                                 std::string msg = "EVENT " + ev + "\n";
                                 if (write(client_fd, msg.c_str(), msg.size()) < 0) break; // dead fd; later ticks will drop it
                             }
-                            test_subscribers.push_back(client_fd);
+                            test_subscribers.push_back(TestSubscriber{client_fd, wants_all});
                             g_has_test_subscribers = true;
                         } else {
                             close(client_fd);
@@ -2692,12 +2913,55 @@ int main(int argc, char* argv[]) {
                 }
 
                 if (got_report) {
+                    std::chrono::steady_clock::time_point report_time;
+                    if (g_has_test_subscribers) {
+                        report_time = std::chrono::steady_clock::now();
+                        if (have_last_report_time) {
+                            auto gap = std::chrono::duration_cast<std::chrono::microseconds>(
+                                           report_time - last_report_time).count();
+                            uint32_t gap_us = gap > 0 ? static_cast<uint32_t>(gap) : 0;
+                            if (timing.reports == 0 || gap_us < timing.interval_min_us) {
+                                timing.interval_min_us = gap_us;
+                            }
+                            if (gap_us > timing.interval_max_us) {
+                                timing.interval_max_us = gap_us;
+                            }
+                            timing.interval_sum_us += gap_us;
+                            timing.reports++;
+                        }
+                        last_report_time = report_time;
+                        have_last_report_time = true;
+                    } else {
+                        have_last_report_time = false;
+                    }
                     if (g_has_test_subscribers) {
                         last_phy_common = common;
+                        memset(&last_phy_touch, 0, sizeof(last_phy_touch));
+                        if (num_touch > 0) {
+                            int newest = num_touch - 1;
+                            if (newest > 3) newest = 3;
+                            last_phy_touch = touch_reps[newest];
+                        } else {
+                            last_phy_touch.points[0].contact = 0x80;
+                            last_phy_touch.points[1].contact = 0x80;
+                        }
                         last_phy_valid = true;
                     }
                     if (vdev_ready_for_io()) {
                         emit_input_report(target_type, common, num_touch, touch_reps, true);
+                        if (g_has_test_subscribers) {
+                            // Translation cost only: the write to the emulated
+                            // device has returned, what the game does with it
+                            // afterwards is beyond anything measurable here.
+                            auto spent = std::chrono::duration_cast<std::chrono::microseconds>(
+                                             std::chrono::steady_clock::now() - report_time).count();
+                            uint32_t spent_us = spent > 0 ? static_cast<uint32_t>(spent) : 0;
+                            timing.latency_sum_us += spent_us;
+                            if (spent_us > timing.latency_max_us) {
+                                timing.latency_max_us = spent_us;
+                            }
+                            timing.latency_samples++;
+                        }
                     }
                 }
             }
@@ -2960,8 +3224,8 @@ int main(int argc, char* argv[]) {
     stop_bt_output_pacer();
 
     // Clean up Unix socket
-    for (int fd : test_subscribers) {
-        close(fd);
+    for (const TestSubscriber& subscriber : test_subscribers) {
+        close(subscriber.fd);
     }
     if (server_fd >= 0) {
         close(server_fd);

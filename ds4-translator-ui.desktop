@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=DS4 Translator
+GenericName=Controller Settings
+Comment=Configure the DualShock 4 to virtual controller translation daemon
+Exec=ds4-translator-ui
+Icon=input-gaming
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=controller;gamepad;dualshock;dualsense;playstation;
+# Must match QGuiApplication::setDesktopFileName() and the window class the
+# app reports, so the desktop portal can find this app's info (without it:
+# "Could not register app ID: App info not found for 'ds4-translator-ui'")
+# and the window is matched to this entry.
+StartupWMClass=ds4-translator-ui
