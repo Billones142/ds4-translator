@@ -2,7 +2,9 @@ name: Release
 
 # Builds ds4-translator/ds4-ctl and publishes a downloadable tarball whenever
 # a version tag (v*) is pushed to main, so users can install without needing
-# a compiler (see README's "Download a release" instructions).
+# a compiler. install.sh at the repo root downloads and installs this asset
+# (see README's "One-line install from a release"), and derives the asset
+# name from the tag exactly as DIST_NAME does below -- keep the two in sync.
 on:
   push:
     tags:
