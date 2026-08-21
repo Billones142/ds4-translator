@@ -1,69 +1,43 @@
 #!/bin/sh
 # One-line installer for ds4-translator. Downloads a prebuilt release
-# tarball from GitHub and runs the Makefile's install target on it, so no
-# compiler is needed (the release ships the already-built binaries, with
-# mtimes newer than the sources, so make has nothing to rebuild).
+# tarball from GitHub and runs `make install` on it, so no compiler is
+# needed: the release ships the already-built daemon, ds4-ctl and Qt UI
+# binaries, and the Makefile skips every build step when it sees them.
 #
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/Billones142/ds4-translator/main/install.sh | sh
-#   curl -fsSL .../install.sh | sh -s -- --version v1.2.3
-#   curl -fsSL .../install.sh | sh -s -- --with-ui
+# Which version gets installed is decided by the URL this script came from:
+#
+#   latest release
+#     curl -fsSL https://raw.githubusercontent.com/Billones142/ds4-translator/main/install.sh | sh
+#   a specific release (the tag in the URL is the version installed)
+#     curl -fsSL https://github.com/Billones142/ds4-translator/releases/download/v1.2.3/install.sh | sh
+#
+# That works because the release workflow publishes a copy of this script
+# as a per-release asset with PINNED_VERSION rewritten to that tag. The
+# copy on main keeps the placeholder below empty and asks the GitHub API
+# for the latest release instead.
 #
 # POSIX sh on purpose: this is piped straight into whatever /bin/sh is.
 set -eu
+
+# Rewritten to the release tag by .github/workflows/release.yml when this
+# script is published as a release asset. Empty here on purpose -- do not
+# set it by hand; the workflow greps for this exact empty-string line.
+PINNED_VERSION=""
 
 REPO="Billones142/ds4-translator"
 API="https://api.github.com/repos/${REPO}"
 DOWNLOAD="https://github.com/${REPO}/releases/download"
 
-# Overridable by --version; DS4_VERSION allows the same choice from the
-# environment, which is the only way to pass it when the script is piped
-# without `sh -s --`.
-VERSION="${DS4_VERSION:-}"
-# The release tarball only carries `make all` output (daemon, ds4-ctl,
-# spoof libs, BPF object) and not the Qt UI, so the default target is
-# install-cli. --with-ui switches to `install`, which builds the UI from
-# the shipped sources and therefore does need Qt 6 + CMake.
-MAKE_TARGET="install-cli"
-
 log() { printf '==> %s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
-
-usage() {
-    cat <<'EOF'
-Install ds4-translator from a prebuilt GitHub release.
-
-Options:
-  -v, --version <tag>  Install this release tag (e.g. v1.2.3).
-                       Defaults to the latest release.
-                       Equivalent env var: DS4_VERSION.
-      --with-ui        Also build and install the Qt 6 settings UI
-                       (requires Qt 6 and CMake).
-  -h, --help           Show this help.
-EOF
-}
-
-while [ $# -gt 0 ]; do
-    case "$1" in
-        -v|--version)
-            [ $# -ge 2 ] || die "--version needs a release tag (e.g. v1.2.3)"
-            VERSION="$2"
-            shift 2
-            ;;
-        --version=*) VERSION="${1#*=}"; shift ;;
-        --with-ui)   MAKE_TARGET="install"; shift ;;
-        -h|--help)   usage; exit 0 ;;
-        *)           die "unknown option: $1 (try --help)" ;;
-    esac
-done
 
 for cmd in curl tar make; do
     command -v "$cmd" >/dev/null 2>&1 || die "'$cmd' is required but not installed"
 done
 
-# Everything the Makefile's install target does (writing under /usr/local
-# and /etc, reloading udev and systemd) needs root, so the whole make step
-# runs under sudo rather than re-prompting per file.
+# Everything `make install` does (writing under /usr/local and /etc,
+# reloading udev, enabling and starting the systemd service) needs root, so
+# the whole make step runs under sudo rather than re-prompting per file.
 if [ "$(id -u)" -eq 0 ]; then
     SUDO=""
 else
@@ -71,6 +45,7 @@ else
     SUDO="sudo"
 fi
 
+VERSION="$PINNED_VERSION"
 if [ -z "$VERSION" ]; then
     log "Resolving latest release"
     # tag_name rather than the asset URL: the tarball name is derived from
@@ -79,7 +54,7 @@ if [ -z "$VERSION" ]; then
     VERSION=$(curl -fsSL "${API}/releases/latest" \
         | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
         | head -n 1)
-    [ -n "$VERSION" ] || die "could not determine the latest release tag (GitHub API rate limit? pass --version <tag>)"
+    [ -n "$VERSION" ] || die "could not determine the latest release tag (GitHub API rate limit? install from a release-specific install.sh URL instead)"
 fi
 
 DIST_NAME="ds4-translator-${VERSION}"
@@ -96,7 +71,7 @@ log "Extracting"
 tar -xzf "${WORK_DIR}/${DIST_NAME}.tar.gz" -C "$WORK_DIR"
 [ -d "${WORK_DIR}/${DIST_NAME}" ] || die "unexpected archive layout: ${DIST_NAME}/ not found"
 
-log "Installing (make ${MAKE_TARGET}; sudo may ask for your password)"
-$SUDO make -C "${WORK_DIR}/${DIST_NAME}" "$MAKE_TARGET"
+log "Installing (make install; sudo may ask for your password)"
+$SUDO make -C "${WORK_DIR}/${DIST_NAME}" install
 
 log "Installed ds4-translator ${VERSION}. Check it with: ds4-ctl status"

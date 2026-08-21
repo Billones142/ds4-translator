@@ -39,51 +39,45 @@ ends up active.
 
 ### Option 1: One-line install from a release (recommended)
 
-Downloads the latest prebuilt release tarball (no compiler needed) and installs it:
+Installs the latest release. No compiler needed — the release ships the
+already-built daemon, `ds4-ctl` and Qt settings UI:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Billones142/ds4-translator/main/install.sh | sh
 ```
 
-The script downloads into a temporary directory, runs `sudo make install-cli`
-on it (so it asks for your password) and cleans up after itself. It installs
-the daemon, `ds4-ctl` and the systemd service, then enables and starts the
-service.
+The script downloads the release tarball into a temporary directory, runs
+`sudo make install` on it (so it asks for your password) and cleans up after
+itself. That installs the daemon, `ds4-ctl`, the settings UI, the udev rule
+and the systemd service, then enables and starts the service.
 
 #### Installing a specific version
 
-Pass a release tag with `--version`. Because the script is piped into `sh`,
-its own arguments go after `sh -s --`:
+The version comes from the URL: every release publishes its own copy of the
+installer, and that copy installs exactly that release. Swap the tag in the
+path for the one you want:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Billones142/ds4-translator/main/install.sh \
-  | sh -s -- --version v0.6.0
+curl -fsSL https://github.com/Billones142/ds4-translator/releases/download/v0.6.0/install.sh | sh
 ```
 
-The equivalent environment variable works too, which is handy when the
-piping syntax gets in the way:
-```bash
-curl -fsSL https://raw.githubusercontent.com/Billones142/ds4-translator/main/install.sh \
-  | DS4_VERSION=v0.6.0 sh
-```
-
-Tags must match a published release — see
-[the releases page](https://github.com/Billones142/ds4-translator/releases).
-Downgrading is just installing an older tag; the installer overwrites
-whatever is currently installed.
-
-#### Other options
-
-- `--with-ui` also builds and installs the Qt 6 settings UI. The release
-  tarball ships the UI *sources* but not a built UI binary, so this one does
-  need Qt 6 and CMake.
-- `--help` lists everything the script accepts.
+Available tags are on
+[the releases page](https://github.com/Billones142/ds4-translator/releases) —
+any release whose assets include an `install.sh` can be installed this way.
+Downgrading is just running an older tag's URL; the installer overwrites
+whatever is currently installed and restarts the service.
 
 Prefer to read before running? The script is
-[`install.sh`](install.sh) in this repository; download it, review it, and
+[`install.sh`](install.sh) in this repository — download it, review it, and
 run it manually if you like.
 
-> Even for the prebuilt path, the Makefile checks for `pkg-config`,
-> `libusb-1.0`, `libbpf`, `bpftool` and `clang` when it is parsed, so those
-> packages must be present even though nothing is compiled.
+Two things the prebuilt path still expects from your system:
+
+- The Makefile checks for `pkg-config`, `libusb-1.0`, `libbpf`, `bpftool` and
+  `clang` when it is parsed, so those packages must be present even though
+  nothing is compiled.
+- The shipped settings UI binary is dynamically linked against Qt 6, so
+  running it needs the Qt 6 runtime libraries (Core, Gui, Quick,
+  QuickControls2, Widgets, Svg). The daemon itself does not. If your distro's
+  Qt is older than the build's, build from source instead (Option 2).
 
 ### Option 2: Clone and build from source
 ```bash

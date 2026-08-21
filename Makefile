@@ -149,9 +149,20 @@ clean:
 # `install-cli` there instead.
 # Always delegated: CMake already does its own up-to-date checking, so
 # there is nothing for make to track here.
+#
+# Except in an extracted release tarball, which ships both a VERSION file
+# (written by the release workflow) and an already-built UI binary. Those
+# two together mean "prebuilt release, not a source checkout", so the
+# cmake/Qt step is skipped -- otherwise `make install` from a release
+# would demand Qt 6 + CMake on a path whose whole point is needing no
+# compiler. A real checkout has no VERSION file and always rebuilds.
 ui:
-	cmake -S ui -B $(UI_BUILD_DIR) -DCMAKE_BUILD_TYPE=Release
-	cmake --build $(UI_BUILD_DIR) -j$(shell nproc)
+	@if [ -f VERSION ] && [ -x $(UI_BINARY) ]; then \
+	    echo "Using prebuilt $(UI_BINARY) from the release tarball"; \
+	else \
+	    cmake -S ui -B $(UI_BUILD_DIR) -DCMAKE_BUILD_TYPE=Release && \
+	    cmake --build $(UI_BUILD_DIR) -j$(shell nproc); \
+	fi
 
 # The .desktop file is not cosmetic: the desktop portal looks the app up by
 # it, and without it every launch logs "App info not found for
