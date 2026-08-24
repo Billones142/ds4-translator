@@ -66,17 +66,20 @@ void print_usage() {
     std::cout << "                                   overwrites it." << std::endl;
     std::cout << "  led --reset                      Hand the light bar and motors straight back to the" << std::endl;
     std::cout << "                                   emulated device" << std::endl;
-    std::cout << "  set-hide-method <legacy|unbind>  Change how the physical controller is hidden from other" << std::endl;
-    std::cout << "                                   apps (applies on the next physical (re)connection). unbind" << std::endl;
+    std::cout << "  set-hide-method                  Change how the physical controller is hidden from other" << std::endl;
+    std::cout << "    <legacy|unbind|unlink>         apps (applies on the next physical (re)connection). unbind" << std::endl;
     std::cout << "                                   (default) hides it before any other app can see it, with" << std::endl;
     std::cout << "                                   live translation either way: USB fully unbinds the kernel" << std::endl;
     std::cout << "                                   HID driver (no hidraw/input node exists at all) and reads" << std::endl;
     std::cout << "                                   it via libusb instead; Bluetooth keeps the driver bound" << std::endl;
     std::cout << "                                   (hidraw/input nodes still exist) but uses a HID-BPF" << std::endl;
     std::cout << "                                   program to make every report invisible to them while" << std::endl;
-    std::cout << "                                   mirroring it to this daemon. legacy is the older" << std::endl;
-    std::cout << "                                   chmod/setfacl/EVIOCGRAB method -- node exists but" << std::endl;
-    std::cout << "                                   permission-blocked, for both USB and Bluetooth." << std::endl;
+    std::cout << "                                   mirroring it to this daemon. unlink is unbind plus, on" << std::endl;
+    std::cout << "                                   Bluetooth only, deleting those leftover hidraw/input/js" << std::endl;
+    std::cout << "                                   /dev entries outright, so other apps get ENOENT instead" << std::endl;
+    std::cout << "                                   of a permission error on a node that still exists." << std::endl;
+    std::cout << "                                   legacy is the older chmod/setfacl/EVIOCGRAB method --" << std::endl;
+    std::cout << "                                   node exists but permission-blocked, USB and Bluetooth." << std::endl;
 }
 
 // One command/response exchange, using the shared client in ipc-client.cpp
@@ -188,7 +191,7 @@ static const CommandSpec kCommands[] = {
     {"test",             nullptr},
     {"identify",         nullptr},
     {"led",              "--reset"},
-    {"set-hide-method",  "legacy unbind"},
+    {"set-hide-method",  "legacy unbind unlink"},
 };
 
 static const CommandSpec* find_command(const std::string& name) {

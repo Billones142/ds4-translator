@@ -36,6 +36,51 @@ To prevent games and launchers (like Steam) from receiving double-input or regis
 4. **Exclusive Grab (`EVIOCGRAB`)**: The daemon opens the event nodes and invokes `ioctl(fd, EVIOCGRAB, 1)`. This tells the kernel to route all inputs exclusively to the daemon.
 5. **Restoration on Exit**: When the physical controller disconnects or the daemon is stopped, the daemon restores the original file permission modes (usually `0660` / `0664`) of all hidraw, event, and joystick nodes so they return to normal.
 
+### 2a. Hide Methods (`ds4-ctl set-hide-method`)
+
+Which of the mechanisms above actually runs is selected by `hide_method=` in
+`/etc/ds4-translator.conf` (`ds4-ctl set-hide-method <legacy|unbind|unlink>`).
+It applies on the next physical (re)connection.
+
+| Method | USB | Bluetooth |
+| --- | --- | --- |
+| `legacy` | `chmod 0600` + `setfacl -b` + `EVIOCGRAB`; nodes exist, permission-blocked | same |
+| `unbind` (default) | kernel HID driver fully unbound, **no node ever created**; read via libusb | driver stays bound, nodes exist but are inert (HID-BPF swallows every report); siblings also chmod'd + grabbed |
+| `unlink` | identical to `unbind` — there is no node to unlink | `unbind`, plus the leftover `hidraw`/`event*`/`js*` `/dev` entries are deleted outright |
+
+The asymmetry is forced by BlueZ: the Bluetooth `hid_device` is created by
+`bluetoothd`'s input plugin writing into `/dev/uhid`, and taking the L2CAP
+session away from `bluetoothd` requires dropping the device's ACL link
+entirely — so the driver cannot simply be unbound the way the USB side is.
+`unbind` therefore neutralizes the nodes instead of removing them; `unlink`
+removes them.
+
+**How `unlink` works.** `/dev` is `devtmpfs`, where root can `unlink()` a
+device node like any other file. The unlink drops only the *path*: the
+character device itself is untouched, already-open descriptors (the daemon's
+included) keep working, and the device stays listed in sysfs. What disappears
+is the only handle other processes have on it — `libudev` enumeration still
+reports the device, but the `DEVNAME` it hands out now `open()`s to `ENOENT`,
+which Steam/SDL/the browser Gamepad API treat as "device gone" rather than
+listing a second, frozen gamepad. The `chmod`/`EVIOCGRAB` steps still run
+first, so they remain in force as a fallback.
+
+Node identity (`st_rdev`, mode, uid, gid) is captured before the unlink and
+replayed via `mknod` on teardown, so stopping the daemon is enough to get the
+pad back — `udev` would eventually recreate the node on the device's next
+uevent, but a Bluetooth controller that stays connected across a daemon
+restart never generates one.
+
+Two known limits:
+- Anything that reads `major:minor` out of sysfs and `mknod`s its own node
+  still reaches the device. No real gamepad consumer does this.
+- `udev` recreates a missing node on the next `add`/`change` uevent for the
+  device, including ones the daemon causes itself (the delayed `udevadm
+  trigger` after virtual device creation, the bare `udevadm trigger` on type
+  changes). A 500 ms sweep in the main loop (`reapply_unlinked_nodes()`)
+  re-unlinks anything that came back, so the hiding is sticky rather than
+  silently lapsing.
+
 ---
 
 ## 3. Emulating the Virtual Controller

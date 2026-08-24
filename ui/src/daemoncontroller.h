@@ -36,7 +36,7 @@ class DaemonController : public QObject {
     Q_PROPERTY(QString connectionType READ connectionType NOTIFY statusChanged)
     Q_PROPERTY(QString activeBackend READ activeBackend NOTIFY statusChanged)
     // Config-string values ("ds4"/"dualsense"/"none"/"hidden",
-    // "uhid"/"functionfs", "legacy"/"unbind") so QML can bind them straight
+    // "uhid"/"functionfs", "legacy"/"unbind"/"unlink") so QML can bind them straight
     // to a control's current index.
     Q_PROPERTY(QString emulationType READ emulationType NOTIFY statusChanged)
     Q_PROPERTY(QString ds4Backend READ ds4Backend NOTIFY statusChanged)
@@ -84,7 +84,7 @@ public:
     // controller: ds4 | dualsense -- name: free text, length-checked by ds4ipc
     Q_INVOKABLE void setName(const QString &controller, const QString &name);
     Q_INVOKABLE void resetName(const QString &controller);
-    // method: legacy | unbind
+    // method: legacy | unbind | unlink
     Q_INVOKABLE void setHideMethod(const QString &method);
 
     // Hardware tests, not settings: they touch the physical controller

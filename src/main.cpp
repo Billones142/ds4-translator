@@ -83,6 +83,14 @@ struct PhysicalNode {
     int fd;
     mode_t orig_mode;
     bool is_grabbed;
+    // Set when the unlink hide method removed this node's /dev entry (see
+    // unlink_device_node()). The three fields below are everything
+    // restore_device_node() needs to recreate it byte-identically, captured
+    // before the unlink since there's nothing left to stat afterwards.
+    bool is_unlinked = false;
+    dev_t rdev = 0;
+    uid_t orig_uid = 0;
+    gid_t orig_gid = 0;
 };
 
 std::atomic<bool> running(true);
@@ -308,6 +316,102 @@ std::vector<std::string> get_event_nodes(const std::string& hidraw_name) {
     return event_nodes;
 }
 
+// Removes a device node's /dev entry outright, so no other process can
+// open() it at all -- the strongest hiding available short of the kernel
+// device never existing (which is what the unbind method's USB side gets
+// for free, and its Bluetooth side can't; see the unlink hide method).
+//
+// /dev is devtmpfs, where root may unlink a device node like any other
+// file. The unlink drops only the *path*: the underlying character device
+// is untouched, every already-open fd (this daemon's included) keeps
+// working, and the device stays listed in sysfs. What goes away is the
+// only handle other processes have on it -- libudev enumeration still
+// reports the device, but the DEVNAME it hands out now open()s to ENOENT,
+// which Steam/SDL/the browser Gamepad API treat as "device gone" instead
+// of listing a second, frozen gamepad.
+//
+// Two limits it deliberately doesn't address:
+//  - anything that reads major:minor out of sysfs and mknod()s its own
+//    node still reaches the device. No real gamepad consumer does that.
+//  - udev recreates a missing node on the next add/change uevent for the
+//    device, so this needs re-applying afterwards -- see
+//    reapply_unlinked_nodes() and the main loop's periodic sweep.
+//
+// Captures node.rdev/orig_mode/orig_uid/orig_gid first so
+// restore_device_node() can put the node back exactly as it was. On any
+// failure returns false with node.is_unlinked left false, so the caller's
+// chmod/EVIOCGRAB hiding stands on its own and teardown knows there's
+// nothing to recreate.
+static bool unlink_device_node(PhysicalNode& node) {
+    struct stat st;
+    if (stat(node.path.c_str(), &st) != 0) {
+        std::cerr << "unlink-hide: cannot stat " << node.path << ": " << strerror(errno) << std::endl;
+        return false;
+    }
+    // These paths come from a directory scan and are unlinked as root, so
+    // verify what's actually there is a device node before removing it.
+    if (!S_ISCHR(st.st_mode)) {
+        std::cerr << "unlink-hide: refusing to unlink non-character-device " << node.path << std::endl;
+        return false;
+    }
+    node.rdev = st.st_rdev;
+    node.orig_mode = st.st_mode & 0777;
+    node.orig_uid = st.st_uid;
+    node.orig_gid = st.st_gid;
+    if (unlink(node.path.c_str()) != 0) {
+        std::cerr << "unlink-hide: failed to unlink " << node.path << ": " << strerror(errno) << std::endl;
+        return false;
+    }
+    node.is_unlinked = true;
+    std::cout << "Successfully unlinked node: " << node.path << std::endl;
+    return true;
+}
+
+// Undoes unlink_device_node(), recreating the node from the identity saved
+// there. udev would recreate it on the device's next uevent anyway, but
+// that's neither immediate nor guaranteed to ever happen (a Bluetooth
+// controller that stays connected across a daemon restart never generates
+// one), so restoring it here is what makes stopping the daemon enough to
+// get the pad back.
+static void restore_device_node(const PhysicalNode& node) {
+    if (!node.is_unlinked) return;
+    if (access(node.path.c_str(), F_OK) == 0) return; // udev already put it back
+    if (mknod(node.path.c_str(), S_IFCHR | node.orig_mode, node.rdev) != 0) {
+        std::cerr << "unlink-hide: failed to recreate " << node.path << ": " << strerror(errno) << std::endl;
+        return;
+    }
+    // mknod()'s mode argument is masked by the process umask; chmod isn't.
+    if (chmod(node.path.c_str(), node.orig_mode) != 0) {
+        std::cerr << "unlink-hide: failed to restore mode on " << node.path << ": " << strerror(errno) << std::endl;
+    }
+    if (chown(node.path.c_str(), node.orig_uid, node.orig_gid) != 0) {
+        std::cerr << "unlink-hide: failed to restore owner on " << node.path << ": " << strerror(errno) << std::endl;
+    }
+    std::cout << "Restored unlinked node: " << node.path << std::endl;
+}
+
+// Re-unlinks any node udev has recreated since it was hidden (see
+// unlink_device_node()'s doc comment -- any add/change uevent for the
+// device brings it back, and this daemon triggers some of those itself,
+// e.g. background_delayed_udevadm_trigger() right after the virtual device
+// is created). One access() per node, so it's cheap enough to poll.
+static void reapply_unlinked_nodes(std::vector<PhysicalNode>& nodes) {
+    for (auto& node : nodes) {
+        if (!node.is_unlinked) continue;
+        if (access(node.path.c_str(), F_OK) != 0) continue;
+        // Deliberately does not re-capture orig_mode/uid/gid from the
+        // resurrected node: udev recreated it with
+        // 72-ds4-translator-hide.rules already applied (0600 root:root),
+        // which is this daemon's hiding, not what the user had before the
+        // device was ever touched. The identity captured on the first
+        // unlink is the one worth restoring later.
+        std::cout << "unlink-hide: " << node.path << " was recreated by udev; re-unlinking." << std::endl;
+        if (unlink(node.path.c_str()) != 0) {
+            std::cerr << "unlink-hide: failed to re-unlink " << node.path << ": " << strerror(errno) << std::endl;
+        }
+    }
+}
+
 // Runs an external program directly via fork/exec, bypassing the shell --
 // unlike system(), argv entries are passed as-is with no quoting/escaping
 // step, so a path containing a shell metacharacter can't turn into command
@@ -369,14 +473,32 @@ static void background_delayed_udevadm_trigger() {
 // connections that need live translation while hidden, since unbind's
 // Bluetooth side has no replacement transport (see
 // open_and_hide_physical_unbind()'s bus 0x0005 branch).
+//
+// HIDE_METHOD_UNLINK is HIDE_METHOD_UNBIND plus one extra step, and only
+// on the Bluetooth side: the hidraw/input/js nodes that the still-bound
+// kernel driver creates (unbind's Bluetooth branch can't get rid of the
+// driver, see open_and_hide_physical_unbind()) additionally have their
+// /dev entries unlinked, so other apps can't open them at all rather than
+// merely being permission-denied. The USB side is byte-for-byte identical
+// to unbind -- the driver is gone there, so no node ever exists to unlink.
+// See unlink_device_node() for the mechanics and limits.
 enum HideMethod {
     HIDE_METHOD_LEGACY,
-    HIDE_METHOD_UNBIND
+    HIDE_METHOD_UNBIND,
+    HIDE_METHOD_UNLINK
 };
+
+// True for every method that behaves like unbind (real transports, HID-bus
+// uevent monitor, no chmod-based hiding on the USB side) -- i.e. everything
+// except legacy. Keeps the call sites from having to list each variant.
+static bool hide_method_is_unbind_family(HideMethod method) {
+    return method == HIDE_METHOD_UNBIND || method == HIDE_METHOD_UNLINK;
+}
 
 const char* hide_method_config_str(HideMethod method) {
     switch (method) {
         case HIDE_METHOD_UNBIND: return "unbind";
+        case HIDE_METHOD_UNLINK: return "unlink";
         default: return "legacy";
     }
 }
@@ -395,6 +517,8 @@ HideMethod read_hide_method_config(HideMethod default_method) {
             }
             if (val == "unbind") {
                 return HIDE_METHOD_UNBIND;
+            } else if (val == "unlink") {
+                return HIDE_METHOD_UNLINK;
             } else if (val == "legacy") {
                 return HIDE_METHOD_LEGACY;
             }
@@ -567,6 +691,8 @@ int open_and_hide_physical_unbind(const std::string& hid_id, std::vector<Physica
         }
         g_phy_is_bpf_transport = true;
 
+        const bool unlink_nodes = (g_hide_method == HIDE_METHOD_UNLINK);
+
         for (const auto& ev_path : get_event_nodes(hidraw_name)) {
             PhysicalNode node;
             node.path = ev_path;
@@ -599,7 +725,31 @@ int open_and_hide_physical_unbind(const std::string& hid_id, std::vector<Physica
             } else {
                 std::cout << "Successfully hid joystick node: " << ev_path << std::endl;
             }
+            // Last, so the chmod/EVIOCGRAB above still run against a path
+            // that exists -- and so they remain in force as a fallback for
+            // the window after udev recreates the node and before
+            // reapply_unlinked_nodes() removes it again.
+            if (unlink_nodes) {
+                unlink_device_node(node);
+            }
             out_hidden_nodes.push_back(node);
+        }
+
+        // The hidraw node itself. The unbind method leaves it alone
+        // entirely (the HID-BPF program already makes it a dead node that
+        // never yields a report), but "dead" still means open()-able and
+        // enumerable, which is exactly what the unlink method exists to
+        // close. Only reachable under Bluetooth: the USB branch below
+        // unbinds the kernel driver, so no hidraw node is ever created.
+        if (unlink_nodes) {
+            PhysicalNode hidraw_node;
+            hidraw_node.path = "/dev/" + hidraw_name;
+            hidraw_node.fd = -1;
+            hidraw_node.orig_mode = 0660;
+            hidraw_node.is_grabbed = false;
+            if (unlink_device_node(hidraw_node)) {
+                out_hidden_nodes.push_back(hidraw_node);
+            }
         }
 
         return fd;
@@ -652,7 +802,15 @@ void release_physical_connection(int fd, const std::string& path, mode_t orig_mo
             ioctl(node.fd, EVIOCGRAB, 0);
             close(node.fd);
         }
-        chmod(node.path.c_str(), node.orig_mode);
+        if (node.is_unlinked) {
+            // Recreates the node with its original mode/owner already
+            // applied, so the chmod below would be redundant at best and
+            // would clobber a node udev happened to recreate first at
+            // worst.
+            restore_device_node(node);
+        } else {
+            chmod(node.path.c_str(), node.orig_mode);
+        }
     }
     hidden_nodes.clear();
     // A connection opened via open_and_hide_physical_unbind() never
@@ -1647,9 +1805,13 @@ int main(int argc, char* argv[]) {
     }
 
     g_hide_method = read_hide_method_config(HIDE_METHOD_UNBIND);
-    if (g_hide_method == HIDE_METHOD_UNBIND) {
+    if (hide_method_is_unbind_family(g_hide_method)) {
         std::cout << "Using full-unbind hide method (USB: real transport via libusb; "
-                      "Bluetooth: real transport via HID-BPF -- see set-hide-method)." << std::endl;
+                      "Bluetooth: real transport via HID-BPF"
+                  << (g_hide_method == HIDE_METHOD_UNLINK
+                          ? ", with its /dev nodes unlinked outright"
+                          : "")
+                  << " -- see set-hide-method)." << std::endl;
         g_hid_uevent_fd = hid_uevent_monitor_open();
         if (g_hid_uevent_fd < 0) {
             std::cerr << "hid-unbind: failed to open HID-bus uevent monitor; "
@@ -1750,6 +1912,18 @@ int main(int argc, char* argv[]) {
     // means a full /dev scan + one ioctl per hidraw node.
     auto last_usb_upgrade_check = std::chrono::steady_clock::now();
     constexpr auto USB_UPGRADE_CHECK_INTERVAL = std::chrono::seconds(2);
+
+    // The unlink hide method's nodes come back whenever udev processes an
+    // add/change uevent for the physical controller -- including ones this
+    // daemon causes itself (background_delayed_udevadm_trigger() after
+    // virtual device creation, the bare `udevadm trigger` on type changes).
+    // Re-unlinking on a timer is what keeps the hiding sticky across those
+    // instead of silently lapsing. One access() per hidden node, so a short
+    // interval costs effectively nothing; it's kept well under a second so
+    // the resurrection window stays too brief for a game's device scan to
+    // land in it.
+    auto last_unlink_recheck = std::chrono::steady_clock::now();
+    constexpr auto UNLINK_RECHECK_INTERVAL = std::chrono::milliseconds(500);
 
     // A dropped physical connection (Bluetooth hiccup, brief unplug) used to
     // tear the virtual device down immediately, which is what actually made
@@ -1994,7 +2168,7 @@ int main(int argc, char* argv[]) {
             // identical guard) -- the unbind method must never engage for
             // it, matching the requirement that this method stays fully
             // inert whenever hiding is off.
-            if (g_hide_method == HIDE_METHOD_UNBIND && controller_type_hides_physical(target_type)) {
+            if (hide_method_is_unbind_family(g_hide_method) && controller_type_hides_physical(target_type)) {
                 if (!g_pending_unbind_hid_id.empty()) {
                     name = g_pending_unbind_hid_id;
                     g_pending_unbind_hid_id.clear();
@@ -2187,6 +2361,14 @@ int main(int argc, char* argv[]) {
                         // instead, since find_physical_ds4() prefers USB.
                     }
                 }
+            }
+        }
+
+        if (g_hide_method == HIDE_METHOD_UNLINK && !hidden_nodes.empty()) {
+            auto now = std::chrono::steady_clock::now();
+            if (now - last_unlink_recheck >= UNLINK_RECHECK_INTERVAL) {
+                last_unlink_recheck = now;
+                reapply_unlinked_nodes(hidden_nodes);
             }
         }
 
@@ -2523,13 +2705,19 @@ int main(int argc, char* argv[]) {
                                 }
                             }
                         }
-                    } else if (cmd == "set-hide-method legacy" || cmd == "set-hide-method unbind") {
-                        HideMethod want_method = (cmd == "set-hide-method unbind") ? HIDE_METHOD_UNBIND : HIDE_METHOD_LEGACY;
+                    } else if (cmd == "set-hide-method legacy" || cmd == "set-hide-method unbind" ||
+                               cmd == "set-hide-method unlink") {
+                        HideMethod want_method = HIDE_METHOD_LEGACY;
+                        if (cmd == "set-hide-method unbind") {
+                            want_method = HIDE_METHOD_UNBIND;
+                        } else if (cmd == "set-hide-method unlink") {
+                            want_method = HIDE_METHOD_UNLINK;
+                        }
                         if (g_hide_method == want_method) {
                             response = "Hide method already set to " + std::string(hide_method_config_str(want_method));
                         } else {
                             bool ok = true;
-                            if (want_method == HIDE_METHOD_UNBIND && g_hid_uevent_fd < 0) {
+                            if (hide_method_is_unbind_family(want_method) && g_hid_uevent_fd < 0) {
                                 g_hid_uevent_fd = hid_uevent_monitor_open();
                                 ok = g_hid_uevent_fd >= 0;
                             }
