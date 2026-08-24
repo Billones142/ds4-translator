@@ -74,10 +74,12 @@ void print_usage() {
     std::cout << "                                   it via libusb instead; Bluetooth keeps the driver bound" << std::endl;
     std::cout << "                                   (hidraw/input nodes still exist) but uses a HID-BPF" << std::endl;
     std::cout << "                                   program to make every report invisible to them while" << std::endl;
-    std::cout << "                                   mirroring it to this daemon. unlink is unbind plus, on" << std::endl;
-    std::cout << "                                   Bluetooth only, deleting those leftover hidraw/input/js" << std::endl;
-    std::cout << "                                   /dev entries outright, so other apps get ENOENT instead" << std::endl;
-    std::cout << "                                   of a permission error on a node that still exists." << std::endl;
+    std::cout << "                                   mirroring it to this daemon. unlink goes further on" << std::endl;
+    std::cout << "                                   Bluetooth: it moves the pad onto the hid-generic driver" << std::endl;
+    std::cout << "                                   (so no battery, LED or force-feedback device is ever" << std::endl;
+    std::cout << "                                   registered for it) and deletes the leftover hidraw/" << std::endl;
+    std::cout << "                                   input/js /dev entries outright, so other apps get" << std::endl;
+    std::cout << "                                   ENOENT instead of a permission error on a live node." << std::endl;
     std::cout << "                                   legacy is the older chmod/setfacl/EVIOCGRAB method --" << std::endl;
     std::cout << "                                   node exists but permission-blocked, USB and Bluetooth." << std::endl;
 }

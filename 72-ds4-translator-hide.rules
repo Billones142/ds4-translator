@@ -17,6 +17,12 @@ TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="
 
 # Battery of a Bluetooth-connected physical controller.
 #
+# Fallback only under the unlink hide method, which parks the controller on
+# hid-generic so this power_supply is never registered in the first place
+# (see swap_bt_driver_to_generic() in main.cpp) -- this still matters when
+# that swap fails and the connection falls back to hid-playstation, and for
+# the legacy/unbind methods, which always leave hid-playstation bound.
+#
 # hid-playstation registers a power_supply device
 # ("ps-controller-battery-<MAC>") for every controller it binds. On
 # Bluetooth the driver necessarily stays bound (see the unbind/unlink hide

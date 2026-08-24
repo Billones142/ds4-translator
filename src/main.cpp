@@ -618,6 +618,112 @@ int g_hid_uevent_fd = -1;
 // arrives; consumed by the top-of-loop auto-scan block on its next pass.
 std::string g_pending_unbind_hid_id;
 
+// The Bluetooth hid_device currently moved off hid-playstation onto
+// hid-generic by the unlink hide method, so the release path knows to hand
+// it back. Empty when no swap is in effect.
+std::string g_bt_generic_hid_id;
+
+// Waits for a hidraw node to show up under a hid_device's sysfs directory.
+// Driver binding is synchronous from sysfs's point of view, but the child
+// hidraw device is registered during probe and the write returns before
+// that has necessarily landed.
+static bool wait_for_hidraw_under(const std::string& sysfs_path, int timeout_ms) {
+    std::error_code ec;
+    for (int waited = 0; ; waited += 20) {
+        for (const auto& entry : fs::directory_iterator(sysfs_path + "/hidraw", ec)) {
+            (void)entry;
+            return true;
+        }
+        if (waited >= timeout_ms) return false;
+        usleep(20000);
+    }
+}
+
+// Moves a Bluetooth controller from hid-playstation onto hid-generic.
+//
+// This is what lets the unlink hide method get rid of the physical pad's
+// battery. hid-playstation registers a power_supply ("ps-controller-battery-
+// <MAC>") plus an LED class and a force-feedback device for every controller
+// it probes, and on Bluetooth it can't simply be unbound the way it is on
+// USB: HID-BPF -- the only transport this daemon has there -- needs a driver
+// bound to receive anything at all, so leaving the device driverless costs
+// live translation entirely (tried and rejected, see 9aa821c). hid-generic
+// binds the same device (its group is HID_GROUP_GENERIC, which hid-generic
+// matches for any vendor/product) and registers none of those extras, so
+// the battery never exists in the first place while HID-BPF keeps working.
+//
+// Best-effort by design: on any failure the device is handed straight back
+// to hid-playstation and false is returned, leaving the caller with exactly
+// the behaviour of the plain unbind method for this connection.
+static bool swap_bt_driver_to_generic(const std::string& hid_id) {
+    const std::string sysfs_path = "/sys/bus/hid/devices/" + hid_id;
+
+    write_hid_driver_sysfs("unbind", hid_id);
+    usleep(150000); // let the kernel finish tearing the old binding down, same as rebind_physical_hid_driver()
+    write_hid_driver_sysfs_for("hid-generic", "bind", hid_id);
+
+    if (!wait_for_hidraw_under(sysfs_path, 1000)) {
+        std::cerr << "unlink-hide: hid-generic created no hidraw node for " << hid_id
+                  << "; handing the device back to hid-playstation." << std::endl;
+        write_hid_driver_sysfs_for("hid-generic", "unbind", hid_id);
+        usleep(150000);
+        write_hid_driver_sysfs("bind", hid_id);
+        return false;
+    }
+
+    g_bt_generic_hid_id = hid_id;
+    std::cout << "unlink-hide: moved " << hid_id << " onto hid-generic (no battery/LED/ff registered)." << std::endl;
+    return true;
+}
+
+// Undoes swap_bt_driver_to_generic(), so the controller behaves normally
+// again the moment this daemon lets go of it. No-op if no swap is active,
+// or if the hid_device is gone (controller powered off while hidden --
+// there is nothing left to rebind, and hid-playstation will claim it again
+// by itself on the next connection).
+static void restore_bt_driver_from_generic() {
+    if (g_bt_generic_hid_id.empty()) return;
+    const std::string hid_id = g_bt_generic_hid_id;
+    g_bt_generic_hid_id.clear();
+
+    std::error_code ec;
+    if (!fs::exists("/sys/bus/hid/devices/" + hid_id, ec)) return;
+
+    write_hid_driver_sysfs_for("hid-generic", "unbind", hid_id);
+    usleep(150000);
+    write_hid_driver_sysfs("bind", hid_id);
+    std::cout << "unlink-hide: handed " << hid_id << " back to hid-playstation." << std::endl;
+}
+
+// A Bluetooth DualShock 4 only emits the short 0x01 input report -- buttons
+// and sticks, no gyro, accelerometer or touchpad -- until something reads
+// its feature report 0x02, which switches it into the extended 0x11 report
+// this daemon actually parses. hid-playstation issues that read during
+// probe(); hid-generic doesn't, so after a driver swap the daemon has to do
+// it or silently lose motion and touchpad input.
+//
+// Feature reports travel via hid_hw_raw_request(), not the input path, so
+// the HID-BPF swallow program attached alongside doesn't intercept this.
+static bool kick_bt_full_report_mode(const std::string& hidraw_name) {
+    const std::string path = "/dev/" + hidraw_name;
+    int fd = open(path.c_str(), O_RDWR);
+    if (fd < 0) {
+        std::cerr << "unlink-hide: open(" << path << ") for full-report kick: " << strerror(errno) << std::endl;
+        return false;
+    }
+    uint8_t buf[64];
+    memset(buf, 0, sizeof(buf));
+    buf[0] = 0x02; // report number, as HIDIOCGFEATURE expects
+    int ret = ioctl(fd, HIDIOCGFEATURE(sizeof(buf)), buf);
+    close(fd);
+    if (ret < 0) {
+        std::cerr << "unlink-hide: feature report 0x02 read failed on " << path << ": " << strerror(errno)
+                  << " -- the pad may stay in basic-report mode (no motion/touchpad)." << std::endl;
+        return false;
+    }
+    return true;
+}
+
 // Opens dev_name's /dev/hidraw node and (unless for_type == TYPE_NONE)
 // restricts + grabs it and its event/js siblings, exactly like a fresh
 // physical-controller connect. Used both for that initial connect and for
@@ -749,15 +855,32 @@ int open_and_hide_physical_unbind(const std::string& hid_id, std::vector<Physica
     }
 
     if (bus == 0x0005) {
+        const bool unlink_nodes = (g_hide_method == HIDE_METHOD_UNLINK);
+
+        // Before the transport is attached, so it opens the hidraw node
+        // hid-generic creates rather than hid-playstation's (which the
+        // swap destroys). Best-effort: on failure the device is already
+        // back on hid-playstation and this connection just behaves like
+        // the plain unbind method, battery and all.
+        if (unlink_nodes) {
+            swap_bt_driver_to_generic(hid_id);
+        }
+
         std::string hidraw_name;
         int fd = hid_bpf_transport_open(hid_id, hidraw_name);
         if (fd < 0) {
             std::cerr << "hid-bpf: Bluetooth transport open failed for " << hid_id << std::endl;
+            restore_bt_driver_from_generic();
             return -1;
         }
         g_phy_is_bpf_transport = true;
 
-        const bool unlink_nodes = (g_hide_method == HIDE_METHOD_UNLINK);
+        // Only after a swap: hid-playstation already does this itself, so
+        // a connection that stayed on it is in extended-report mode
+        // regardless of what this daemon does.
+        if (!g_bt_generic_hid_id.empty()) {
+            kick_bt_full_report_mode(hidraw_name);
+        }
 
         for (const auto& ev_path : get_event_nodes(hidraw_name)) {
             PhysicalNode node;
@@ -863,6 +986,23 @@ void release_physical_connection(int fd, const std::string& path, mode_t orig_mo
     // closed (possibly already reused) descriptor.
     discard_pending_bt_output();
 
+    // The Bluetooth (HID-BPF) transport is torn down before the nodes are,
+    // because handing the device back to hid-playstation destroys and
+    // recreates every one of them. Restoring a node first would orphan it
+    // the moment that rebind lands (devtmpfs won't clean up a node this
+    // daemon created -- see restore_device_node()); in this order the
+    // devices are already gone by the time the loop below runs, so it
+    // correctly leaves them absent for udev to recreate alongside the new
+    // binding.
+    if (g_phy_is_bpf_transport) {
+        if (fd >= 0) {
+            hid_bpf_transport_close(fd);
+        }
+        g_phy_is_bpf_transport = false;
+        fd = -1;
+        restore_bt_driver_from_generic();
+    }
+
     for (auto& node : hidden_nodes) {
         if (node.is_grabbed && node.fd >= 0) {
             ioctl(node.fd, EVIOCGRAB, 0);
@@ -880,10 +1020,9 @@ void release_physical_connection(int fd, const std::string& path, mode_t orig_mo
     }
     hidden_nodes.clear();
     // A connection opened via open_and_hide_physical_unbind() never
-    // touched hidraw permissions (there is no hidraw node on the USB
-    // side; the Bluetooth side leaves hidraw alone entirely, hiding it
-    // via HID-BPF instead) -- its fd is a socketpair end that needs its
-    // own transport's teardown, not a plain close()+chmod.
+    // touched hidraw permissions (no hidraw node exists at all on the USB
+    // side) -- its fd is a socketpair end that needs its own transport's
+    // teardown, not a plain close()+chmod.
     if (g_phy_is_unbind_transport) {
         if (fd >= 0) {
             usb_hid_transport_close(fd);
@@ -891,13 +1030,8 @@ void release_physical_connection(int fd, const std::string& path, mode_t orig_mo
         g_phy_is_unbind_transport = false;
         return;
     }
-    if (g_phy_is_bpf_transport) {
-        if (fd >= 0) {
-            hid_bpf_transport_close(fd);
-        }
-        g_phy_is_bpf_transport = false;
-        return;
-    }
+    // The Bluetooth transport was already torn down above, and its fd set
+    // to -1, so only the plain-hidraw case can reach here with fd >= 0.
     if (fd >= 0) {
         close(fd);
     }
@@ -953,7 +1087,11 @@ static std::string find_usb_ds4_hid_id() {
 // hid-driver-sysfs.h (non-static) so the unbind-hide code can reuse it
 // instead of duplicating the sysfs-write logic.
 void write_hid_driver_sysfs(const char* action, const std::string& hid_id) {
-    std::string path = std::string("/sys/bus/hid/drivers/playstation/") + action;
+    write_hid_driver_sysfs_for("playstation", action, hid_id);
+}
+
+void write_hid_driver_sysfs_for(const char* driver, const char* action, const std::string& hid_id) {
+    std::string path = std::string("/sys/bus/hid/drivers/") + driver + "/" + action;
     int fd = open(path.c_str(), O_WRONLY);
     if (fd < 0) {
         std::cerr << "Failed to open " << path << ": " << strerror(errno) << std::endl;

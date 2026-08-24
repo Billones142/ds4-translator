@@ -11,4 +11,9 @@
 // already relies on, instead of duplicating it).
 void write_hid_driver_sysfs(const char* action, const std::string& hid_id);
 
+// Same, for an arbitrary driver under /sys/bus/hid/drivers/. Used by the
+// unlink hide method to move a Bluetooth controller onto hid-generic; the
+// wrapper above is this with driver = "playstation".
+void write_hid_driver_sysfs_for(const char* driver, const char* action, const std::string& hid_id);
+
 #endif // HID_DRIVER_SYSFS_H

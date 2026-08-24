@@ -18,7 +18,19 @@ for dev in /sys/bus/hid/devices/*054C*; do
         0003:054C:05C4.*|0003:054C:09CC.*|0005:054C:05C4.*|0005:054C:09CC.*) ;;
         *) continue ;;
     esac
-    [ -e "$dev/driver" ] && continue # already bound, nothing to do
+    # The unlink hide method parks Bluetooth controllers on hid-generic so
+    # hid-playstation never registers their battery/LED/force-feedback
+    # (see swap_bt_driver_to_generic() in main.cpp). A crash skips the
+    # hand-back just like it skips the rebind below, leaving the pad bound
+    # but stripped of those features, so treat it the same as driverless.
+    if [ -e "$dev/driver" ]; then
+        [ "$(basename "$(readlink -f "$dev/driver")")" = "hid-generic" ] || continue
+        case "$id" in
+            0005:*) ;;
+            *) continue ;; # only ever swapped on Bluetooth
+        esac
+        echo "$id" > /sys/bus/hid/drivers/hid-generic/unbind 2>/dev/null
+    fi
 
     resolved=$(readlink -f "$dev")
     case "$resolved" in

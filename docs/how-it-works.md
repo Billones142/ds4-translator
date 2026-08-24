@@ -46,7 +46,7 @@ It applies on the next physical (re)connection.
 | --- | --- | --- |
 | `legacy` | `chmod 0600` + `setfacl -b` + `EVIOCGRAB`; nodes exist, permission-blocked | same |
 | `unbind` (default) | kernel HID driver fully unbound, **no node ever created**; read via libusb | driver stays bound, nodes exist but are inert (HID-BPF swallows every report); siblings also chmod'd + grabbed |
-| `unlink` | identical to `unbind` — there is no node to unlink | `unbind`, plus the leftover `hidraw`/`event*`/`js*` `/dev` entries are deleted outright |
+| `unlink` | identical to `unbind` — there is no node to unlink | `unbind`, plus the pad is moved onto `hid-generic` and the leftover `hidraw`/`event*`/`js*` `/dev` entries are deleted outright |
 
 The asymmetry is forced by BlueZ: the Bluetooth `hid_device` is created by
 `bluetoothd`'s input plugin writing into `/dev/uhid`, and taking the L2CAP
@@ -70,6 +70,38 @@ replayed via `mknod` on teardown, so stopping the daemon is enough to get the
 pad back — `udev` would eventually recreate the node on the device's next
 uevent, but a Bluetooth controller that stays connected across a daemon
 restart never generates one.
+
+**The `hid-generic` swap.** Unlinking `/dev` entries doesn't reach everything
+`hid-playstation` creates: it also registers a `power_supply`
+(`ps-controller-battery-<MAC>`), an LED class device and a force-feedback
+device, none of which have a `/dev` node to remove. Because Bluetooth keeps
+the driver bound, the *physical* pad's battery therefore shows up in the
+desktop's battery indicator next to the emulated device's own.
+
+Simply unbinding the driver doesn't work: HID-BPF — the only Bluetooth
+transport available here — needs a driver bound to receive reports at all,
+so a driverless device is invisible to this daemon too. That was tried and
+rejected in `9aa821c`.
+
+`unlink` instead moves the device onto a *different* driver. The controller's
+HID group is `HID_GROUP_GENERIC` (visible in its `modalias`, e.g.
+`hid:b0005g0000v0000054Cp000005C4`), which `hid-generic` matches for any
+vendor/product — and `hid-generic` registers none of those extras. So the
+battery never exists, while HID-BPF keeps working because a driver is still
+bound. On release the device is handed back to `hid-playstation`.
+
+One consequence has to be compensated for: a Bluetooth DS4 only emits the
+short `0x01` input report (no gyro, accelerometer or touchpad) until
+something reads feature report `0x02`. `hid-playstation` does that in
+`probe()`; `hid-generic` doesn't, so the daemon issues that `HIDIOCGFEATURE`
+itself right after the swap.
+
+The swap is best-effort throughout — any failure hands the device straight
+back to `hid-playstation`, and the connection behaves exactly like the plain
+`unbind` method. `rebind-unbound-controllers.sh` (wired into the service's
+`ExecStartPre`/`ExecStopPost`) also treats a Bluetooth controller left on
+`hid-generic` as needing repair, since a crash skips the hand-back the same
+way it skips the existing rebind-on-exit paths.
 
 Two known limits:
 - Anything that reads `major:minor` out of sysfs and `mknod`s its own node
