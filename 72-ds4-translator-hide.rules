@@ -15,6 +15,34 @@ TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="
 TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="input", KERNELS=="0005:054C:09CC.*", \
   MODE="0600", OWNER="root", GROUP="root", TAG-="uaccess", TAG-="seat", ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_INPUT}=""
 
+# Battery of a Bluetooth-connected physical controller.
+#
+# hid-playstation registers a power_supply device
+# ("ps-controller-battery-<MAC>") for every controller it binds. On
+# Bluetooth the driver necessarily stays bound (see the unbind/unlink hide
+# methods: bluetoothd owns the L2CAP session, so the driver can't be
+# unbound the way it is on USB), so that battery is registered for the
+# physical pad and shows up in UPower -- and therefore in the desktop's
+# battery indicator -- as a second controller battery alongside the
+# emulated device's own. This is a sysfs class device with no /dev node at
+# all, so neither the permission-based nor the node-unlinking hide methods
+# can touch it; UPOWER_IGNORE is the supported way to keep it out of
+# UPower's device list.
+#
+# Only bus 0005 is matched, which excludes the emulated controller's
+# battery by construction: that one hangs off our own bus-0003 device
+# (uhid or dummy_hcd), and it *should* stay visible -- a real DS4 reports
+# a battery, so hiding it would make the emulated pad look wrong.
+#
+# Note this hides the battery from UPower only. The power_supply attributes
+# stay readable in sysfs for anything that goes looking there directly;
+# removing them outright isn't possible without unbinding the driver.
+TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="power_supply", KERNELS=="0005:054C:05C4.*", \
+  ENV{UPOWER_IGNORE}="1"
+
+TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="power_supply", KERNELS=="0005:054C:09CC.*", \
+  ENV{UPOWER_IGNORE}="1"
+
 # USB physical controllers (bus 0003). Matched via the USB device's own
 # ATTRS{idVendor}/ATTRS{idProduct} instead of DRIVERS=="usb", because combined
 # KERNELS+DRIVERS parent-matching requires BOTH keys to match the SAME

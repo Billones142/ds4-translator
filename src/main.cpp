@@ -316,6 +316,25 @@ std::vector<std::string> get_event_nodes(const std::string& hidraw_name) {
     return event_nodes;
 }
 
+// Maps a device node path to the sysfs class entry that backs it, so the
+// unlink helpers below can ask "does the kernel device still exist?" --
+// which is not something the /dev entry can answer once it's been removed.
+// Returns "" for a path outside the two node layouts this daemon hides.
+static std::string device_node_sysfs_path(const std::string& node_path) {
+    if (node_path.rfind("/dev/hidraw", 0) == 0) {
+        return "/sys/class/hidraw/" + node_path.substr(strlen("/dev/"));
+    }
+    if (node_path.rfind("/dev/input/", 0) == 0) {
+        return "/sys/class/input/" + node_path.substr(strlen("/dev/input/"));
+    }
+    return "";
+}
+
+// Nodes recreated by restore_device_node(), kept so reap_orphaned_restored_nodes()
+// can remove any whose kernel device disappeared afterwards. See that
+// function for why the kernel won't clean them up itself.
+std::vector<PhysicalNode> g_restored_nodes;
+
 // Removes a device node's /dev entry outright, so no other process can
 // open() it at all -- the strongest hiding available short of the kernel
 // device never existing (which is what the unbind method's USB side gets
@@ -373,13 +392,28 @@ static bool unlink_device_node(PhysicalNode& node) {
 // controller that stays connected across a daemon restart never generates
 // one), so restoring it here is what makes stopping the daemon enough to
 // get the pad back.
+//
+// Skipped entirely when the kernel device behind the node is already gone
+// (controller powered off or driver unbound while it was hidden): there is
+// nothing to restore access *to*, and recreating the node anyway leaves a
+// permanently stale /dev entry that opens to ENODEV -- devtmpfs only
+// removes nodes it created itself (it tags their inodes; see dev_mynode()
+// in drivers/base/devtmpfs.c), so a node this daemon mknod'd is never
+// cleaned up by the kernel when the device disappears.
 static void restore_device_node(const PhysicalNode& node) {
     if (!node.is_unlinked) return;
     if (access(node.path.c_str(), F_OK) == 0) return; // udev already put it back
+    std::string sysfs = device_node_sysfs_path(node.path);
+    if (sysfs.empty() || access(sysfs.c_str(), F_OK) != 0) {
+        std::cout << "unlink-hide: kernel device behind " << node.path
+                  << " is gone; leaving the node absent." << std::endl;
+        return;
+    }
     if (mknod(node.path.c_str(), S_IFCHR | node.orig_mode, node.rdev) != 0) {
         std::cerr << "unlink-hide: failed to recreate " << node.path << ": " << strerror(errno) << std::endl;
         return;
     }
+    g_restored_nodes.push_back(node);
     // mknod()'s mode argument is masked by the process umask; chmod isn't.
     if (chmod(node.path.c_str(), node.orig_mode) != 0) {
         std::cerr << "unlink-hide: failed to restore mode on " << node.path << ": " << strerror(errno) << std::endl;
@@ -388,6 +422,38 @@ static void restore_device_node(const PhysicalNode& node) {
         std::cerr << "unlink-hide: failed to restore owner on " << node.path << ": " << strerror(errno) << std::endl;
     }
     std::cout << "Restored unlinked node: " << node.path << std::endl;
+}
+
+// Removes nodes recreated by restore_device_node() whose kernel device has
+// since disappeared. That gap is unavoidable rather than hypothetical: the
+// Bluetooth->USB hot-swap releases the physical connection (restoring the
+// nodes) and only *then* unbinds the driver, destroying the devices a
+// moment later -- and since devtmpfs won't delete a node it didn't create
+// itself, /dev/hidrawN would otherwise survive as an orphan pointing at a
+// dead minor. Reaping them here keeps that ownership symmetric: this daemon
+// created these nodes, so this daemon removes them.
+static void reap_orphaned_restored_nodes() {
+    for (auto it = g_restored_nodes.begin(); it != g_restored_nodes.end();) {
+        std::string sysfs = device_node_sysfs_path(it->path);
+        if (!sysfs.empty() && access(sysfs.c_str(), F_OK) == 0) {
+            ++it; // device still there, node is legitimate
+            continue;
+        }
+        // Only remove the node if it's still the exact one that was
+        // recreated -- if the minor has since been handed to a different
+        // device, devtmpfs owns the entry now and it must be left alone.
+        struct stat st;
+        if (stat(it->path.c_str(), &st) == 0 && S_ISCHR(st.st_mode) && st.st_rdev == it->rdev) {
+            if (unlink(it->path.c_str()) == 0) {
+                std::cout << "unlink-hide: removed orphaned node " << it->path
+                          << " (its kernel device is gone)." << std::endl;
+            } else {
+                std::cerr << "unlink-hide: failed to remove orphaned node " << it->path
+                          << ": " << strerror(errno) << std::endl;
+            }
+        }
+        it = g_restored_nodes.erase(it);
+    }
 }
 
 // Re-unlinks any node udev has recreated since it was hidden (see
@@ -2364,11 +2430,18 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        if (g_hide_method == HIDE_METHOD_UNLINK && !hidden_nodes.empty()) {
+        // Both halves are cheap (a handful of access() calls) and both are
+        // needed even when the other has nothing to do: hidden_nodes is
+        // empty right after a release, which is exactly when there are
+        // freshly restored nodes to watch for orphaning.
+        if (!hidden_nodes.empty() || !g_restored_nodes.empty()) {
             auto now = std::chrono::steady_clock::now();
             if (now - last_unlink_recheck >= UNLINK_RECHECK_INTERVAL) {
                 last_unlink_recheck = now;
-                reapply_unlinked_nodes(hidden_nodes);
+                if (g_hide_method == HIDE_METHOD_UNLINK) {
+                    reapply_unlinked_nodes(hidden_nodes);
+                }
+                reap_orphaned_restored_nodes();
             }
         }
 
@@ -3441,6 +3514,10 @@ int main(int argc, char* argv[]) {
         release_physical_connection(phy_fd, phy_path, orig_mode, hidden_nodes);
     }
     restore_suppressed_bluetooth();
+    // The release above may have recreated nodes for a device that's
+    // already gone; without the main loop left to sweep, this is the last
+    // chance to not leave an orphan behind.
+    reap_orphaned_restored_nodes();
     if (g_hid_uevent_fd >= 0) {
         close(g_hid_uevent_fd);
         g_hid_uevent_fd = -1;
