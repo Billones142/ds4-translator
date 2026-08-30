@@ -639,6 +639,42 @@ static bool wait_for_hidraw_under(const std::string& sysfs_path, int timeout_ms)
     }
 }
 
+// hid-generic deliberately refuses every device the kernel lists in its
+// hid_have_special_driver table -- DS4 and DualSense included, since
+// hid-playstation claims them -- so a plain write to its bind file comes
+// back ENODEV. The one documented override is hid's ignore_special_drivers
+// module parameter, which makes hid_generic_match() accept anything.
+//
+// Reads as "Y"/"N" (bool parameter), writes accept "1"/"0". Returns -1 if
+// the parameter can't be read, so callers can tell "off" from "unknown".
+static const char kHidIgnoreSpecialDrivers[] = "/sys/module/hid/parameters/ignore_special_drivers";
+
+static int read_hid_ignore_special_drivers() {
+    int fd = open(kHidIgnoreSpecialDrivers, O_RDONLY);
+    if (fd < 0) return -1;
+    char c = 0;
+    ssize_t n = read(fd, &c, 1);
+    close(fd);
+    if (n != 1) return -1;
+    return (c == 'Y' || c == 'y' || c == '1') ? 1 : 0;
+}
+
+static bool write_hid_ignore_special_drivers(int value) {
+    int fd = open(kHidIgnoreSpecialDrivers, O_WRONLY);
+    if (fd < 0) {
+        std::cerr << "unlink-hide: open(" << kHidIgnoreSpecialDrivers << "): " << strerror(errno) << std::endl;
+        return false;
+    }
+    const char buf = value ? '1' : '0';
+    ssize_t n = write(fd, &buf, 1);
+    close(fd);
+    if (n != 1) {
+        std::cerr << "unlink-hide: write(" << kHidIgnoreSpecialDrivers << "): " << strerror(errno) << std::endl;
+        return false;
+    }
+    return true;
+}
+
 // Moves a Bluetooth controller from hid-playstation onto hid-generic.
 //
 // This is what lets the unlink hide method get rid of the physical pad's
@@ -648,9 +684,9 @@ static bool wait_for_hidraw_under(const std::string& sysfs_path, int timeout_ms)
 // USB: HID-BPF -- the only transport this daemon has there -- needs a driver
 // bound to receive anything at all, so leaving the device driverless costs
 // live translation entirely (tried and rejected, see 9aa821c). hid-generic
-// binds the same device (its group is HID_GROUP_GENERIC, which hid-generic
-// matches for any vendor/product) and registers none of those extras, so
-// the battery never exists in the first place while HID-BPF keeps working.
+// binds the same device -- once ignore_special_drivers lets it, see above --
+// and registers none of those extras, so the battery never exists in the
+// first place while HID-BPF keeps working.
 //
 // Best-effort by design: on any failure the device is handed straight back
 // to hid-playstation and false is returned, leaving the caller with exactly
@@ -660,7 +696,16 @@ static bool swap_bt_driver_to_generic(const std::string& hid_id) {
 
     write_hid_driver_sysfs("unbind", hid_id);
     usleep(150000); // let the kernel finish tearing the old binding down, same as rebind_physical_hid_driver()
+
+    // ignore_special_drivers is global, so it is raised for the duration of
+    // this one bind write and put straight back: any *other* HID device that
+    // happens to probe inside that window would land on hid-generic too. The
+    // window is a single synchronous sysfs write, and the alternative -- a
+    // per-device driver_override -- does not exist on the hid bus.
+    const int prev_ignore = read_hid_ignore_special_drivers();
+    const bool raised = (prev_ignore != 1) && write_hid_ignore_special_drivers(1);
     write_hid_driver_sysfs_for("hid-generic", "bind", hid_id);
+    if (raised) write_hid_ignore_special_drivers(prev_ignore == -1 ? 0 : prev_ignore);
 
     if (!wait_for_hidraw_under(sysfs_path, 1000)) {
         std::cerr << "unlink-hide: hid-generic created no hidraw node for " << hid_id

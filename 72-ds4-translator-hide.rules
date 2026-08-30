@@ -42,7 +42,10 @@ TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="
 #
 # Note this hides the battery from UPower only. The power_supply attributes
 # stay readable in sysfs for anything that goes looking there directly;
-# removing them outright isn't possible without unbinding the driver.
+# removing them outright isn't possible without unbinding the driver. That
+# is not a theoretical gap: MangoHud, for one, scans /sys/class/power_supply
+# for "ps-controller"/"sony_controller" entries itself and never asks
+# UPower, so only the unlink method's driver swap hides the battery from it.
 TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="power_supply", KERNELS=="0005:054C:05C4.*", \
   ENV{UPOWER_IGNORE}="1"
 

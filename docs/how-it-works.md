@@ -83,12 +83,22 @@ transport available here — needs a driver bound to receive reports at all,
 so a driverless device is invisible to this daemon too. That was tried and
 rejected in `9aa821c`.
 
-`unlink` instead moves the device onto a *different* driver. The controller's
-HID group is `HID_GROUP_GENERIC` (visible in its `modalias`, e.g.
-`hid:b0005g0000v0000054Cp000005C4`), which `hid-generic` matches for any
-vendor/product — and `hid-generic` registers none of those extras. So the
-battery never exists, while HID-BPF keeps working because a driver is still
-bound. On release the device is handed back to `hid-playstation`.
+`unlink` instead moves the device onto a *different* driver: `hid-generic`,
+which registers none of those extras. So the battery never exists, while
+HID-BPF keeps working because a driver is still bound. On release the device
+is handed back to `hid-playstation`.
+
+`hid-generic` does not accept the device on its own, though. Its
+`hid_generic_match()` refuses anything listed in the kernel's
+`hid_have_special_driver` table — which is exactly the set of devices
+`hid-playstation` claims — so a bare write to its `bind` file returns
+`ENODEV`. The only override is hid's `ignore_special_drivers` module
+parameter, so the daemon raises
+`/sys/module/hid/parameters/ignore_special_drivers` for the duration of the
+single `bind` write and restores the previous value immediately after. That
+parameter is global, so any *other* HID device probing inside that window
+would also land on `hid-generic`; the hid bus has no per-device
+`driver_override`, so there is no narrower lever available.
 
 One consequence has to be compensated for: a Bluetooth DS4 only emits the
 short `0x01` input report (no gyro, accelerometer or touchpad) until
