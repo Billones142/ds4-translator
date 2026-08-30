@@ -82,6 +82,17 @@ void print_usage() {
     std::cout << "                                   ENOENT instead of a permission error on a live node." << std::endl;
     std::cout << "                                   legacy is the older chmod/setfacl/EVIOCGRAB method --" << std::endl;
     std::cout << "                                   node exists but permission-blocked, USB and Bluetooth." << std::endl;
+    std::cout << "  set-mac-squat <on|off>           unlink method only. On (default), the emulated device" << std::endl;
+    std::cout << "                                   advertises the physical pad's own MAC address, which" << std::endl;
+    std::cout << "                                   makes the kernel's hid-playstation driver refuse the" << std::endl;
+    std::cout << "                                   real pad outright -- it never registers a battery, LED" << std::endl;
+    std::cout << "                                   or force-feedback device for it, not even briefly. The" << std::endl;
+    std::cout << "                                   MAC is learned on the first Bluetooth connection and" << std::endl;
+    std::cout << "                                   remembered, so the emulated device is brought up on its" << std::endl;
+    std::cout << "                                   own at startup to hold it: with this on, games see a" << std::endl;
+    std::cout << "                                   controller whenever the daemon runs, pad or no pad." << std::endl;
+    std::cout << "  forget-mac                       Discard the remembered controller MAC (disarms the" << std::endl;
+    std::cout << "                                   squat until a pad connects again)." << std::endl;
 }
 
 // One command/response exchange, using the shared client in ipc-client.cpp
@@ -194,6 +205,8 @@ static const CommandSpec kCommands[] = {
     {"identify",         nullptr},
     {"led",              "--reset"},
     {"set-hide-method",  "legacy unbind unlink"},
+    {"set-mac-squat",    "on off"},
+    {"forget-mac",       nullptr},
 };
 
 static const CommandSpec* find_command(const std::string& name) {
@@ -830,6 +843,13 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         full_cmd = ds4ipc::build_set_hide_method(argv[2], &build_error);
+    } else if (cmd == "set-mac-squat") {
+        if (argc < 3) {
+            std::cerr << "Error: set-mac-squat requires "
+                      << ds4ipc::join_values(ds4ipc::toggle_values()) << std::endl;
+            return 1;
+        }
+        full_cmd = ds4ipc::build_set_mac_squat(argv[2], &build_error);
     } else if (cmd == "led") {
         if (argc >= 3 && std::string(argv[2]) == "--reset") {
             full_cmd = ds4ipc::kLedResetCommand;

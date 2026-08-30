@@ -593,6 +593,28 @@ HideMethod read_hide_method_config(HideMethod default_method) {
     return default_method;
 }
 
+// Whether the emulated device may take over the physical pad's MAC address to
+// keep hid-playstation from probing it at all. Only ever consulted under the
+// unlink hide method -- see the MAC squat block further down for why the other
+// methods can't use it. Defaults to on.
+bool read_mac_squat_config(bool default_enabled) {
+    std::ifstream f("/etc/ds4-translator.conf");
+    if (!f.is_open()) {
+        return default_enabled;
+    }
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.rfind("mac_squat=", 0) != 0) continue;
+        std::string val = line.substr(strlen("mac_squat="));
+        while (!val.empty() && (val.back() == '\n' || val.back() == '\r' || val.back() == ' ')) {
+            val.pop_back();
+        }
+        if (val == "true" || val == "on" || val == "1") return true;
+        if (val == "false" || val == "off" || val == "0") return false;
+    }
+    return default_enabled;
+}
+
 HideMethod g_hide_method = HIDE_METHOD_UNBIND;
 // Set for the lifetime of a physical connection opened via
 // open_and_hide_physical_unbind(), so release_physical_connection() (a
@@ -637,6 +659,182 @@ static bool wait_for_hidraw_under(const std::string& sysfs_path, int timeout_ms)
         if (waited >= timeout_ms) return false;
         usleep(20000);
     }
+}
+
+// ---------------------------------------------------------------------------
+// MAC squat: stopping hid-playstation from ever probing the physical pad.
+//
+// hid-playstation keeps one global list of every controller it has probed,
+// keyed by MAC address, and refuses a second device carrying a MAC already in
+// it ("Duplicate device found for MAC address ...", probe fails -EEXIST). The
+// emulated device this daemon creates is probed by hid-playstation just like
+// the real one, and every identity field it reports is ours to choose -- so
+// giving the emulated pad the *physical* pad's MAC makes the kernel turn the
+// physical away before it can register a battery, an LED class or a
+// force-feedback device at all. That is strictly better than the driver swap
+// in swap_bt_driver_to_generic(), which can only clean those up after the fact.
+//
+// Two rules follow from how the kernel implements it, and both are load-bearing:
+//
+//  * Whoever registers *second* loses. If the physical is already in the list,
+//    the emulated device is the one that gets -EEXIST. So the squat is only
+//    ever armed under the unlink hide method, the one method that takes the
+//    physical off hid-playstation before the emulated device is created.
+//
+//  * It does not replace the ignore_special_drivers raise below.
+//    hid_generic_match() refuses a device when another driver *matches* it,
+//    not when that driver's probe succeeded -- hid-playstation still matches
+//    the DS4 by ID. A turned-away pad is left driverless, and
+//    swap_bt_driver_to_generic() still has to bind hid-generic by hand.
+//
+// The MAC has to be known before the pad connects, so it is learned on first
+// connect and remembered on disk across restarts.
+static const char kDefaultVirtualMac[] = "74:e7:d6:3a:47:e8";
+static const uint8_t kDefaultVirtualMacLe[6] = { 0xe8, 0x47, 0x3a, 0xd6, 0xe7, 0x74 };
+static const char kPhysicalMacStateDir[] = "/var/lib/ds4-translator";
+static const char kPhysicalMacStatePath[] = "/var/lib/ds4-translator/last-physical-mac";
+static const char kVirtualMacRuntimeDir[] = "/run/ds4-translator";
+static const char kVirtualMacRuntimePath[] = "/run/ds4-translator/virtual-mac";
+
+// Identity the emulated device is currently advertising. Both forms are kept:
+// uhid's uniq and the USB gadget's serialnumber want the string, DS4 feature
+// reports 0x10/0x12 carry the same address byte-reversed.
+std::string g_virtual_mac_str = kDefaultVirtualMac;
+uint8_t g_virtual_mac_le[6] = { 0xe8, 0x47, 0x3a, 0xd6, 0xe7, 0x74 };
+
+std::string g_remembered_physical_mac; // learned from the pad; empty until then
+bool g_mac_squat_enabled = true;       // config; only consulted under unlink
+bool g_mac_squat_active = false;       // emulated device is holding the pad's MAC
+bool g_mac_squat_vdev = false;         // ...and it exists only for that, no pad attached
+
+// An emulated device is currently registered with the kernel. Deliberately
+// separate from the backends' "configured"/"open" flags, which only go true
+// once a host actually opens the device: the MAC squat cares about mere
+// registration, since that alone is what holds the address in
+// hid-playstation's device list.
+bool g_vdev_exists = false;
+
+// "aa:bb:cc:dd:ee:ff" -> the six bytes in the order DS4 feature reports use
+// (least significant first, i.e. the string reversed byte-wise). Strict: six
+// hex pairs separated by colons and nothing else.
+static bool parse_mac(const std::string& s, uint8_t out_le[6]) {
+    if (s.size() != 17) return false;
+    uint8_t be[6];
+    for (int i = 0; i < 6; i++) {
+        if (i > 0 && s[i * 3 - 1] != ':') return false;
+        int byte = 0;
+        for (int nibble = 0; nibble < 2; nibble++) {
+            const char c = s[i * 3 + nibble];
+            if (!isxdigit((unsigned char)c)) return false;
+            byte = (byte << 4) | (isdigit((unsigned char)c)
+                                      ? c - '0'
+                                      : tolower((unsigned char)c) - 'a' + 10);
+        }
+        be[i] = (uint8_t)byte;
+    }
+    for (int i = 0; i < 6; i++) out_le[i] = be[5 - i];
+    return true;
+}
+
+// Reads a hid_device's MAC out of its uevent file. Deliberately not the "uniq"
+// sysfs attribute: bluetoothd creates the pad through /dev/uhid on this BlueZ
+// configuration (UserspaceHID=true) and no uniq attribute exists there, but
+// HID_UNIQ is always in the uevent, and it is filled in by the HID core rather
+// than by any particular driver -- so it can be read from a pad that is
+// driverless or parked on hid-generic. Returns "" if absent.
+static std::string read_hid_uniq(const std::string& hid_id) {
+    std::ifstream f("/sys/bus/hid/devices/" + hid_id + "/uevent");
+    if (!f.is_open()) return "";
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.rfind("HID_UNIQ=", 0) != 0) continue;
+        std::string val = line.substr(strlen("HID_UNIQ="));
+        while (!val.empty() && (val.back() == '\n' || val.back() == '\r' || val.back() == ' ')) {
+            val.pop_back();
+        }
+        for (char& c : val) c = (char)tolower((unsigned char)c);
+        return val;
+    }
+    return "";
+}
+
+static std::string load_remembered_physical_mac() {
+    std::ifstream f(kPhysicalMacStatePath);
+    if (!f.is_open()) return "";
+    std::string mac;
+    std::getline(f, mac);
+    while (!mac.empty() && (mac.back() == '\n' || mac.back() == '\r' || mac.back() == ' ')) {
+        mac.pop_back();
+    }
+    uint8_t scratch[6];
+    if (!parse_mac(mac, scratch)) {
+        if (!mac.empty()) {
+            std::cerr << "mac-squat: ignoring unparseable MAC in " << kPhysicalMacStatePath << std::endl;
+        }
+        return "";
+    }
+    return mac;
+}
+
+// Records the pad's MAC so the next daemon start can squat it before the pad
+// has even connected. Learned state, so it lives under /var/lib rather than in
+// /etc/ds4-translator.conf, which is the user's to edit. Failure is never
+// fatal: without it the squat simply doesn't arm until the pad connects once.
+static void remember_physical_mac(const std::string& mac) {
+    if (mac.empty() || mac == g_remembered_physical_mac) return;
+    uint8_t scratch[6];
+    if (!parse_mac(mac, scratch)) return;
+
+    g_remembered_physical_mac = mac;
+
+    std::error_code ec;
+    fs::create_directories(kPhysicalMacStateDir, ec);
+    std::ofstream f(kPhysicalMacStatePath, std::ios::trunc);
+    if (!f.is_open()) {
+        std::cerr << "mac-squat: can't write " << kPhysicalMacStatePath
+                  << " -- the pad's MAC won't be squatted until it connects again." << std::endl;
+        return;
+    }
+    f << mac << "\n";
+    std::cout << "mac-squat: remembered physical controller MAC " << mac << std::endl;
+}
+
+// True while a real controller is bound to hid-playstation, i.e. while the
+// kernel already holds its MAC in ps_devices_list. Defined further down, next
+// to the other /sys/bus/hid/devices scanners.
+static bool physical_pad_on_playstation();
+
+// Picks the MAC the emulated device should advertise, and is re-evaluated on
+// every create_virtual_device() so a destroy/recreate can never silently swap
+// identities. Squats the physical pad's MAC only when doing so is safe: the
+// unlink method is in force, the user hasn't turned it off, a MAC is known,
+// and no real pad is bound to hid-playstation right now. That last test is
+// what keeps the emulated device safe when the driver swap failed and the pad
+// went back to hid-playstation -- squatting then would hand the -EEXIST to us.
+static void select_virtual_mac() {
+    bool squat = g_mac_squat_enabled &&
+                 g_hide_method == HIDE_METHOD_UNLINK &&
+                 !g_remembered_physical_mac.empty() &&
+                 !physical_pad_on_playstation();
+
+    if (squat && parse_mac(g_remembered_physical_mac, g_virtual_mac_le)) {
+        g_virtual_mac_str = g_remembered_physical_mac;
+        g_mac_squat_active = true;
+    } else {
+        g_virtual_mac_str = kDefaultVirtualMac;
+        memcpy(g_virtual_mac_le, kDefaultVirtualMacLe, sizeof(g_virtual_mac_le));
+        g_mac_squat_active = false;
+    }
+
+    // Published for udev-spoof.so, which answers the "serial" sysattr for the
+    // emulated device inside a *game's* process and so can't be told through
+    // the daemon's own state. Runtime state, hence /run: it is only ever
+    // correct for as long as this daemon is up. Best-effort -- the shim falls
+    // back to the historical constant if the file isn't there.
+    std::error_code ec;
+    fs::create_directories(kVirtualMacRuntimeDir, ec);
+    std::ofstream rf(kVirtualMacRuntimePath, std::ios::trunc);
+    if (rf.is_open()) rf << g_virtual_mac_str << "\n";
 }
 
 // hid-generic deliberately refuses every device the kernel lists in its
@@ -694,8 +892,17 @@ static bool write_hid_ignore_special_drivers(int value) {
 static bool swap_bt_driver_to_generic(const std::string& hid_id) {
     const std::string sysfs_path = "/sys/bus/hid/devices/" + hid_id;
 
-    write_hid_driver_sysfs("unbind", hid_id);
-    usleep(150000); // let the kernel finish tearing the old binding down, same as rebind_physical_hid_driver()
+    // Normally the pad arrives bound to hid-playstation and has to be taken
+    // off it first. With the MAC squat armed it arrives with no driver at all
+    // -- hid-playstation refused it outright, which is the whole point -- and
+    // there is nothing to unbind. Writing to the unbind file anyway would just
+    // log an ENODEV for something that already happened.
+    std::error_code ec;
+    const bool has_driver = fs::exists(sysfs_path + "/driver", ec);
+    if (has_driver) {
+        write_hid_driver_sysfs("unbind", hid_id);
+        usleep(150000); // let the kernel finish tearing the old binding down, same as rebind_physical_hid_driver()
+    }
 
     // ignore_special_drivers is global, so it is raised for the duration of
     // this one bind write and put straight back: any *other* HID device that
@@ -709,10 +916,13 @@ static bool swap_bt_driver_to_generic(const std::string& hid_id) {
 
     if (!wait_for_hidraw_under(sysfs_path, 1000)) {
         std::cerr << "unlink-hide: hid-generic created no hidraw node for " << hid_id
-                  << "; handing the device back to hid-playstation." << std::endl;
+                  << (has_driver ? "; handing the device back to hid-playstation." : ".") << std::endl;
         write_hid_driver_sysfs_for("hid-generic", "unbind", hid_id);
         usleep(150000);
-        write_hid_driver_sysfs("bind", hid_id);
+        // Only worth attempting for a pad that was on hid-playstation to begin
+        // with. One the kernel turned away (MAC squat) would be turned away
+        // again, for the same reason, and the error is noise.
+        if (has_driver) write_hid_driver_sysfs("bind", hid_id);
         return false;
     }
 
@@ -726,6 +936,12 @@ static bool swap_bt_driver_to_generic(const std::string& hid_id) {
 // or if the hid_device is gone (controller powered off while hidden --
 // there is nothing left to rebind, and hid-playstation will claim it again
 // by itself on the next connection).
+//
+// Must run *after* the emulated device is destroyed, which every release path
+// already does (see the release-physical handler and the shutdown path). With
+// the MAC squat armed the emulated device is holding this pad's address, and
+// hid-playstation would refuse the rebind for exactly that reason, leaving
+// the pad driverless with nobody translating it.
 static void restore_bt_driver_from_generic() {
     if (g_bt_generic_hid_id.empty()) return;
     const std::string hid_id = g_bt_generic_hid_id;
@@ -908,7 +1124,12 @@ int open_and_hide_physical_unbind(const std::string& hid_id, std::vector<Physica
         // back on hid-playstation and this connection just behaves like
         // the plain unbind method, battery and all.
         if (unlink_nodes) {
-            swap_bt_driver_to_generic(hid_id);
+            if (swap_bt_driver_to_generic(hid_id)) {
+                // Learn the pad's MAC now that it is safely off
+                // hid-playstation, so the next daemon start can squat it
+                // before the pad has even connected. See select_virtual_mac().
+                remember_physical_mac(read_hid_uniq(hid_id));
+            }
         }
 
         std::string hidraw_name;
@@ -1124,6 +1345,38 @@ static std::string find_usb_ds4_hid_id() {
         }
     }
     return "";
+}
+
+// True when a real controller is currently bound to hid-playstation, which
+// means the kernel is holding its MAC in ps_devices_list and the emulated
+// device must not try to claim the same one (see select_virtual_mac()).
+//
+// Both our own emulated device and the physical Bluetooth pad live under
+// /devices/virtual/misc/uhid/ on this BlueZ configuration, so the sysfs path
+// alone can't tell them apart -- the bus in the hid id can. Ours is always
+// bus 0003 (the uhid backend forces BUS_USB, the functionfs one really is
+// USB via dummy_hcd); a Bluetooth pad is bus 0005.
+static bool physical_pad_on_playstation() {
+    std::error_code ec;
+    for (const auto& entry : fs::directory_iterator("/sys/bus/hid/devices", ec)) {
+        const std::string id = entry.path().filename().string();
+        const bool is_bt = id.rfind("0005:054C:", 0) == 0;
+        const bool is_usb = id.rfind("0003:054C:", 0) == 0;
+        if (!is_bt && !is_usb) continue;
+
+        fs::path resolved = fs::canonical(entry.path(), ec);
+        if (ec) { ec.clear(); continue; }
+        if (is_usb) {
+            const std::string devpath = resolved.string();
+            if (devpath.find("dummy_hcd") != std::string::npos) continue;
+            if (devpath.find("/devices/virtual/misc/uhid/") != std::string::npos) continue;
+        }
+
+        fs::path driver = fs::read_symlink(entry.path() / "driver", ec);
+        if (ec) { ec.clear(); continue; } // driverless -- not in ps_devices_list
+        if (driver.filename().string() == "playstation") return true;
+    }
+    return false;
 }
 
 // Best-effort: writes a hid_device sysfs id to the playstation driver's
@@ -1659,6 +1912,7 @@ void write_config(ControllerType type, BackendType ds4_backend, BackendType dual
         // persisting whatever hide method is currently active without
         // needing to be touched.
         f << "hide_method=" << hide_method_config_str(g_hide_method) << "\n";
+        f << "mac_squat=" << (g_mac_squat_enabled ? "true" : "false") << "\n";
         // Omitted entirely (rather than written empty) when unset, so a
         // hand-edited config file with no name_* line behaves identically
         // to one that was never touched by set-name.
@@ -1674,10 +1928,17 @@ bool create_virtual_device(ControllerType type) {
     // default name in that case.
     const std::string& custom_name = (type == TYPE_DS4) ? g_name_ds4 : g_name_dualsense;
 
+    // Re-evaluated on every create, never cached: a destroy/recreate in the
+    // middle of a session must not come back up under a different identity
+    // than the conditions of the moment allow.
+    select_virtual_mac();
+    functionfs_set_mac(g_virtual_mac_le, g_virtual_mac_str.c_str());
+
     if (backend_type == BACKEND_FUNCTIONFS) {
         if (functionfs_init(&virtual_functionfs, type == TYPE_DS4 ? 1 : 2, custom_name.c_str())) {
-            std::cout << "Virtual USB Controller created via FunctionFS." << std::endl;
+                std::cout << "Virtual USB Controller created via FunctionFS." << std::endl;
             g_suppress_next_led_update = true;
+            g_vdev_exists = true;
             return true;
         } else {
             std::cerr << "Failed to initialize FunctionFS backend. Falling back to UHID backend..." << std::endl;
@@ -1699,7 +1960,7 @@ bool create_virtual_device(ControllerType type) {
         if (type == TYPE_DS4) {
             const char *name = custom_name.empty() ? "Sony Computer Entertainment Wireless Controller" : custom_name.c_str();
             strncpy((char*)ev.u.create2.name, name, sizeof(ev.u.create2.name));
-            strncpy((char*)ev.u.create2.uniq, "74:e7:d6:3a:47:e8", sizeof(ev.u.create2.uniq));
+            strncpy((char*)ev.u.create2.uniq, g_virtual_mac_str.c_str(), sizeof(ev.u.create2.uniq) - 1);
             ev.u.create2.rd_size = sizeof(ds4_usb_rdesc);
             memcpy(ev.u.create2.rd_data, ds4_usb_rdesc, sizeof(ds4_usb_rdesc));
             ev.u.create2.bus = BUS_USB;
@@ -1710,7 +1971,7 @@ bool create_virtual_device(ControllerType type) {
         } else {
             const char *name = custom_name.empty() ? "Sony Interactive Entertainment DualSense Wireless Controller" : custom_name.c_str();
             strncpy((char*)ev.u.create2.name, name, sizeof(ev.u.create2.name));
-            strncpy((char*)ev.u.create2.uniq, "74:e7:d6:3a:47:e8", sizeof(ev.u.create2.uniq));
+            strncpy((char*)ev.u.create2.uniq, g_virtual_mac_str.c_str(), sizeof(ev.u.create2.uniq) - 1);
             ev.u.create2.rd_size = sizeof(dualsense_usb_rdesc);
             memcpy(ev.u.create2.rd_data, dualsense_usb_rdesc, sizeof(dualsense_usb_rdesc));
             ev.u.create2.bus = BUS_USB;
@@ -1735,12 +1996,21 @@ bool create_virtual_device(ControllerType type) {
         // error -5") and leaves the device with no hidraw/input nodes at all.
         background_delayed_udevadm_trigger();
         g_suppress_next_led_update = true;
+        g_vdev_exists = true;
         return true;
     }
     return false;
 }
 
 void destroy_virtual_device() {
+    // Cleared here rather than at each call site: several paths destroy the
+    // emulated device without going through the MAC squat logic at all (type
+    // switch, name change, destroy-virtual, shutdown), and a stale "it still
+    // exists" would leave the squat unable to re-arm -- or, worse, make the
+    // connect path adopt a device that is gone.
+    g_vdev_exists = false;
+    g_mac_squat_vdev = false;
+
     if (backend_type == BACKEND_FUNCTIONFS) {
         functionfs_close(&virtual_functionfs);
         usleep(200000); // Give kernel time to unbind the gadget UDC
@@ -2069,6 +2339,19 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    g_mac_squat_enabled = read_mac_squat_config(true);
+    g_remembered_physical_mac = load_remembered_physical_mac();
+    if (g_hide_method == HIDE_METHOD_UNLINK && g_mac_squat_enabled) {
+        if (g_remembered_physical_mac.empty()) {
+            std::cout << "MAC squat armed, but no controller MAC is known yet -- "
+                          "it is learned on the first Bluetooth connection." << std::endl;
+        } else {
+            std::cout << "MAC squat armed with " << g_remembered_physical_mac
+                      << ": the emulated device takes that address so hid-playstation "
+                          "refuses the real controller outright." << std::endl;
+        }
+    }
+
     (void)std::signal(SIGINT, signal_handler);
     (void)std::signal(SIGTERM, signal_handler);
 
@@ -2127,12 +2410,53 @@ int main(int argc, char* argv[]) {
         if (backend_type == BACKEND_FUNCTIONFS) return virtual_functionfs.configured;
         return device_open;
     };
+
     // Same as vdev_configured(), but for call sites that used to also check
     // uhid_fd >= 0 alongside the UHID device_open flag (functionfs has no
     // equivalent fd to check here -- its I/O runs on dedicated threads).
     auto vdev_ready_for_io = [&]() -> bool {
         if (backend_type == BACKEND_FUNCTIONFS) return virtual_functionfs.configured;
         return device_open && uhid_fd >= 0;
+    };
+
+    // Brings the emulated device up with no physical controller attached, for
+    // the sole purpose of holding the pad's MAC in hid-playstation's device
+    // list before the pad ever connects -- that is what makes the block work
+    // on the *first* connection after a boot rather than only on reconnects
+    // (see the MAC squat block above create_virtual_device()).
+    //
+    // The cost of arming it is that games see a controller whenever the
+    // daemon is up, pad or no pad, which is why it is a config toggle
+    // (`ds4-ctl set-mac-squat off`).
+    //
+    // Deliberately does nothing while the auto-scan is off: after
+    // release-physical the user wants the real pad back, and squatting its
+    // MAC would leave it driverless with nobody translating it. Same for a
+    // standalone virtual device, which is the user driving the emulated pad
+    // by hand and must not be replaced underneath them.
+    auto refresh_mac_squat_vdev = [&]() {
+        if (!g_mac_squat_enabled || g_hide_method != HIDE_METHOD_UNLINK) return;
+        if (g_remembered_physical_mac.empty()) return;
+        if (phy_fd >= 0 || ignore_physical || standalone_virtual) return;
+        // Only the two types that actually have an emulated device. TYPE_NONE
+        // is hands-off passthrough and TYPE_HIDDEN hides without emulating --
+        // neither creates a virtual device anywhere else either, and there is
+        // nothing to hold a MAC with.
+        if (target_type != TYPE_DS4 && target_type != TYPE_DUALSENSE) return;
+        if (g_vdev_exists) return;
+        // A pad that is already bound to hid-playstation (daemon restarted
+        // while it stayed connected) holds its own MAC, so squatting is both
+        // impossible and pointless right now. Leaving the emulated device
+        // uncreated lets the normal connect path below bring it up *after*
+        // the pad has been moved onto hid-generic, at which point the squat
+        // does apply.
+        if (physical_pad_on_playstation()) return;
+
+        if (create_virtual_device(target_type)) {
+            g_mac_squat_vdev = true;
+            std::cout << "MAC squat: emulated device holding " << g_virtual_mac_str
+                      << " with no controller connected." << std::endl;
+        }
     };
 
     // Real USB DS4 hardware streams input reports continuously (~250Hz)
@@ -2381,6 +2705,8 @@ int main(int argc, char* argv[]) {
         g_has_test_subscribers = !test_subscribers.empty();
     };
 
+    refresh_mac_squat_vdev();
+
     std::vector<struct pollfd> pfds; // reused across iterations; cleared and repopulated each pass below
     while (running) {
         // If physical controller disconnected, scan & setup. Skipped while a
@@ -2488,6 +2814,15 @@ int main(int argc, char* argv[]) {
                         // below) still hold whatever LED color was last set.
                         std::cout << "Physical controller reconnected within grace period; reusing existing virtual device." << std::endl;
                         phy_disconnect_pending_destroy = false;
+                        reused_existing = true;
+                    } else if (g_mac_squat_vdev) {
+                        // The emulated device is already up -- it has been
+                        // holding this pad's MAC since before it connected,
+                        // which is what kept hid-playstation off it. Adopt it
+                        // as this connection's virtual device; recreating it
+                        // would drop the MAC and gain nothing.
+                        std::cout << "Adopting the MAC-squat virtual device for this connection." << std::endl;
+                        g_mac_squat_vdev = false;
                         reused_existing = true;
                     } else {
                         created = create_virtual_device(target_type);
@@ -2741,6 +3076,12 @@ int main(int argc, char* argv[]) {
                             ((g_phy_is_unbind_transport || g_phy_is_bpf_transport) ? " (active on current connection)" : "") + "\n";
                         response += "Device Open by Host: " + std::string((vdev_configured()) ? "Yes" : "No") + "\n";
                         response += "Standalone Virtual (no hardware): " + std::string(standalone_virtual ? "Yes" : "No") + "\n";
+                        response += "MAC Squat: " + std::string(g_mac_squat_enabled ? "on" : "off") +
+                            (g_hide_method == HIDE_METHOD_UNLINK ? "" : " (inert -- needs hide_method unlink)") + "\n";
+                        response += "Remembered Controller MAC: " +
+                            (g_remembered_physical_mac.empty() ? "none yet" : g_remembered_physical_mac) + "\n";
+                        response += "Emulated Device MAC: " + g_virtual_mac_str +
+                            (g_mac_squat_active ? " (borrowed from the physical controller)" : " (built-in default)") + "\n";
                         response += "Physical Auto-Scan Disabled (release-physical): " + std::string(ignore_physical ? "Yes" : "No") + "\n";
                         if (phy_fd >= 0 && !is_bluetooth) {
                             response += "Bluetooth Fallback if USB Disconnects: "
@@ -2808,6 +3149,7 @@ int main(int argc, char* argv[]) {
                         }
                     } else if (cmd == "resume-physical") {
                         ignore_physical = false;
+                        refresh_mac_squat_vdev();
                         response = "OK: Physical controller auto-scan resumed.";
                     } else if (cmd.rfind("input ", 0) == 0) {
                         if (!standalone_virtual) {
@@ -2986,6 +3328,40 @@ int main(int argc, char* argv[]) {
                             } else {
                                 response = "Error: failed to open HID-bus uevent monitor; staying on legacy hide method.";
                             }
+                        }
+                    } else if (cmd == "set-mac-squat on" || cmd == "set-mac-squat off") {
+                        const bool want = (cmd == "set-mac-squat on");
+                        if (g_mac_squat_enabled == want) {
+                            response = std::string("MAC squat already ") + (want ? "on" : "off") + ".";
+                        } else {
+                            g_mac_squat_enabled = want;
+                            write_config(target_type, backend_for_ds4, backend_for_dualsense, g_name_ds4, g_name_dualsense);
+                            if (want) {
+                                refresh_mac_squat_vdev();
+                                response = "OK: MAC squat on"
+                                           + std::string(g_hide_method == HIDE_METHOD_UNLINK
+                                                             ? ""
+                                                             : " (inert until hide_method is unlink)")
+                                           + ". Applies to the next physical (re)connection.";
+                            } else {
+                                // The emulated device keeps whatever identity
+                                // it came up with until it is next recreated;
+                                // tearing it down here would yank a live
+                                // controller out from under a running game.
+                                response = "OK: MAC squat off. The emulated device drops the borrowed MAC "
+                                           "the next time it is recreated.";
+                            }
+                        }
+                    } else if (cmd == "forget-mac") {
+                        if (g_remembered_physical_mac.empty()) {
+                            response = "No controller MAC is remembered.";
+                        } else {
+                            const std::string forgotten = g_remembered_physical_mac;
+                            g_remembered_physical_mac.clear();
+                            std::error_code fm_ec;
+                            fs::remove(kPhysicalMacStatePath, fm_ec);
+                            response = "OK: forgot controller MAC " + forgotten +
+                                       ". It is learned again on the next Bluetooth connection.";
                         }
                     } else if (cmd == "identify") {
                         if (phy_fd < 0) {
@@ -3301,6 +3677,10 @@ int main(int argc, char* argv[]) {
             destroy_virtual_device();
             device_open = false;
             phy_disconnect_pending_destroy = false;
+            // The pad is gone for good now, so the squatter can go back up --
+            // and has to, or the next connection is claimed by
+            // hid-playstation before this daemon gets a look at it.
+            refresh_mac_squat_vdev();
         }
 
         // Forward physical controller inputs to virtual controller
@@ -3476,11 +3856,14 @@ int main(int argc, char* argv[]) {
                                 } else if (rnum == 0x10 || rnum == 0x12) {
                                     reply_ev.u.get_report_reply.size = 16;
                                     reply_ev.u.get_report_reply.data[0] = rnum;
-                                    // MAC Address (e8:47:3a:d6:e7:74) & Bluetooth identity info
-                                    static const uint8_t mac_info[15] = {
-                                        0xe8, 0x47, 0x3a, 0xd6, 0xe7, 0x74,
+                                    // Controller MAC (byte-reversed, see
+                                    // g_virtual_mac_le) followed by the host
+                                    // Bluetooth identity info.
+                                    uint8_t mac_info[15] = {
+                                        0, 0, 0, 0, 0, 0,
                                         0x08, 0x25, 0x00, 0x1e, 0x00, 0xee, 0x74, 0xd0, 0xbc
                                     };
+                                    memcpy(mac_info, g_virtual_mac_le, 6);
                                     memcpy(&reply_ev.u.get_report_reply.data[1], mac_info, 15);
                                 } else if (rnum == 0x31 || rnum == 0xa3) {
                                     reply_ev.u.get_report_reply.size = 49;
@@ -3538,10 +3921,11 @@ int main(int argc, char* argv[]) {
                                     reply_ev.u.get_report_reply.size = 20;
                                     uint8_t pairing_data[20] = {
                                         0x09,
-                                        0xe8, 0x47, 0x3a, 0xd6, 0xe7, 0x74,
+                                        0, 0, 0, 0, 0, 0,
                                         0x08, 0x25, 0x00, 0x1e, 0x00, 0xee, 0x74, 0xd0, 0xbc,
                                         0x00, 0x00, 0x00, 0x00
                                     };
+                                    memcpy(&pairing_data[1], g_virtual_mac_le, 6);
                                     memcpy(reply_ev.u.get_report_reply.data, pairing_data, 20);
                                 }
                             }

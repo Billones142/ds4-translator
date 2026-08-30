@@ -213,6 +213,11 @@ const std::vector<std::string> &hide_method_values() {
     return values;
 }
 
+const std::vector<std::string> &toggle_values() {
+    static const std::vector<std::string> values = {"on", "off"};
+    return values;
+}
+
 bool is_valid_controller(const std::string &value) {
     return contains(controller_values(), value);
 }
@@ -227,6 +232,10 @@ bool is_valid_backend(const std::string &value) {
 
 bool is_valid_hide_method(const std::string &value) {
     return contains(hide_method_values(), value);
+}
+
+bool is_valid_toggle(const std::string &value) {
+    return contains(toggle_values(), value);
 }
 
 std::string join_values(const std::vector<std::string> &values) {
@@ -310,6 +319,13 @@ std::string build_set_hide_method(const std::string &method, std::string *error)
         return std::string();
     }
     return "set-hide-method " + method;
+}
+
+std::string build_set_mac_squat(const std::string &state, std::string *error) {
+    if (!check_value(state, toggle_values(), "mac squat state", error)) {
+        return std::string();
+    }
+    return "set-mac-squat " + state;
 }
 
 std::string build_led(int red, int green, int blue, int rumble_left, int rumble_right,

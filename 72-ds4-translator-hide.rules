@@ -45,7 +45,9 @@ TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="
 # removing them outright isn't possible without unbinding the driver. That
 # is not a theoretical gap: MangoHud, for one, scans /sys/class/power_supply
 # for "ps-controller"/"sony_controller" entries itself and never asks
-# UPower, so only the unlink method's driver swap hides the battery from it.
+# UPower, so only the unlink method hides the battery from it -- by keeping
+# hid-playstation off the pad entirely (MAC squat), or failing that by moving
+# it onto hid-generic after the fact.
 TEST=="/run/ds4-translator.sock", TEST!="/run/ds4-translator.none", SUBSYSTEM=="power_supply", KERNELS=="0005:054C:05C4.*", \
   ENV{UPOWER_IGNORE}="1"
 

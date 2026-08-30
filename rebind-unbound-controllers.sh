@@ -44,6 +44,13 @@ for dev in /sys/bus/hid/devices/*054C*; do
             ;;
     esac
 
+    # Can legitimately fail while the daemon's own emulated device is still
+    # registered with the physical pad's MAC (the unlink method's MAC squat --
+    # see select_virtual_mac() in main.cpp): hid-playstation refuses a second
+    # device for a MAC it already holds. A uhid emulated device dies with the
+    # process, but a FunctionFS one lives in configfs and can outlive a
+    # SIGKILL, in which case the pad stays driverless until the gadget is torn
+    # down and this script runs again.
     echo "$id" > /sys/bus/hid/drivers/playstation/bind 2>/dev/null
 done
 

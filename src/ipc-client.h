@@ -74,11 +74,13 @@ const std::vector<std::string> &controller_values();  // set-backend/set-name
 const std::vector<std::string> &type_values();        // set-type
 const std::vector<std::string> &backend_values();     // set-backend
 const std::vector<std::string> &hide_method_values(); // set-hide-method
+const std::vector<std::string> &toggle_values();      // set-mac-squat
 
 bool is_valid_controller(const std::string &value);
 bool is_valid_type(const std::string &value);
 bool is_valid_backend(const std::string &value);
 bool is_valid_hide_method(const std::string &value);
+bool is_valid_toggle(const std::string &value);
 
 // Joins a value list for use in error text ("ds4 dualsense").
 std::string join_values(const std::vector<std::string> &values);
@@ -96,6 +98,9 @@ std::string build_set_backend(const std::string &controller, const std::string &
 std::string build_set_name(const std::string &controller, const std::string &name,
                            std::string *error);
 std::string build_set_hide_method(const std::string &method, std::string *error);
+// on/off: whether the emulated device may take over the physical pad's MAC
+// address so the kernel refuses to probe it at all.
+std::string build_set_mac_squat(const std::string &state, std::string *error);
 
 // Flashes the physical controller's light bar so the user can tell which
 // device the daemon is actually holding.

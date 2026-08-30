@@ -44,6 +44,12 @@ struct FunctionFSDevice {
     bool report_pending;
 };
 
+// Sets the MAC the emulated device advertises: the serialnumber string, plus
+// the byte-reversed form the DS4/DualSense pairing feature reports carry. Must
+// be called before functionfs_init(); left unset, the built-in default MAC is
+// used, exactly as before this existed.
+void functionfs_set_mac(const uint8_t mac_le[6], const char *mac_str);
+
 // product_name: custom USB product string override, or NULL/empty to use the
 // built-in per-type default ("Wireless Controller" / "DualSense Wireless
 // Controller").

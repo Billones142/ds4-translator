@@ -40,6 +40,21 @@ static void* ep0_loop(void *arg);
 static void* in_loop(void *arg);
 static void* out_loop(void *arg);
 
+/* MAC the emulated device advertises: uhid's uniq and the gadget's
+ * serialnumber want the string form, DS4/DualSense feature reports 0x10/0x12
+ * and 0x09 carry the same address byte-reversed. Defaults to the historical
+ * constant so a caller that never sets it behaves exactly as before; main.cpp
+ * overrides it from create_virtual_device() when the MAC squat is armed (see
+ * select_virtual_mac()). */
+static uint8_t virtual_mac_le[6] = { 0xe8, 0x47, 0x3a, 0xd6, 0xe7, 0x74 };
+static char virtual_mac_str[32] = "74:e7:d6:3a:47:e8";
+
+void functionfs_set_mac(const uint8_t mac_le[6], const char *mac_str) {
+    if (!mac_le || !mac_str) return;
+    memcpy(virtual_mac_le, mac_le, sizeof(virtual_mac_le));
+    snprintf(virtual_mac_str, sizeof(virtual_mac_str), "%s", mac_str);
+}
+
 // Same data tables raw-gadget-backend.c's/hidg-backend.c's/main.cpp's
 // GET_REPORT cases answer with -- see hidg-backend.c's build_feature_report()
 // doc comment for why this isn't shared via a header.
@@ -61,10 +76,11 @@ static size_t build_feature_report(int target_type, uint8_t rnum, uint8_t *out) 
             return 37;
         } else if (rnum == 0x10 || rnum == 0x12) {
             out[0] = rnum;
-            static const uint8_t mac_info[15] = {
-                0xe8, 0x47, 0x3a, 0xd6, 0xe7, 0x74,
+            uint8_t mac_info[15] = {
+                0, 0, 0, 0, 0, 0,
                 0x08, 0x25, 0x00, 0x1e, 0x00, 0xee, 0x74, 0xd0, 0xbc
             };
+            memcpy(mac_info, virtual_mac_le, 6);
             memcpy(&out[1], mac_info, 15);
             return 16;
         } else if (rnum == 0x31 || rnum == 0xa3) {
@@ -108,12 +124,13 @@ static size_t build_feature_report(int target_type, uint8_t rnum, uint8_t *out) 
             memcpy(out, fw_data, 64);
             return 64;
         } else if (rnum == 0x09) {
-            static const uint8_t pairing_data[20] = {
+            uint8_t pairing_data[20] = {
                 0x09,
-                0xe8, 0x47, 0x3a, 0xd6, 0xe7, 0x74,
+                0, 0, 0, 0, 0, 0,
                 0x08, 0x25, 0x00, 0x1e, 0x00, 0xee, 0x74, 0xd0, 0xbc,
                 0x00, 0x00, 0x00, 0x00
             };
+            memcpy(&pairing_data[1], virtual_mac_le, 6);
             memcpy(out, pairing_data, 20);
             return 20;
         }
@@ -591,7 +608,9 @@ bool functionfs_init(struct FunctionFSDevice *dev, int target_type, const char *
         (void)snprintf(product_line, sizeof(product_line), "%s\n", product);
         ok = ok && write_file_str(GADGET_DIR "/strings/0x409/product", product_line);
     }
-    ok = ok && write_file_str(GADGET_DIR "/strings/0x409/serialnumber", "74:e7:d6:3a:47:e8\n");
+    char serial_line[40];
+    snprintf(serial_line, sizeof(serial_line), "%s\n", virtual_mac_str);
+    ok = ok && write_file_str(GADGET_DIR "/strings/0x409/serialnumber", serial_line);
 
     ok = ok && make_dir(GADGET_DIR "/configs/c.1");
     ok = ok && make_dir(GADGET_DIR "/configs/c.1/strings/0x409");
