@@ -706,6 +706,10 @@ std::string g_remembered_physical_mac; // learned from the pad; empty until then
 bool g_mac_squat_enabled = true;       // config; only consulted under unlink
 bool g_mac_squat_active = false;       // emulated device is holding the pad's MAC
 bool g_mac_squat_vdev = false;         // ...and it exists only for that, no pad attached
+// Set for the length of one create_virtual_device() retry, after the squat
+// lost the race for the MAC and the emulated device came up with no driver
+// (see own_virtual_hid_bound()).
+bool g_mac_squat_force_default = false;
 
 // An emulated device is currently registered with the kernel. Deliberately
 // separate from the backends' "configured"/"open" flags, which only go true
@@ -803,6 +807,7 @@ static void remember_physical_mac(const std::string& mac) {
 // kernel already holds its MAC in ps_devices_list. Defined further down, next
 // to the other /sys/bus/hid/devices scanners.
 static bool physical_pad_on_playstation();
+static bool physical_pad_present();
 
 // Picks the MAC the emulated device should advertise, and is re-evaluated on
 // every create_virtual_device() so a destroy/recreate can never silently swap
@@ -813,6 +818,7 @@ static bool physical_pad_on_playstation();
 // went back to hid-playstation -- squatting then would hand the -EEXIST to us.
 static void select_virtual_mac() {
     bool squat = g_mac_squat_enabled &&
+                 !g_mac_squat_force_default &&
                  g_hide_method == HIDE_METHOD_UNLINK &&
                  !g_remembered_physical_mac.empty() &&
                  !physical_pad_on_playstation();
@@ -1387,7 +1393,7 @@ static std::string find_usb_ds4_hid_id() {
 // alone can't tell them apart -- the bus in the hid id can. Ours is always
 // bus 0003 (the uhid backend forces BUS_USB, the functionfs one really is
 // USB via dummy_hcd); a Bluetooth pad is bus 0005.
-static bool physical_pad_on_playstation() {
+static bool scan_for_physical_pad(bool require_playstation) {
     std::error_code ec;
     for (const auto& entry : fs::directory_iterator("/sys/bus/hid/devices", ec)) {
         const std::string id = entry.path().filename().string();
@@ -1403,11 +1409,26 @@ static bool physical_pad_on_playstation() {
             if (devpath.find("/devices/virtual/misc/uhid/") != std::string::npos) continue;
         }
 
+        if (!require_playstation) return true;
+
         fs::path driver = fs::read_symlink(entry.path() / "driver", ec);
         if (ec) { ec.clear(); continue; } // driverless -- not in ps_devices_list
         if (driver.filename().string() == "playstation") return true;
     }
     return false;
+}
+
+static bool physical_pad_on_playstation() {
+    return scan_for_physical_pad(true);
+}
+
+// True when a real controller exists on the HID bus at all, whatever driver
+// (if any) is bound to it right now. The stricter test above answers "is the
+// kernel holding that MAC this instant"; this one answers "could it be about
+// to", which is what pre-creating the squatter has to care about -- see
+// refresh_mac_squat_vdev().
+static bool physical_pad_present() {
+    return scan_for_physical_pad(false);
 }
 
 // Best-effort: writes a hid_device sysfs id to the playstation driver's
@@ -1954,7 +1975,70 @@ void write_config(ControllerType type, BackendType ds4_backend, BackendType dual
     }
 }
 
+static bool create_virtual_device_backend(ControllerType type);
+void destroy_virtual_device();
+
+// True once the emulated device this daemon just created is bound to
+// hid-playstation. Only meaningful while the MAC squat is active, and that is
+// the whole point: whoever registers second with a given MAC is refused, so a
+// squat that lost the race leaves *our* device driverless -- no hidraw, no
+// input nodes, invisible to every game -- and the kernel says so only in its
+// own ring buffer ("Duplicate device found for MAC address ...", "probe with
+// driver playstation failed with error -17").
+//
+// Polls rather than waits on a uevent: probe runs asynchronously after the
+// gadget enumerates (functionfs) or after UHID_CREATE2 (uhid), and the
+// deadline here only has to be longer than that, not precise.
+static bool own_virtual_hid_bound(int timeout_ms) {
+    const int step_ms = 50;
+    for (int waited = 0; waited <= timeout_ms; waited += step_ms) {
+        std::error_code ec;
+        for (const auto& entry : fs::directory_iterator("/sys/bus/hid/devices", ec)) {
+            const std::string id = entry.path().filename().string();
+            // Ours is always bus 0003 -- the uhid backend forces BUS_USB and
+            // the functionfs one really is USB via dummy_hcd.
+            if (id.rfind("0003:054C:", 0) != 0) continue;
+
+            fs::path resolved = fs::canonical(entry.path(), ec);
+            if (ec) { ec.clear(); continue; }
+            const std::string devpath = resolved.string();
+            const bool is_ours = (devpath.find("dummy_hcd") != std::string::npos) ||
+                                 (devpath.find("/devices/virtual/misc/uhid/") != std::string::npos);
+            if (!is_ours) continue;
+
+            fs::path driver = fs::read_symlink(entry.path() / "driver", ec);
+            if (ec) { ec.clear(); continue; }
+            if (driver.filename().string() == "playstation") return true;
+        }
+        usleep(step_ms * 1000);
+    }
+    return false;
+}
+
+// Brings the emulated device up, and -- when it took the physical pad's MAC to
+// do it -- makes sure it actually won that address. Losing the race is rare but
+// entirely possible (a pad connecting, or being handed back to hid-playstation
+// by an outgoing daemon instance, in the same moment), and the failure is
+// silent on our side, so it is retried once under the default MAC rather than
+// left as an emulated device no game can see.
 bool create_virtual_device(ControllerType type) {
+    g_mac_squat_force_default = false;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (!create_virtual_device_backend(type)) return false;
+        if (!g_mac_squat_active) return true;
+        if (own_virtual_hid_bound(2000)) return true;
+
+        std::cerr << "mac-squat: the kernel refused the emulated device at " << g_virtual_mac_str
+                  << " -- a real controller already holds that address. Retrying as "
+                  << kDefaultVirtualMac << "." << std::endl;
+        destroy_virtual_device();
+        g_mac_squat_force_default = true;
+    }
+    g_mac_squat_force_default = false;
+    return false;
+}
+
+static bool create_virtual_device_backend(ControllerType type) {
     // Empty means "no override" -- each backend below falls back to its own
     // default name in that case.
     const std::string& custom_name = (type == TYPE_DS4) ? g_name_ds4 : g_name_dualsense;
@@ -2475,13 +2559,17 @@ int main(int argc, char* argv[]) {
         // nothing to hold a MAC with.
         if (target_type != TYPE_DS4 && target_type != TYPE_DUALSENSE) return;
         if (g_vdev_exists) return;
-        // A pad that is already bound to hid-playstation (daemon restarted
-        // while it stayed connected) holds its own MAC, so squatting is both
-        // impossible and pointless right now. Leaving the emulated device
-        // uncreated lets the normal connect path below bring it up *after*
-        // the pad has been moved onto hid-generic, at which point the squat
-        // does apply.
-        if (physical_pad_on_playstation()) return;
+        // Any pad already on the HID bus, bound or not, blocks the
+        // pre-create -- not just one currently on hid-playstation. A daemon
+        // restarted while the pad stayed connected races the outgoing
+        // instance's hand-back to hid-playstation: the stricter test can pass
+        // a fraction of a second before the kernel re-registers that MAC, and
+        // then it is the *emulated* device that gets refused, coming up
+        // driverless and invisible to every game (seen live). Leaving it
+        // uncreated costs nothing -- the normal connect path below brings it
+        // up after the pad is moved onto hid-generic, at which point the squat
+        // applies anyway.
+        if (physical_pad_present()) return;
 
         if (create_virtual_device(target_type)) {
             g_mac_squat_vdev = true;
