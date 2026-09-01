@@ -138,15 +138,18 @@ std::string hid_bus_scan_existing() {
         std::string devpath = resolved.string();
         if (devpath.find("dummy_hcd") != std::string::npos) continue;
         if (id.rfind("0003:", 0) == 0 && devpath.find("/devices/virtual/misc/uhid/") != std::string::npos) continue;
-        // Already unbound -- either a USB device already claimed via
-        // libusb (tracked by phy_fd being valid, so this scan wouldn't
-        // even run for it) or a Bluetooth connection this method has
-        // deliberately left hidden-and-unreadable. Either way, nothing
-        // to do; re-surfacing it as "newly found" would either be a
-        // no-op (USB) or spin forever re-logging the same Bluetooth
-        // device every poll iteration (see open_and_hide_physical_unbind()
-        // in main.cpp for the Bluetooth side of this).
-        if (!fs::exists(entry.path() / "driver", ec)) continue;
+        // A USB device with no driver is one already claimed via libusb
+        // (tracked by phy_fd being valid, so this scan wouldn't even run
+        // for it); re-surfacing it as "newly found" would be a no-op at
+        // best. A *Bluetooth* device with no driver is a different thing
+        // entirely since the MAC squat landed: the kernel refused it
+        // outright (hid-playstation returning -EEXIST for the address the
+        // emulated device is holding), so driverless is exactly the shape
+        // a pad arrives in on every connection, and skipping it here left
+        // the daemon unable to find its own controller whenever the "add"
+        // uevent was missed -- a daemon restarted while the pad stayed
+        // connected, most obviously.
+        if (id.rfind("0005:", 0) != 0 && !fs::exists(entry.path() / "driver", ec)) continue;
         return id;
     }
     return "";

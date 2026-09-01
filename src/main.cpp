@@ -957,11 +957,27 @@ static void restore_bt_driver_from_generic() {
 }
 
 // A Bluetooth DualShock 4 only emits the short 0x01 input report -- buttons
-// and sticks, no gyro, accelerometer or touchpad -- until something reads
-// its feature report 0x02, which switches it into the extended 0x11 report
-// this daemon actually parses. hid-playstation issues that read during
-// probe(); hid-generic doesn't, so after a driver swap the daemon has to do
-// it or silently lose motion and touchpad input.
+// and sticks, no gyro, accelerometer or touchpad -- until a feature report
+// read switches it into the extended 0x11 report this daemon actually
+// parses. hid-playstation issues that read during probe(); hid-generic
+// doesn't, so after a driver swap the daemon has to do it or silently lose
+// motion and touchpad input.
+//
+// Two reports are tried, in the order the kernel's own drivers use them:
+//
+//   0x02, 37 bytes -- hid-sony's dualshock4_set_operational_bt(), whose
+//                     comment states outright that requesting it is what
+//                     makes the pad start sending report 17 (0x11).
+//   0x05, 41 bytes -- the Bluetooth motion-calibration report, which is
+//                     what hid-playstation reads instead. Reading it has
+//                     the same side effect, and a pad that ignores the
+//                     first still answers this one.
+//
+// Sizes are the exact report lengths rather than a padded 64: over
+// Bluetooth the length is carried in the GET_REPORT request itself, and an
+// oversized read has been observed to come back short or fail outright
+// depending on the transport, which would leave the pad in basic mode with
+// no error to show for it.
 //
 // Feature reports travel via hid_hw_raw_request(), not the input path, so
 // the HID-BPF swallow program attached alongside doesn't intercept this.
@@ -972,17 +988,32 @@ static bool kick_bt_full_report_mode(const std::string& hidraw_name) {
         std::cerr << "unlink-hide: open(" << path << ") for full-report kick: " << strerror(errno) << std::endl;
         return false;
     }
-    uint8_t buf[64];
-    memset(buf, 0, sizeof(buf));
-    buf[0] = 0x02; // report number, as HIDIOCGFEATURE expects
-    int ret = ioctl(fd, HIDIOCGFEATURE(sizeof(buf)), buf);
-    close(fd);
-    if (ret < 0) {
-        std::cerr << "unlink-hide: feature report 0x02 read failed on " << path << ": " << strerror(errno)
-                  << " -- the pad may stay in basic-report mode (no motion/touchpad)." << std::endl;
-        return false;
+
+    struct KickReport { uint8_t id; size_t size; };
+    static const KickReport kicks[] = { { 0x02, 37 }, { 0x05, 41 } };
+
+    bool any_ok = false;
+    for (const auto& kick : kicks) {
+        uint8_t buf[64];
+        memset(buf, 0, sizeof(buf));
+        buf[0] = kick.id; // report number, as HIDIOCGFEATURE expects
+        int ret = ioctl(fd, HIDIOCGFEATURE(kick.size), buf);
+        if (ret < 0) {
+            std::cerr << "unlink-hide: feature report 0x" << std::hex << (int)kick.id << std::dec
+                      << " read failed on " << path << ": " << strerror(errno) << std::endl;
+            continue;
+        }
+        std::cout << "unlink-hide: full-report kick: feature report 0x" << std::hex << (int)kick.id
+                  << std::dec << " returned " << ret << " bytes." << std::endl;
+        any_ok = true;
     }
-    return true;
+    close(fd);
+
+    if (!any_ok) {
+        std::cerr << "unlink-hide: no feature report read succeeded on " << path
+                  << " -- the pad stays in basic-report mode (no motion/touchpad)." << std::endl;
+    }
+    return any_ok;
 }
 
 // Opens dev_name's /dev/hidraw node and (unless for_type == TYPE_NONE)
@@ -2577,6 +2608,21 @@ int main(int argc, char* argv[]) {
     last_phy_touch.points[0].contact = 0x80;
     last_phy_touch.points[1].contact = 0x80;
     bool last_phy_valid = false;
+    // Logged once per connection: which report shape the physical
+    // controller actually settled on. A Bluetooth pad still in basic
+    // 0x01 mode produces no error anywhere -- its reports simply don't
+    // match either parse below and are dropped -- so without this the
+    // symptom is an entirely silent daemon.
+    bool logged_first_report = false;
+    // Backoff for a HID-bus device the open path just failed on. The
+    // bus scan is happy to hand the same hid_id back on every poll
+    // iteration -- for a Bluetooth pad the kernel refused (see
+    // hid_bus_scan_existing()) there is no driver state that changes to
+    // stop it -- so without this a device that can't be opened at all
+    // produces one failure line per second, forever.
+    std::string last_open_failure_id;
+    std::chrono::steady_clock::time_point last_open_failure_time;
+    constexpr auto OPEN_FAILURE_BACKOFF = std::chrono::seconds(5);
 
     auto test_log_event = [&](const std::string& line) {
         test_event_log.push_back(line);
@@ -2762,6 +2808,10 @@ int main(int argc, char* argv[]) {
             // by find_physical_ds4()'s legacy hidraw scan above, so it's
             // meaningless here.
             bool via_unbind_is_bt = via_unbind && name.rfind("0005:", 0) == 0;
+            if (!name.empty() && name == last_open_failure_id &&
+                std::chrono::steady_clock::now() - last_open_failure_time < OPEN_FAILURE_BACKOFF) {
+                name.clear();
+            }
             if (!name.empty()) {
                 std::cout << "Found physical DualShock 4: "
                           << (via_unbind ? name : ("/dev/" + name))
@@ -2798,8 +2848,11 @@ int main(int argc, char* argv[]) {
                 if (phy_fd < 0) {
                     std::cerr << "Failed to open physical controller: " << strerror(errno) << std::endl;
                     phy_fd = -1;
+                    last_open_failure_id = phy_name;
+                    last_open_failure_time = std::chrono::steady_clock::now();
                     phy_name = "";
                 } else {
+                    logged_first_report = false;
                     bool created = true;
                     bool reused_existing = false;
                     if (target_type == TYPE_NONE) {
@@ -3696,6 +3749,16 @@ int main(int argc, char* argv[]) {
                     pfds[phy_poll_idx].revents |= POLLHUP;
                 }
             } else {
+                if (!logged_first_report) {
+                    logged_first_report = true;
+                    std::cout << "First report from physical controller: id 0x" << std::hex
+                              << (int)in_buf[0] << std::dec << ", " << bytes_read << " bytes."
+                              << ((in_buf[0] == 0x01 && bytes_read < 64)
+                                      ? " Basic Bluetooth mode -- the full-report kick did not take,"
+                                        " so nothing will be forwarded."
+                                      : "")
+                              << std::endl;
+                }
                 // Parsed unconditionally (not just when a virtual device is
                 // open) so last_phy_common stays current for `ds4-ctl test`
                 // even in "none"/"hidden" mode, where nothing else reads
