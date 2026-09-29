@@ -69,15 +69,13 @@ Prefer to read before running? The script is
 [`install.sh`](install.sh) in this repository — download it, review it, and
 run it manually if you like.
 
-Two things the prebuilt path still expects from your system:
+The installer verifies the tarball's sha256 against the digest published
+on the GitHub release before extracting or installing.
 
-- The Makefile checks for `pkg-config`, `libusb-1.0`, `libbpf`, `bpftool` and
-  `clang` when it is parsed, so those packages must be present even though
-  nothing is compiled.
-- The shipped settings UI binary is dynamically linked against Qt 6, so
-  running it needs the Qt 6 runtime libraries (Core, Gui, Quick,
-  QuickControls2, Widgets, Svg). The daemon itself does not. If your distro's
-  Qt is older than the build's, build from source instead (Option 2).
+The shipped settings UI binary is dynamically linked against Qt 6, so
+running it needs the Qt 6 runtime libraries (Core, Gui, Quick,
+QuickControls2, Widgets, Svg). The daemon itself does not. If your distro's
+Qt is older than the build's, build from source instead (Option 2).
 
 ### Option 2: Clone and build from source
 ```bash

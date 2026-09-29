@@ -81,11 +81,12 @@ jobs:
           # no compiler required).
           mkdir -p "dist/${DIST_NAME}/build"
           cp -r build/. "dist/${DIST_NAME}/build/"
-          # Same idea for the Qt UI: ship the built binary so the Makefile's
-          # `ui` target can skip cmake entirely (it skips when a VERSION file
-          # and this binary are both present).
+          # Same idea for the Qt UI: ship only the built binary (not the
+          # whole cmake tree / object files) so the Makefile's `ui` target
+          # can skip cmake — it skips when a VERSION file and this binary
+          # are both present.
           mkdir -p "dist/${DIST_NAME}/ui/build"
-          cp -r ui/build/. "dist/${DIST_NAME}/ui/build/"
+          cp -a "ui/build/ds4-translator-ui" "dist/${DIST_NAME}/ui/build/"
           # Fallback for `make` inside the extracted tarball, which has no
           # .git for `git describe` to read from. Doubles as the marker the
           # Makefile's `ui` target uses to recognise a prebuilt release.
