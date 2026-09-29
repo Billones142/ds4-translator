@@ -39,13 +39,36 @@ UI_BINARY    = $(UI_BUILD_DIR)/ds4-translator-ui
 # translation while hidden -- see set-hide-method). No longer gated behind
 # a separate build flag: it's part of every build, same as the legacy
 # chmod/setfacl/EVIOCGRAB method, and is the default hide_method.
+#
+# Prebuilt release tarballs ship VERSION plus already-built binaries under
+# build/. Gate the hard pkg-config/clang/bpftool errors in that case so
+# `make install` from a release does not demand a compiler toolchain — the
+# whole point of the one-line installer. Source checkouts have no VERSION
+# file and keep the hard build requirements below.
+PREBUILT_RELEASE := $(shell \
+	[ -f VERSION ] && \
+	[ -x $(BUILD_DIR)/ds4-translator ] && \
+	[ -x $(BUILD_DIR)/ds4-ctl ] && \
+	[ -f $(BUILD_DIR)/hid-bpf-transport.bpf.o ] && echo yes)
+
+UNBIND_SRC      := src/hid-unbind-detect.cpp src/usb-hid-transport.cpp
+UNBIND_OBJ      := $(BUILD_DIR)/hid-unbind-detect.o $(BUILD_DIR)/usb-hid-transport.o
+HIDBPF_SRC      := src/hid-bpf-transport.cpp
+HIDBPF_OBJ      := $(BUILD_DIR)/hid-bpf-transport.o
+HIDBPF_BPF_OBJ  := $(BUILD_DIR)/hid-bpf-transport.bpf.o
+HIDBPF_INSTALL_PATH := $(PREFIX)/lib/ds4-translator/hid-bpf-transport.bpf.o
+
+ifeq ($(PREBUILT_RELEASE),yes)
+  UNBIND_CXXFLAGS :=
+  UNBIND_LDFLAGS  :=
+  HIDBPF_CXXFLAGS :=
+  HIDBPF_LDFLAGS  :=
+else
 ifeq ($(shell pkg-config --exists libusb-1.0 && echo yes),)
   $(error libusb-1.0 development package required (pkg-config libusb-1.0 not found))
 endif
 UNBIND_CXXFLAGS := $(shell pkg-config --cflags libusb-1.0)
 UNBIND_LDFLAGS  := $(shell pkg-config --libs libusb-1.0)
-UNBIND_SRC      := src/hid-unbind-detect.cpp src/usb-hid-transport.cpp
-UNBIND_OBJ      := $(BUILD_DIR)/hid-unbind-detect.o $(BUILD_DIR)/usb-hid-transport.o
 
 # HID-BPF replacement transport for the unbind hide method's Bluetooth
 # side (see src/hid-bpf-transport.h and src/hid-bpf/hid-bpf-transport.bpf.c)
@@ -63,10 +86,7 @@ ifeq ($(shell command -v clang 2>/dev/null),)
 endif
 HIDBPF_CXXFLAGS := $(shell pkg-config --cflags libbpf)
 HIDBPF_LDFLAGS  := $(shell pkg-config --libs libbpf)
-HIDBPF_SRC      := src/hid-bpf-transport.cpp
-HIDBPF_OBJ      := $(BUILD_DIR)/hid-bpf-transport.o
-HIDBPF_BPF_OBJ  := $(BUILD_DIR)/hid-bpf-transport.bpf.o
-HIDBPF_INSTALL_PATH := $(PREFIX)/lib/ds4-translator/hid-bpf-transport.bpf.o
+endif
 
 CXXFLAGS = -O3 $(STRICT_WARNINGS) -std=c++17 -DDS4_VERSION=\"$(VERSION)\" \
            -DHID_BPF_OBJ_PATH=\"$(HIDBPF_INSTALL_PATH)\" $(UNBIND_CXXFLAGS) $(HIDBPF_CXXFLAGS)
@@ -149,9 +169,20 @@ clean:
 # `install-cli` there instead.
 # Always delegated: CMake already does its own up-to-date checking, so
 # there is nothing for make to track here.
+#
+# Except in an extracted release tarball, which ships both a VERSION file
+# (written by the release workflow) and an already-built UI binary. Those
+# two together mean "prebuilt release, not a source checkout", so the
+# cmake/Qt step is skipped -- otherwise `make install` from a release
+# would demand Qt 6 + CMake on a path whose whole point is needing no
+# compiler. A real checkout has no VERSION file and always rebuilds.
 ui:
-	cmake -S ui -B $(UI_BUILD_DIR) -DCMAKE_BUILD_TYPE=Release
-	cmake --build $(UI_BUILD_DIR) -j$(shell nproc)
+	@if [ -f VERSION ] && [ -x $(UI_BINARY) ]; then \
+	    echo "Using prebuilt $(UI_BINARY) from the release tarball"; \
+	else \
+	    cmake -S ui -B $(UI_BUILD_DIR) -DCMAKE_BUILD_TYPE=Release && \
+	    cmake --build $(UI_BUILD_DIR) -j$(shell nproc); \
+	fi
 
 # The .desktop file is not cosmetic: the desktop portal looks the app up by
 # it, and without it every launch logs "App info not found for

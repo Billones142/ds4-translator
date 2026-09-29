@@ -37,16 +37,45 @@ ends up active.
 
 ## Installation
 
-### Option 1: Download a release
+### Option 1: One-line install from a release (recommended)
 
-Grabs the latest prebuilt release tarball (no compiler needed) and installs it:
+Installs the latest release. No compiler needed — the release ships the
+already-built daemon, `ds4-ctl` and Qt settings UI:
 ```bash
-curl -s https://api.github.com/repos/Billones142/ds4-translator/releases/latest \
-  | grep browser_download_url | cut -d '"' -f4 | xargs curl -LO
-tar xzf ds4-translator-*.tar.gz
-cd ds4-translator-*/
-sudo make install
+curl -fsSL https://raw.githubusercontent.com/Billones142/ds4-translator/main/install.sh | sh
 ```
+
+The script downloads the release tarball into a temporary directory, runs
+`sudo make install` on it (so it asks for your password) and cleans up after
+itself. That installs the daemon, `ds4-ctl`, the settings UI, the udev rule
+and the systemd service, then enables and starts the service.
+
+#### Installing a specific version
+
+The version comes from the URL: every release publishes its own copy of the
+installer, and that copy installs exactly that release. Swap the tag in the
+path for the one you want:
+```bash
+curl -fsSL https://github.com/Billones142/ds4-translator/releases/download/v0.6.0/install.sh | sh
+```
+
+Available tags are on
+[the releases page](https://github.com/Billones142/ds4-translator/releases) —
+any release whose assets include an `install.sh` can be installed this way.
+Downgrading is just running an older tag's URL; the installer overwrites
+whatever is currently installed and restarts the service.
+
+Prefer to read before running? The script is
+[`install.sh`](install.sh) in this repository — download it, review it, and
+run it manually if you like.
+
+The installer verifies the tarball's sha256 against the digest published
+on the GitHub release before extracting or installing.
+
+The shipped settings UI binary is dynamically linked against Qt 6, so
+running it needs the Qt 6 runtime libraries (Core, Gui, Quick,
+QuickControls2, Widgets, Svg). The daemon itself does not. If your distro's
+Qt is older than the build's, build from source instead (Option 2).
 
 ### Option 2: Clone and build from source
 ```bash

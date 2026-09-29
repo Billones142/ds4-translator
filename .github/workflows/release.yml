@@ -2,7 +2,9 @@ name: Release
 
 # Builds ds4-translator/ds4-ctl and publishes a downloadable tarball whenever
 # a version tag (v*) is pushed to main, so users can install without needing
-# a compiler (see README's "Download a release" instructions).
+# a compiler. install.sh at the repo root downloads and installs this asset
+# (see README's "One-line install from a release"), and derives the asset
+# name from the tag exactly as DIST_NAME does below -- keep the two in sync.
 on:
   push:
     tags:
@@ -51,6 +53,17 @@ jobs:
       - name: Build
         run: make all VERSION="${GITHUB_REF_NAME}"
 
+      - name: Install Qt 6 build dependencies
+        run: |
+          # Only the Qt settings UI (ui/) needs these; the daemon does not.
+          # Building it here is what lets `make install` from the extracted
+          # tarball install the UI without Qt or CMake on the user's machine.
+          sudo apt-get install -y cmake qt6-base-dev qt6-declarative-dev \
+            qt6-svg-dev libgl1-mesa-dev
+
+      - name: Build the Qt settings UI
+        run: make ui
+
       - name: Package release archive
         run: |
           VERSION="${GITHUB_REF_NAME}"
@@ -68,14 +81,36 @@ jobs:
           # no compiler required).
           mkdir -p "dist/${DIST_NAME}/build"
           cp -r build/. "dist/${DIST_NAME}/build/"
+          # Same idea for the Qt UI: ship only the built binary (not the
+          # whole cmake tree / object files) so the Makefile's `ui` target
+          # can skip cmake — it skips when a VERSION file and this binary
+          # are both present.
+          mkdir -p "dist/${DIST_NAME}/ui/build"
+          cp -a "ui/build/ds4-translator-ui" "dist/${DIST_NAME}/ui/build/"
           # Fallback for `make` inside the extracted tarball, which has no
-          # .git for `git describe` to read from.
+          # .git for `git describe` to read from. Doubles as the marker the
+          # Makefile's `ui` target uses to recognise a prebuilt release.
           echo "${VERSION}" > "dist/${DIST_NAME}/VERSION"
           tar -czf "${DIST_NAME}.tar.gz" -C dist "${DIST_NAME}"
           echo "ASSET_PATH=${DIST_NAME}.tar.gz" >> "$GITHUB_ENV"
 
+      - name: Stamp install.sh with this version
+        run: |
+          # The installer is published as a per-release asset with the tag
+          # baked in, so the URL a user curls *is* the version selector:
+          # .../releases/download/v1.2.3/install.sh installs v1.2.3, while
+          # the copy on main keeps its unstamped placeholder and resolves
+          # the latest release at runtime.
+          sed "s|^PINNED_VERSION=\"\"|PINNED_VERSION=\"${GITHUB_REF_NAME}\"|" \
+            install.sh > dist/install.sh
+          grep -q "^PINNED_VERSION=\"${GITHUB_REF_NAME}\"$" dist/install.sh \
+            || { echo "install.sh PINNED_VERSION placeholder not found"; exit 1; }
+          chmod +x dist/install.sh
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.ASSET_PATH }}
+          files: |
+            ${{ env.ASSET_PATH }}
+            dist/install.sh
           generate_release_notes: true
