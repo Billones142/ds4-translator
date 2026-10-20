@@ -44,15 +44,30 @@ namespace fs = std::filesystem;
 enum ControllerType {
     TYPE_DS4,
     TYPE_DUALSENSE,
+    TYPE_XBOX360,
+    TYPE_XBOXONE,
+    TYPE_XBOXSERIES,
     TYPE_NONE,
     TYPE_HIDDEN
 };
 
-// TYPE_DS4/TYPE_DUALSENSE are the only types that actually drive a virtual
-// device; TYPE_NONE (fully hands-off passthrough) and TYPE_HIDDEN (physical
+// The Xbox types are vendor-class USB devices bound by xpad rather than HID
+// devices, so they only exist as functionfs gadgets (no uhid, no custom name,
+// no MAC squat).
+bool controller_type_is_xbox(ControllerType type) {
+    return type == TYPE_XBOX360 || type == TYPE_XBOXONE || type == TYPE_XBOXSERIES;
+}
+
+// Xbox One S / Series X|S: GIP instead of the 360's fixed packet format.
+bool controller_type_is_gip(ControllerType type) {
+    return type == TYPE_XBOXONE || type == TYPE_XBOXSERIES;
+}
+
+// TYPE_DS4/TYPE_DUALSENSE/the Xbox types are the only types that actually
+// drive a virtual device; TYPE_NONE (fully hands-off passthrough) and TYPE_HIDDEN (physical
 // hidden from other apps, but no translation) never create one.
 bool controller_type_emulates(ControllerType type) {
-    return type == TYPE_DS4 || type == TYPE_DUALSENSE;
+    return type == TYPE_DS4 || type == TYPE_DUALSENSE || controller_type_is_xbox(type);
 }
 
 // Every type except TYPE_NONE hides the physical controller from other apps.
@@ -64,6 +79,9 @@ const char* controller_type_name(ControllerType type) {
     switch (type) {
         case TYPE_DS4: return "DualShock 4";
         case TYPE_DUALSENSE: return "DualSense";
+        case TYPE_XBOX360: return "Xbox 360";
+        case TYPE_XBOXONE: return "Xbox One S";
+        case TYPE_XBOXSERIES: return "Xbox Series X|S";
         case TYPE_HIDDEN: return "Hidden";
         default: return "None";
     }
@@ -73,9 +91,34 @@ const char* controller_type_config_str(ControllerType type) {
     switch (type) {
         case TYPE_DS4: return "ds4";
         case TYPE_DUALSENSE: return "dualsense";
+        case TYPE_XBOX360: return "xbox360";
+        case TYPE_XBOXONE: return "xboxone";
+        case TYPE_XBOXSERIES: return "xboxseries";
         case TYPE_HIDDEN: return "hidden";
         default: return "none";
     }
+}
+
+// Config / command-line spelling -> type. False (out untouched) if unknown.
+bool parse_controller_type(const std::string& val, ControllerType& out) {
+    static const ControllerType all[] = { TYPE_DS4, TYPE_DUALSENSE, TYPE_XBOX360,
+                                         TYPE_XBOXONE, TYPE_XBOXSERIES, TYPE_NONE, TYPE_HIDDEN };
+    for (ControllerType t : all) {
+        if (val == controller_type_config_str(t)) {
+            out = t;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Like parse_controller_type(), but only the types that drive a virtual
+// device -- what set-type (besides none/hidden) and create-virtual accept.
+bool parse_emulated_type(const std::string& val, ControllerType& out) {
+    ControllerType parsed;
+    if (!parse_controller_type(val, parsed) || !controller_type_emulates(parsed)) return false;
+    out = parsed;
+    return true;
 }
 
 struct PhysicalNode {
@@ -816,8 +859,11 @@ static bool physical_pad_present();
 // and no real pad is bound to hid-playstation right now. That last test is
 // what keeps the emulated device safe when the driver swap failed and the pad
 // went back to hid-playstation -- squatting then would hand the -EEXIST to us.
-static void select_virtual_mac() {
-    bool squat = g_mac_squat_enabled &&
+static void select_virtual_mac(ControllerType type) {
+    // An xpad device never enters hid-playstation's device list, so borrowing
+    // the pad's MAC would block nothing.
+    bool squat = !controller_type_is_xbox(type) &&
+                 g_mac_squat_enabled &&
                  !g_mac_squat_force_default &&
                  g_hide_method == HIDE_METHOD_UNLINK &&
                  !g_remembered_physical_mac.empty() &&
@@ -1815,14 +1861,9 @@ ControllerType read_config(ControllerType default_type) {
             while (!val.empty() && (val.back() == '\n' || val.back() == '\r' || val.back() == ' ')) {
                 val.pop_back();
             }
-            if (val == "dualsense") {
-                return TYPE_DUALSENSE;
-            } else if (val == "ds4") {
-                return TYPE_DS4;
-            } else if (val == "none") {
-                return TYPE_NONE;
-            } else if (val == "hidden") {
-                return TYPE_HIDDEN;
+            ControllerType parsed;
+            if (parse_controller_type(val, parsed)) {
+                return parsed;
             }
         }
     }
@@ -1908,6 +1949,15 @@ BackendType backend_for_dualsense = BACKEND_UHID;
 // backend_for_* pair above.
 std::string g_name_ds4;
 std::string g_name_dualsense;
+// Xbox 360 is a vendor-class USB device (bound by xpad, not HID), which uhid
+// cannot express -- it only exists as a functionfs gadget.
+BackendType backend_for_type(ControllerType type) {
+    if (controller_type_is_xbox(type)) return BACKEND_FUNCTIONFS;
+    switch (type) {
+        case TYPE_DUALSENSE: return backend_for_dualsense;
+        default: return backend_for_ds4;
+    }
+}
 FunctionFSDevice virtual_functionfs = { .ep0_fd = -1, .ep_in_fd = -1, .ep_out_fd = -1, .device_open = false, .configured = false, .target_type = 0, .out_thread_spawned = false, .in_thread_spawned = false, .pending_report_len = 0, .report_pending = false };
 
 extern "C" {
@@ -1978,6 +2028,13 @@ void write_config(ControllerType type, BackendType ds4_backend, BackendType dual
 static bool create_virtual_device_backend(ControllerType type);
 void destroy_virtual_device();
 
+// Xbox One/Series: whether the Guide button was last sent as pressed (it
+// travels as its own queued packet, only on change), and the GIP sequence
+// counters. Reset whenever the device is recreated.
+bool g_gip_guide_down = false;
+uint8_t g_gip_input_seq = 0;
+uint8_t g_gip_key_seq = 0;
+
 // True once the emulated device this daemon just created is bound to
 // hid-playstation. Only meaningful while the MAC squat is active, and that is
 // the whole point: whoever registers second with a given MAC is refused, so a
@@ -2038,23 +2095,40 @@ bool create_virtual_device(ControllerType type) {
     return false;
 }
 
+static int ffs_target_for_type(ControllerType type) {
+    switch (type) {
+        case TYPE_XBOX360: return FFS_TARGET_XBOX360;
+        case TYPE_XBOXONE: return FFS_TARGET_XBOXONE;
+        case TYPE_XBOXSERIES: return FFS_TARGET_XBOXSERIES;
+        case TYPE_DUALSENSE: return FFS_TARGET_DUALSENSE;
+        default: return FFS_TARGET_DS4;
+    }
+}
+
 static bool create_virtual_device_backend(ControllerType type) {
     // Empty means "no override" -- each backend below falls back to its own
     // default name in that case.
-    const std::string& custom_name = (type == TYPE_DS4) ? g_name_ds4 : g_name_dualsense;
+    const std::string& custom_name = (type == TYPE_DUALSENSE) ? g_name_dualsense : g_name_ds4;
 
     // Re-evaluated on every create, never cached: a destroy/recreate in the
     // middle of a session must not come back up under a different identity
     // than the conditions of the moment allow.
-    select_virtual_mac();
+    select_virtual_mac(type);
     functionfs_set_mac(g_virtual_mac_le, g_virtual_mac_str.c_str());
 
+    if (controller_type_is_xbox(type)) backend_type = BACKEND_FUNCTIONFS;
+
     if (backend_type == BACKEND_FUNCTIONFS) {
-        if (functionfs_init(&virtual_functionfs, type == TYPE_DS4 ? 1 : 2, custom_name.c_str())) {
+        const int ffs_target = ffs_target_for_type(type);
+        if (functionfs_init(&virtual_functionfs, ffs_target, custom_name.c_str())) {
                 std::cout << "Virtual USB Controller created via FunctionFS." << std::endl;
             g_suppress_next_led_update = true;
             g_vdev_exists = true;
             return true;
+        } else if (controller_type_is_xbox(type)) {
+            std::cerr << "Failed to initialize FunctionFS backend. Xbox emulation needs it "
+                         "(dummy_hcd, libcomposite, usb_f_fs) plus the xpad driver; there is no UHID fallback." << std::endl;
+            return false;
         } else {
             std::cerr << "Failed to initialize FunctionFS backend. Falling back to UHID backend..." << std::endl;
             backend_type = BACKEND_UHID;
@@ -2125,6 +2199,8 @@ void destroy_virtual_device() {
     // connect path adopt a device that is gone.
     g_vdev_exists = false;
     g_mac_squat_vdev = false;
+    // A recreated GIP device starts with the Guide button released.
+    g_gip_guide_down = false;
 
     if (backend_type == BACKEND_FUNCTIONFS) {
         functionfs_close(&virtual_functionfs);
@@ -2189,6 +2265,131 @@ uint8_t encode_dualsense_battery(int percent, BatteryState state) {
     return (uint8_t)((status_bits << 4) | (level & 0x0F));
 }
 
+// Shared by the 360 and GIP builders below: both are fed the DS4-format
+// "common" struct, so physical passthrough and the standalone synthetic input
+// use the same translation. The d-pad bits (up 0x01, down 0x02, left 0x04,
+// right 0x08) are identical on every Xbox wire format.
+int16_t xbox_stick_axis(uint8_t value, bool invert) {
+    int32_t v = (int32_t(value) - 128) * 257;
+    if (invert) v = -v;
+    if (v > 32767) v = 32767;
+    if (v < -32768) v = -32768;
+    return (int16_t)v;
+}
+
+uint8_t xbox_dpad_bits(uint8_t hat) {
+    // Hat: 0=up, 1=up-right ... 7=up-left clockwise, 8+ = neutral.
+    static const uint8_t hat_to_dpad[8] = {
+        0x01, 0x01 | 0x08, 0x08, 0x02 | 0x08, 0x02, 0x02 | 0x04, 0x04, 0x01 | 0x04
+    };
+    return (hat < 8) ? hat_to_dpad[hat] : 0;
+}
+
+void put_le16(uint8_t* out, uint16_t value) {
+    out[0] = (uint8_t)(value & 0xFF);
+    out[1] = (uint8_t)(value >> 8);
+}
+
+// Xbox 360 wire format (xpad's xpad360_process_packet): 20-byte input report,
+// byte 0 = 0x00 (data), byte 1 = 0x14 (length), then two button bytes, two
+// 8-bit triggers and four little-endian int16 stick axes (Y up = positive).
+constexpr size_t XBOX360_REPORT_SIZE = 20;
+
+void build_xbox360_report(const struct dualshock4_input_report_common& common, uint8_t out[XBOX360_REPORT_SIZE]) {
+    memset(out, 0, XBOX360_REPORT_SIZE);
+    out[1] = 0x14;
+
+    uint8_t b2 = xbox_dpad_bits(common.buttons[0] & 0x0F);
+    if (common.buttons[1] & 0x20) b2 |= 0x10; // Options -> Start
+    if (common.buttons[1] & 0x10) b2 |= 0x20; // Share -> Back
+    if (common.buttons[2] & 0x02) b2 |= 0x20; // Touchpad click -> Back
+    if (common.buttons[1] & 0x40) b2 |= 0x40; // L3
+    if (common.buttons[1] & 0x80) b2 |= 0x80; // R3
+
+    uint8_t b3 = 0;
+    if (common.buttons[1] & 0x01) b3 |= 0x01; // L1 -> LB
+    if (common.buttons[1] & 0x02) b3 |= 0x02; // R1 -> RB
+    if (common.buttons[2] & 0x01) b3 |= 0x04; // PS -> Guide
+    if (common.buttons[0] & 0x20) b3 |= 0x10; // Cross -> A
+    if (common.buttons[0] & 0x40) b3 |= 0x20; // Circle -> B
+    if (common.buttons[0] & 0x10) b3 |= 0x40; // Square -> X
+    if (common.buttons[0] & 0x80) b3 |= 0x80; // Triangle -> Y
+    out[2] = b2;
+    out[3] = b3;
+    out[4] = common.z;
+    out[5] = common.rz;
+
+    const int16_t axes[4] = {
+        xbox_stick_axis(common.x, false), xbox_stick_axis(common.y, true),
+        xbox_stick_axis(common.rx, false), xbox_stick_axis(common.ry, true)
+    };
+    for (int i = 0; i < 4; ++i) {
+        put_le16(&out[6 + i * 2], (uint16_t)axes[i]);
+    }
+}
+
+// Xbox One / Series wire format (GIP, xpad's xpadone_process_packet): a 4-byte
+// header 0x20 0x00 <seq> <payload length>, then button bytes at 4 and 5,
+// 16-bit triggers (0-1023) at 6-9 and four int16 sticks at 10-17. The Series
+// pad's Share button is bit 0 of byte (packet length - 26), which xpad only
+// reads when the packet is at least that long -- hence the larger Series
+// packet. Guide is not part of this report; see send_gip_guide_event().
+constexpr size_t GIP_ONE_REPORT_SIZE = 18;
+constexpr size_t GIP_SERIES_REPORT_SIZE = 48;
+constexpr size_t GIP_SERIES_SHARE_OFFSET = GIP_SERIES_REPORT_SIZE - 26;
+
+size_t build_gip_input_report(const struct dualshock4_input_report_common& common, bool series,
+                              uint8_t seq, uint8_t out[FFS_PACKET_MAX]) {
+    const size_t size = series ? GIP_SERIES_REPORT_SIZE : GIP_ONE_REPORT_SIZE;
+    memset(out, 0, size);
+    out[0] = 0x20;
+    out[2] = seq;
+    out[3] = (uint8_t)(size - 4);
+
+    const bool touchpad = (common.buttons[2] & 0x02) != 0;
+    uint8_t b4 = 0;
+    if (common.buttons[1] & 0x20) b4 |= 0x04;                   // Options -> Menu
+    if ((common.buttons[1] & 0x10) || (touchpad && !series)) b4 |= 0x08; // Share -> View
+    if (common.buttons[0] & 0x20) b4 |= 0x10;                   // Cross -> A
+    if (common.buttons[0] & 0x40) b4 |= 0x20;                   // Circle -> B
+    if (common.buttons[0] & 0x10) b4 |= 0x40;                   // Square -> X
+    if (common.buttons[0] & 0x80) b4 |= 0x80;                   // Triangle -> Y
+
+    uint8_t b5 = xbox_dpad_bits(common.buttons[0] & 0x0F);
+    if (common.buttons[1] & 0x01) b5 |= 0x10; // L1 -> LB
+    if (common.buttons[1] & 0x02) b5 |= 0x20; // R1 -> RB
+    if (common.buttons[1] & 0x40) b5 |= 0x40; // L3
+    if (common.buttons[1] & 0x80) b5 |= 0x80; // R3
+    out[4] = b4;
+    out[5] = b5;
+
+    put_le16(&out[6], (uint16_t)(common.z * 1023 / 255));
+    put_le16(&out[8], (uint16_t)(common.rz * 1023 / 255));
+    const int16_t axes[4] = {
+        xbox_stick_axis(common.x, false), xbox_stick_axis(common.y, true),
+        xbox_stick_axis(common.rx, false), xbox_stick_axis(common.ry, true)
+    };
+    for (int i = 0; i < 4; ++i) {
+        put_le16(&out[10 + i * 2], (uint16_t)axes[i]);
+    }
+
+    if (series && touchpad) out[GIP_SERIES_SHARE_OFFSET] |= 0x01; // Touchpad click -> Share
+    return size;
+}
+
+// Guide (PS) is a separate "virtual key" packet on GIP, sent only when it
+// changes. It goes through the event queue because a press and release in
+// quick succession must both arrive, which the newest-wins input mailbox
+// cannot guarantee. Option byte 0x20 (internal, no ack requested): xpad only
+// acks the 0x30 variant, and nothing here would handle the ack.
+void send_gip_guide_event(bool pressed) {
+    const uint8_t packet[6] = { 0x07, 0x20, g_gip_key_seq, 0x02, (uint8_t)(pressed ? 0x01 : 0x00), 0x5b };
+    if (functionfs_send_event_packet(&virtual_functionfs, packet, sizeof(packet))) {
+        g_gip_key_seq++;
+        g_gip_guide_down = pressed;
+    }
+}
+
 // Build and send a UHID_INPUT2 report for `type` from a DS4-format "common"
 // struct. Shared by the physical-passthrough path and the standalone
 // synthetic-input path (`ds4-ctl virtual`), which differ only in how
@@ -2219,6 +2420,21 @@ void emit_input_report(ControllerType type, const struct dualshock4_input_report
             last_virtual_touch.points[1].contact = 0x80;
         }
         last_virtual_valid = true;
+    }
+
+    if (type == TYPE_XBOX360) {
+        uint8_t report[XBOX360_REPORT_SIZE];
+        build_xbox360_report(common, report);
+        functionfs_send_input_report(&virtual_functionfs, report, sizeof(report));
+        return;
+    }
+    if (controller_type_is_gip(type)) {
+        const bool guide = (common.buttons[2] & 0x01) != 0;
+        if (guide != g_gip_guide_down) send_gip_guide_event(guide);
+        uint8_t report[FFS_PACKET_MAX];
+        const size_t size = build_gip_input_report(common, type == TYPE_XBOXSERIES, g_gip_input_seq++, report);
+        functionfs_send_input_report(&virtual_functionfs, report, size);
+        return;
     }
 
     struct uhid_event out_ev;
@@ -2390,20 +2606,10 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--type" || arg == "-t") {
             if (i + 1 < argc) {
                 std::string val = argv[++i];
-                if (val == "dualsense") {
-                    target_type = TYPE_DUALSENSE;
-                    type_explicitly_set = true;
-                } else if (val == "ds4") {
-                    target_type = TYPE_DS4;
-                    type_explicitly_set = true;
-                } else if (val == "none") {
-                    target_type = TYPE_NONE;
-                    type_explicitly_set = true;
-                } else if (val == "hidden") {
-                    target_type = TYPE_HIDDEN;
+                if (parse_controller_type(val, target_type)) {
                     type_explicitly_set = true;
                 } else {
-                    std::cerr << "Unknown type: " << val << ". Supported: ds4, dualsense, none, hidden" << std::endl;
+                    std::cerr << "Unknown type: " << val << ". Supported: ds4, dualsense, xbox360, xboxone, xboxseries, none, hidden" << std::endl;
                     return 1;
                 }
             } else {
@@ -2413,9 +2619,9 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--help" || arg == "-h") {
             std::cout << "Usage: ds4-translator [options]" << std::endl;
             std::cout << "Options:" << std::endl;
-            std::cout << "  -t, --type <ds4|dualsense|none|hidden>   Target virtual controller type (default: ds4)" << std::endl;
+            std::cout << "  -t, --type <ds4|dualsense|xbox360|xboxone|xboxseries|none|hidden>   Target virtual controller type (default: ds4)" << std::endl;
             std::cout << "  -h, --help                  Show this help message" << std::endl;
-            std::cout << "Backend (uhid/functionfs) is config/set-backend only -- see 'ds4-ctl set-backend'." << std::endl;
+            std::cout << "Backend (uhid/functionfs) is config/set-backend only -- see 'ds4-ctl set-backend' (the Xbox types are always functionfs)." << std::endl;
             std::cout << "Hide method (legacy/unbind) is config/set-hide-method only -- see 'ds4-ctl set-hide-method'." << std::endl;
             return 0;
         }
@@ -2427,7 +2633,7 @@ int main(int argc, char* argv[]) {
 
     backend_for_ds4 = read_backend_config(TYPE_DS4, BACKEND_FUNCTIONFS);
     backend_for_dualsense = read_backend_config(TYPE_DUALSENSE, BACKEND_UHID);
-    backend_type = (target_type == TYPE_DS4) ? backend_for_ds4 : backend_for_dualsense;
+    backend_type = backend_for_type(target_type);
     std::cout << "Using " << backend_type_name(backend_type) << " backend." << std::endl;
 
     g_name_ds4 = read_name_config(TYPE_DS4);
@@ -3198,6 +3404,7 @@ int main(int argc, char* argv[]) {
                     }
 
                     std::string response = "Unknown command";
+                    ControllerType want_virtual = TYPE_DS4; // set by parse_emulated_type() in the set-type/create-virtual matches
                     bool keep_open = false; // set by "test": ownership of client_fd moves to test_subscribers
                     if (cmd == "status") {
                         std::string phy_display = phy_name.empty() ? "None" :
@@ -3234,22 +3441,26 @@ int main(int argc, char* argv[]) {
                                 PHYSICAL_DISCONNECT_GRACE - (std::chrono::steady_clock::now() - phy_disconnect_time));
                             response += "Physical Disconnected, Grace Period: " + std::to_string(remaining.count()) + "s remaining\n";
                         }
-                    } else if (cmd == "create-virtual ds4" || cmd == "create-virtual dualsense") {
-                        ControllerType want = (cmd == "create-virtual ds4") ? TYPE_DS4 : TYPE_DUALSENSE;
+                    } else if (cmd.rfind("create-virtual ", 0) == 0 &&
+                               parse_emulated_type(cmd.substr(strlen("create-virtual ")), want_virtual)) {
+                        const ControllerType want = want_virtual;
                         if (phy_fd >= 0) {
                             response = "Error: A physical controller is connected and already driving the virtual device.";
                         } else if (standalone_virtual) {
                             response = "Virtual controller already active.";
                         } else if (vdev_configured()) {
                             response = "Error: A virtual device is already active.";
-                        } else if (create_virtual_device(want)) {
-                            standalone_virtual = true;
-                            target_type = want;
-                            synth_state = SyntheticState();
-                            device_open = false;
-                            response = "OK: Standalone virtual controller created.";
                         } else {
-                            response = "Error: Failed to create virtual controller (see daemon log).";
+                            backend_type = backend_for_type(want);
+                            if (create_virtual_device(want)) {
+                                standalone_virtual = true;
+                                target_type = want;
+                                synth_state = SyntheticState();
+                                device_open = false;
+                                response = "OK: Standalone virtual controller created.";
+                            } else {
+                                response = "Error: Failed to create virtual controller (see daemon log).";
+                            }
                         }
                     } else if (cmd == "destroy-virtual") {
                         if (!standalone_virtual) {
@@ -3329,32 +3540,22 @@ int main(int argc, char* argv[]) {
                                 response = "OK";
                             }
                         }
-                    } else if (cmd == "set-type ds4") {
-                        if (target_type != TYPE_DS4) {
-                            pending_type_change = TYPE_DS4;
+                    } else if (cmd.rfind("set-type ", 0) == 0 &&
+                               parse_emulated_type(cmd.substr(strlen("set-type ")), want_virtual)) {
+                        const ControllerType want = want_virtual;
+                        if (target_type != want) {
+                            pending_type_change = want;
                             type_change_requested = true;
                             // Switching type auto-applies that type's own configured
                             // backend (ds4/dualsense each have an independent one --
-                            // see set-backend below).
-                            pending_backend_change = backend_for_ds4;
+                            // see set-backend below; the Xbox types are always functionfs).
+                            pending_backend_change = backend_for_type(want);
                             backend_change_requested = true;
-                            write_config(TYPE_DS4, backend_for_ds4, backend_for_dualsense, g_name_ds4, g_name_dualsense);
-                            response = "OK: Changing emulation type to DualShock 4 (backend: " +
-                                       std::string(backend_type_name(backend_for_ds4)) + ")...";
+                            write_config(want, backend_for_ds4, backend_for_dualsense, g_name_ds4, g_name_dualsense);
+                            response = "OK: Changing emulation type to " + std::string(controller_type_name(want)) +
+                                       " (backend: " + std::string(backend_type_name(pending_backend_change)) + ")...";
                         } else {
-                            response = "Already set to DualShock 4";
-                        }
-                    } else if (cmd == "set-type dualsense") {
-                        if (target_type != TYPE_DUALSENSE) {
-                            pending_type_change = TYPE_DUALSENSE;
-                            type_change_requested = true;
-                            pending_backend_change = backend_for_dualsense;
-                            backend_change_requested = true;
-                            write_config(TYPE_DUALSENSE, backend_for_ds4, backend_for_dualsense, g_name_ds4, g_name_dualsense);
-                            response = "OK: Changing emulation type to DualSense (backend: " +
-                                       std::string(backend_type_name(backend_for_dualsense)) + ")...";
-                        } else {
-                            response = "Already set to DualSense";
+                            response = "Already set to " + std::string(controller_type_name(want));
                         }
                     } else if (cmd == "set-type none") {
                         if (target_type != TYPE_NONE) {

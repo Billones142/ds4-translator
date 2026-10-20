@@ -199,7 +199,7 @@ const std::vector<std::string> &controller_values() {
 }
 
 const std::vector<std::string> &type_values() {
-    static const std::vector<std::string> values = {"ds4", "dualsense", "none", "hidden"};
+    static const std::vector<std::string> values = {"ds4", "dualsense", "xbox360", "xboxone", "xboxseries", "none", "hidden"};
     return values;
 }
 
@@ -628,6 +628,9 @@ std::string status_value(const std::vector<StatusField> &fields, const std::stri
 std::string type_display_to_config(const std::string &display) {
     if (display == "DualShock 4") return "ds4";
     if (display == "DualSense") return "dualsense";
+    if (display == "Xbox 360") return "xbox360";
+    if (display == "Xbox One S") return "xboxone";
+    if (display == "Xbox Series X|S") return "xboxseries";
     if (display == "Hidden") return "hidden";
     return "none";
 }
@@ -635,6 +638,9 @@ std::string type_display_to_config(const std::string &display) {
 std::string type_config_to_display(const std::string &config) {
     if (config == "ds4") return "DualShock 4";
     if (config == "dualsense") return "DualSense";
+    if (config == "xbox360") return "Xbox 360";
+    if (config == "xboxone") return "Xbox One S";
+    if (config == "xboxseries") return "Xbox Series X|S";
     if (config == "hidden") return "Hidden";
     return "None";
 }

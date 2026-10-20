@@ -58,7 +58,7 @@ ScrollView {
                 anchors.fill: parent
 
                 Label {
-                    text: qsTr("Which controller games see. Changing this recreates the virtual device.")
+                    text: qsTr("Which controller games see. Changing this recreates the virtual device. The Xbox types always use the functionfs backend and the xpad driver's own name.")
                     wrapMode: Text.Wrap
                     Layout.fillWidth: true
                 }
@@ -71,6 +71,9 @@ ScrollView {
                     labelMap: ({
                         "ds4": qsTr("DualShock 4"),
                         "dualsense": qsTr("DualSense"),
+                        "xbox360": qsTr("Xbox 360"),
+                        "xboxone": qsTr("Xbox One S"),
+                        "xboxseries": qsTr("Xbox Series X|S"),
                         "none": qsTr("None"),
                         "hidden": qsTr("Hidden")
                     })

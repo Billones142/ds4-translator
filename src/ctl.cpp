@@ -23,7 +23,7 @@ void print_usage() {
     std::cout << "Commands:" << std::endl;
     std::cout << "  version                          Print ds4-ctl's version" << std::endl;
     std::cout << "  status                          Get current status of the translation daemon" << std::endl;
-    std::cout << "  set-type <ds4|dualsense|none|hidden>   Change the virtual controller emulation type at runtime" << std::endl;
+    std::cout << "  set-type <ds4|dualsense|xbox360|xboxone|xboxseries|none|hidden>   Change the virtual controller emulation type at runtime" << std::endl;
     std::cout << "                                   (none = fully untouched physical passthrough, hidden = physical" << std::endl;
     std::cout << "                                   hidden from other apps but not translated)" << std::endl;
     std::cout << "  set-backend <ds4|dualsense> <uhid|functionfs>   Change that controller type's backend at" << std::endl;
@@ -40,9 +40,9 @@ void print_usage() {
     std::cout << "                                   NOTE: vendor ID stays Sony's regardless -- some games/" << std::endl;
     std::cout << "                                   drivers cross-check name against vendor ID, so a custom" << std::endl;
     std::cout << "                                   name may raise compatibility suspicion in those cases." << std::endl;
-    std::cout << "  create-virtual <ds4|dualsense>   Create a standalone virtual controller, no physical pad needed" << std::endl;
+    std::cout << "  create-virtual <ds4|dualsense|xbox360|xboxone|xboxseries> Create a standalone virtual controller, no physical pad needed" << std::endl;
     std::cout << "  destroy-virtual                  Destroy the standalone virtual controller" << std::endl;
-    std::cout << "  virtual [ds4|dualsense] [--auto] Create (if needed) a standalone virtual controller and open" << std::endl;
+    std::cout << "  virtual [ds4|dualsense|xbox360|xboxone|xboxseries] [--auto] Create (if needed) a standalone virtual controller and open" << std::endl;
     std::cout << "                                   an interactive keyboard button-tester UI to drive it" << std::endl;
     std::cout << "                                   (--auto: destroy it on exit, but only if this run is the" << std::endl;
     std::cout << "                                   one that created it)" << std::endl;
@@ -192,12 +192,12 @@ struct CommandSpec {
 static const CommandSpec kCommands[] = {
     {"version",          nullptr},
     {"status",           nullptr},
-    {"set-type",         "ds4 dualsense none hidden"},
+    {"set-type",         "ds4 dualsense xbox360 xboxone xboxseries none hidden"},
     {"set-backend",      nullptr}, // position-aware, special-cased in --complete-args below
     {"set-name",         nullptr}, // position-aware (ds4|dualsense, then free-text name), special-cased below
-    {"create-virtual",   "ds4 dualsense"},
+    {"create-virtual",   "ds4 dualsense xbox360 xboxone xboxseries"},
     {"destroy-virtual",  nullptr},
-    {"virtual",          "ds4 dualsense --auto"},
+    {"virtual",          "ds4 dualsense xbox360 xboxone xboxseries --auto"},
     {"release-physical", nullptr},
     {"resume-physical",  nullptr},
     {"tap",              nullptr},

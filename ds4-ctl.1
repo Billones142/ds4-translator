@@ -18,6 +18,15 @@ Changes the target virtual controller emulation type to a Sony DualShock 4.
 .B set-type dualsense
 Changes the target virtual controller emulation type to a Sony DualSense.
 .TP
+.B set-type xbox360
+Changes the target virtual controller emulation type to a wired Microsoft Xbox 360 pad (bound by the kernel's xpad driver). Always uses the functionfs backend; gyro, touchpad, lightbar and battery have no Xbox 360 equivalent, rumble is passed through.
+.TP
+.B set-type xboxone
+Changes the target virtual controller emulation type to a Microsoft Xbox One S pad (GIP protocol, bound by the kernel's xpad driver). Always uses the functionfs backend, like xbox360.
+.TP
+.B set-type xboxseries
+Like xboxone, but presents an Xbox Series X|S pad, whose Share button is driven by the DS4 touchpad click.
+.TP
 .B set-type none
 Disables virtual controller emulation.
 .TP
