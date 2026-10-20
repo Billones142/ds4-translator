@@ -36,16 +36,42 @@ extern void send_physical_output_report(int fd, bool bluetooth, uint8_t motor_le
 #define FUNCTION_NAME "ds4emu0"
 #define MOUNT_POINT "/dev/ffs-" FUNCTION_NAME
 
+// xpad-bound vendor-class targets: no HID descriptors, no feature reports.
+static bool is_vendor_target(int target_type) {
+    return target_type == FFS_TARGET_XBOX360 || target_type == FFS_TARGET_XBOXONE ||
+           target_type == FFS_TARGET_XBOXSERIES;
+}
+
+static bool is_gip_target(int target_type) {
+    return target_type == FFS_TARGET_XBOXONE || target_type == FFS_TARGET_XBOXSERIES;
+}
+
 static void* ep0_loop(void *arg);
 static void* in_loop(void *arg);
 static void* out_loop(void *arg);
+
+/* MAC the emulated device advertises: uhid's uniq and the gadget's
+ * serialnumber want the string form, DS4/DualSense feature reports 0x10/0x12
+ * and 0x09 carry the same address byte-reversed. Defaults to the historical
+ * constant so a caller that never sets it behaves exactly as before; main.cpp
+ * overrides it from create_virtual_device() when the MAC squat is armed (see
+ * select_virtual_mac()). */
+static uint8_t virtual_mac_le[6] = { 0xe8, 0x47, 0x3a, 0xd6, 0xe7, 0x74 };
+static char virtual_mac_str[32] = "74:e7:d6:3a:47:e8";
+
+void functionfs_set_mac(const uint8_t mac_le[6], const char *mac_str) {
+    if (!mac_le || !mac_str) return;
+    memcpy(virtual_mac_le, mac_le, sizeof(virtual_mac_le));
+    snprintf(virtual_mac_str, sizeof(virtual_mac_str), "%s", mac_str);
+}
 
 // Same data tables raw-gadget-backend.c's/hidg-backend.c's/main.cpp's
 // GET_REPORT cases answer with -- see hidg-backend.c's build_feature_report()
 // doc comment for why this isn't shared via a header.
 static size_t build_feature_report(int target_type, uint8_t rnum, uint8_t *out) {
     memset(out, 0, 64);
-    bool is_ds4 = (target_type == 1);
+    if (is_vendor_target(target_type)) return 0; // no HID feature reports
+    bool is_ds4 = (target_type == FFS_TARGET_DS4);
     if (is_ds4) {
         if (rnum == 0x02 || rnum == 0x25) {
             out[0] = rnum;
@@ -61,10 +87,11 @@ static size_t build_feature_report(int target_type, uint8_t rnum, uint8_t *out) 
             return 37;
         } else if (rnum == 0x10 || rnum == 0x12) {
             out[0] = rnum;
-            static const uint8_t mac_info[15] = {
-                0xe8, 0x47, 0x3a, 0xd6, 0xe7, 0x74,
+            uint8_t mac_info[15] = {
+                0, 0, 0, 0, 0, 0,
                 0x08, 0x25, 0x00, 0x1e, 0x00, 0xee, 0x74, 0xd0, 0xbc
             };
+            memcpy(mac_info, virtual_mac_le, 6);
             memcpy(&out[1], mac_info, 15);
             return 16;
         } else if (rnum == 0x31 || rnum == 0xa3) {
@@ -108,12 +135,13 @@ static size_t build_feature_report(int target_type, uint8_t rnum, uint8_t *out) 
             memcpy(out, fw_data, 64);
             return 64;
         } else if (rnum == 0x09) {
-            static const uint8_t pairing_data[20] = {
+            uint8_t pairing_data[20] = {
                 0x09,
-                0xe8, 0x47, 0x3a, 0xd6, 0xe7, 0x74,
+                0, 0, 0, 0, 0, 0,
                 0x08, 0x25, 0x00, 0x1e, 0x00, 0xee, 0x74, 0xd0, 0xbc,
                 0x00, 0x00, 0x00, 0x00
             };
+            memcpy(&pairing_data[1], virtual_mac_le, 6);
             memcpy(out, pairing_data, 20);
             return 20;
         }
@@ -224,7 +252,9 @@ static bool find_udc(char *out, size_t out_size) {
 // functionfs_init(), using this blob only to learn the function's own
 // interface/endpoints.
 static size_t build_ffs_descriptors(int target_type, uint8_t *buf) {
-    uint16_t rdesc_len = (target_type == 1) ? (uint16_t)sizeof(ds4_usb_rdesc) : (uint16_t)sizeof(dualsense_usb_rdesc);
+    const bool xbox = is_vendor_target(target_type);
+    const bool gip = is_gip_target(target_type);
+    uint16_t rdesc_len = (target_type == FFS_TARGET_DS4) ? (uint16_t)sizeof(ds4_usb_rdesc) : (uint16_t)sizeof(dualsense_usb_rdesc);
 
     uint8_t *p = buf;
 
@@ -232,31 +262,38 @@ static size_t build_ffs_descriptors(int target_type, uint8_t *buf) {
     uint8_t *header = p;
     p += 20; // magic(4) + length(4) + flags(4) + fs_count(4) + hs_count(4)
 
-    uint8_t *descs_start = p;
     for (int speed = 0; speed < 2; speed++) {
         // Interface
         p[0] = 9; p[1] = USB_DT_INTERFACE;
         p[2] = 0; p[3] = 0; // bInterfaceNumber, bAlternateSetting
         p[4] = 2; // bNumEndpoints
-        p[5] = 3; // bInterfaceClass: HID
-        p[6] = 0; p[7] = 0; // bInterfaceSubClass, bInterfaceProtocol
+        if (xbox) {
+            // Vendor class: 0xFF/0x5D/0x01 is what xpad matches an Xbox 360
+            // pad on, 0xFF/0x47/0xD0 an Xbox One (GIP) one.
+            p[5] = 0xFF; p[6] = gip ? 0x47 : 0x5D; p[7] = gip ? 0xD0 : 0x01;
+        } else {
+            p[5] = 3; // bInterfaceClass: HID
+            p[6] = 0; p[7] = 0; // bInterfaceSubClass, bInterfaceProtocol
+        }
         p[8] = 1; // iInterface -> string index 1
         p += 9;
 
-        // HID class descriptor
-        p[0] = 9; p[1] = 0x21; // HID
-        p[2] = 0x11; p[3] = 0x01; // bcdHID 1.11
-        p[4] = 0; // bCountryCode
-        p[5] = 1; // bNumDescriptors
-        p[6] = 0x22; // Report
-        p[7] = rdesc_len & 0xFF; p[8] = rdesc_len >> 8;
-        p += 9;
+        if (!xbox) {
+            // HID class descriptor
+            p[0] = 9; p[1] = 0x21; // HID
+            p[2] = 0x11; p[3] = 0x01; // bcdHID 1.11
+            p[4] = 0; // bCountryCode
+            p[5] = 1; // bNumDescriptors
+            p[6] = 0x22; // Report
+            p[7] = rdesc_len & 0xFF; p[8] = rdesc_len >> 8;
+            p += 9;
+        }
 
         // Endpoint IN (1)
         p[0] = 7; p[1] = USB_DT_ENDPOINT;
         p[2] = USB_DIR_IN | 1;
         p[3] = 3; // Interrupt
-        p[4] = 64; p[5] = 0; // wMaxPacketSize
+        p[4] = (xbox && !gip) ? 32 : 64; p[5] = 0; // wMaxPacketSize
         p[6] = 4; // bInterval
         p += 7;
 
@@ -264,23 +301,21 @@ static size_t build_ffs_descriptors(int target_type, uint8_t *buf) {
         p[0] = 7; p[1] = USB_DT_ENDPOINT;
         p[2] = USB_DIR_OUT | 2;
         p[3] = 3; // Interrupt
-        p[4] = 64; p[5] = 0;
-        p[6] = 4;
+        p[4] = (xbox && !gip) ? 32 : 64; p[5] = 0;
+        p[6] = (xbox && !gip) ? 8 : 4;
         p += 7;
     }
-    size_t descs_len = (size_t)(p - descs_start);
     size_t total_len = (size_t)(p - buf);
 
     uint32_t magic = FUNCTIONFS_DESCRIPTORS_MAGIC_V2;
     uint32_t flags = FUNCTIONFS_HAS_FS_DESC | FUNCTIONFS_HAS_HS_DESC;
-    uint32_t fs_count = 4, hs_count = 4;
+    uint32_t desc_count = xbox ? 3 : 4; // per speed: interface [+ HID] + 2 endpoints
     uint32_t total_len32 = (uint32_t)total_len;
     memcpy(header, &magic, 4);
     memcpy(header + 4, &total_len32, 4);
     memcpy(header + 8, &flags, 4);
-    memcpy(header + 12, &fs_count, 4); // NOLINT(bugprone-not-null-terminated-result) -- fixed-size uint32 field, not a string
-    memcpy(header + 16, &hs_count, 4); // NOLINT(bugprone-not-null-terminated-result) -- fixed-size uint32 field, not a string
-    (void)descs_len;
+    memcpy(header + 12, &desc_count, 4); // NOLINT(bugprone-not-null-terminated-result) -- fixed-size uint32 field, not a string
+    memcpy(header + 16, &desc_count, 4); // NOLINT(bugprone-not-null-terminated-result) -- fixed-size uint32 field, not a string
 
     return total_len;
 }
@@ -323,10 +358,25 @@ static void handle_setup(struct FunctionFSDevice *dev, const struct usb_ctrlrequ
     uint8_t recip = setup->bRequestType & USB_RECIP_MASK;
     bool dir_in = (setup->bRequestType & USB_DIR_IN) != 0;
 
+    if (is_vendor_target(dev->target_type)) {
+        // xpad only talks over the interrupt endpoints; vendor control
+        // requests (e.g. from probing tools) just get a zeroed reply or are
+        // drained, so they don't sit out a control-transfer timeout.
+        if (req_type == USB_TYPE_VENDOR && dir_in) {
+            memset(buf, 0, sizeof(buf));
+            size_t len = setup->wLength < sizeof(buf) ? setup->wLength : sizeof(buf);
+            if (write(dev->ep0_fd, buf, len) < 0) perror("ep0 write (vendor request)");
+        } else if (req_type == USB_TYPE_VENDOR && setup->wLength > 0) {
+            ssize_t rv = read(dev->ep0_fd, buf, setup->wLength < sizeof(buf) ? setup->wLength : sizeof(buf));
+            (void)rv;
+        }
+        return;
+    }
+
     if (req_type == USB_TYPE_STANDARD && recip == USB_RECIP_INTERFACE &&
         setup->bRequest == USB_REQ_GET_DESCRIPTOR && (setup->wValue >> 8) == 0x22 /* HID Report */) {
-        const uint8_t *rdesc = (dev->target_type == 1) ? ds4_usb_rdesc : dualsense_usb_rdesc;
-        size_t rdesc_len = (dev->target_type == 1) ? sizeof(ds4_usb_rdesc) : sizeof(dualsense_usb_rdesc);
+        const uint8_t *rdesc = (dev->target_type == FFS_TARGET_DS4) ? ds4_usb_rdesc : dualsense_usb_rdesc;
+        size_t rdesc_len = (dev->target_type == FFS_TARGET_DS4) ? sizeof(ds4_usb_rdesc) : sizeof(dualsense_usb_rdesc);
         size_t len = setup->wLength < rdesc_len ? setup->wLength : rdesc_len;
         if (write(dev->ep0_fd, rdesc, len) < 0) perror("ep0 write (report descriptor)");
         return;
@@ -439,7 +489,25 @@ static void* out_loop(void *arg) {
         uint8_t r = cur_r, g = cur_g, b = cur_b;
         bool update = false;
 
-        if (dev->target_type == 1) { // TYPE_DS4
+        if (dev->target_type == FFS_TARGET_XBOX360) {
+            // Rumble: 00 08 00 <strong> <weak> 00 00 00. LED (01 03 xx) and
+            // everything else is ignored -- there is no lightbar to drive.
+            if (data[0] == 0x00 && data[1] == 0x08 && rv >= 5) {
+                motor_left = data[3];
+                motor_right = data[4];
+                update = true;
+            }
+        } else if (is_gip_target(dev->target_type)) {
+            // GIP rumble: 09 00 <seq> 09 00 <motor mask> <lt> <rt> <strong>
+            // <weak> ... with strong/weak as magnitude/512 (0-127). The
+            // init packets xpad sends on open (power, LED, auth) need no
+            // answer and are ignored along with everything else.
+            if (data[0] == 0x09 && rv >= 10) {
+                motor_left = data[8] > 127 ? 255 : (uint8_t)(data[8] * 2);
+                motor_right = data[9] > 127 ? 255 : (uint8_t)(data[9] * 2);
+                update = true;
+            }
+        } else if (dev->target_type == FFS_TARGET_DS4) {
             if (data[0] == 0x05 && rv >= 9) {
                 uint8_t flags = data[1];
                 if (flags & 0x01) {
@@ -502,21 +570,31 @@ static void* out_loop(void *arg) {
 // thread calls functionfs_send_input_report().
 static void* in_loop(void *arg) {
     struct FunctionFSDevice *dev = (struct FunctionFSDevice *)arg;
-    uint8_t local_buf[sizeof(dev->pending_report)];
+    uint8_t local_buf[FFS_PACKET_MAX];
     int last_errno = 0; // see hidg-backend.c's in_loop() doc comment
 
     while (dev->device_open) {
         pthread_mutex_lock(&dev->report_mutex);
-        while (dev->device_open && !dev->report_pending) {
+        while (dev->device_open && !dev->report_pending && dev->event_count == 0) {
             pthread_cond_wait(&dev->report_cond, &dev->report_mutex);
         }
         if (!dev->device_open) {
             pthread_mutex_unlock(&dev->report_mutex);
             break;
         }
-        size_t len = dev->pending_report_len;
-        memcpy(local_buf, dev->pending_report, len);
-        dev->report_pending = false;
+        // Queued event packets first, one per pass, so they reach the host
+        // ahead of (and never get replaced by) the newest input report.
+        size_t len;
+        if (dev->event_count > 0) {
+            len = dev->event_queue_len[dev->event_head];
+            memcpy(local_buf, dev->event_queue[dev->event_head], len);
+            dev->event_head = (dev->event_head + 1) % FFS_EVENT_QUEUE_SIZE;
+            dev->event_count--;
+        } else {
+            len = dev->pending_report_len;
+            memcpy(local_buf, dev->pending_report, len);
+            dev->report_pending = false;
+        }
         pthread_mutex_unlock(&dev->report_mutex);
 
         if (!dev->configured || dev->ep_in_fd < 0) continue;
@@ -549,6 +627,77 @@ bool functionfs_send_input_report(struct FunctionFSDevice *dev, const uint8_t *d
     return true;
 }
 
+bool functionfs_send_event_packet(struct FunctionFSDevice *dev, const uint8_t *data, size_t size) {
+    if (!dev->configured || dev->ep_in_fd < 0) return false;
+    if (size == 0 || size > FFS_PACKET_MAX) return false;
+
+    pthread_mutex_lock(&dev->report_mutex);
+    if (dev->event_count == FFS_EVENT_QUEUE_SIZE) {
+        (void)fprintf(stderr, "functionfs: event queue full, dropping oldest packet\n");
+        dev->event_head = (dev->event_head + 1) % FFS_EVENT_QUEUE_SIZE;
+        dev->event_count--;
+    }
+    size_t slot = (dev->event_head + dev->event_count) % FFS_EVENT_QUEUE_SIZE;
+    memcpy(dev->event_queue[slot], data, size);
+    dev->event_queue_len[slot] = size;
+    dev->event_count++;
+    pthread_cond_signal(&dev->report_cond);
+    pthread_mutex_unlock(&dev->report_mutex);
+
+    return true;
+}
+
+// Per-target USB identity. Real Sony DS4/DualSense descriptors use different
+// product strings ("Wireless Controller" vs "DualSense Wireless Controller");
+// the Xbox pads are vendor-class devices whose name xpad takes from its own
+// VID/PID table, so a name override would have no visible effect there.
+struct GadgetIdentity {
+    const char *vendor;
+    const char *product;
+    const char *bcd_device;
+    const char *manufacturer;
+    const char *default_product;
+    bool name_overridable;
+    // Device-level class/subclass/protocol as configfs strings, or NULL to
+    // leave them at 0 (class defined per-interface, as HID pads do).
+    const char *device_class;
+    const char *device_subclass;
+    const char *device_protocol;
+};
+
+static const struct GadgetIdentity *gadget_identity(int target_type) {
+    static const struct GadgetIdentity ds4 = {
+        "0x054c\n", "0x05c4\n", "0x8111\n", "Sony Computer Entertainment\n",
+        "Wireless Controller", true, NULL, NULL, NULL
+    };
+    static const struct GadgetIdentity dualsense = {
+        "0x054c\n", "0x0ce6\n", "0x8111\n", "Sony Interactive Entertainment\n",
+        "DualSense Wireless Controller", true, NULL, NULL, NULL
+    };
+    static const struct GadgetIdentity xbox360 = {
+        "0x045e\n", "0x028e\n", "0x0114\n", "\xc2\xa9Microsoft Corporation\n",
+        "Controller", false, "0xff\n", "0xff\n", "0xff\n"
+    };
+    // GIP pads: the real devices use class/subclass/protocol 0xFF/0x47/0xD0
+    // at the interface level and leave the device class at 0, so these
+    // identities do not set one.
+    static const struct GadgetIdentity xboxone = {
+        "0x045e\n", "0x02ea\n", "0x0408\n", "Microsoft\n",
+        "Controller", false, NULL, NULL, NULL
+    };
+    static const struct GadgetIdentity xboxseries = {
+        "0x045e\n", "0x0b12\n", "0x0508\n", "Microsoft\n",
+        "Controller", false, NULL, NULL, NULL
+    };
+    switch (target_type) {
+        case FFS_TARGET_XBOX360: return &xbox360;
+        case FFS_TARGET_XBOXONE: return &xboxone;
+        case FFS_TARGET_XBOXSERIES: return &xboxseries;
+        case FFS_TARGET_DUALSENSE: return &dualsense;
+        default: return &ds4;
+    }
+}
+
 bool functionfs_init(struct FunctionFSDevice *dev, int target_type, const char *product_name) {
     dev->ep0_fd = -1;
     dev->ep_in_fd = -1;
@@ -561,6 +710,8 @@ bool functionfs_init(struct FunctionFSDevice *dev, int target_type, const char *
     dev->in_thread_spawned = false;
     dev->pending_report_len = 0;
     dev->report_pending = false;
+    dev->event_head = 0;
+    dev->event_count = 0;
     pthread_mutex_init(&dev->report_mutex, NULL);
     pthread_cond_init(&dev->report_cond, NULL);
 
@@ -569,29 +720,33 @@ bool functionfs_init(struct FunctionFSDevice *dev, int target_type, const char *
     teardown_gadget_dir();
     if (!make_dir(GADGET_DIR)) return false;
 
-    bool is_ds4 = (target_type == 1);
+    const struct GadgetIdentity *id = gadget_identity(target_type);
 
     bool ok = true;
-    ok = ok && write_file_str(GADGET_DIR "/idVendor", "0x054c\n");
-    ok = ok && write_file_str(GADGET_DIR "/idProduct", is_ds4 ? "0x05c4\n" : "0x0ce6\n");
-    ok = ok && write_file_str(GADGET_DIR "/bcdDevice", "0x8111\n");
+    ok = ok && write_file_str(GADGET_DIR "/idVendor", id->vendor);
+    ok = ok && write_file_str(GADGET_DIR "/idProduct", id->product);
+    ok = ok && write_file_str(GADGET_DIR "/bcdDevice", id->bcd_device);
     ok = ok && write_file_str(GADGET_DIR "/bcdUSB", "0x0200\n");
+    if (id->device_class) {
+        ok = ok && write_file_str(GADGET_DIR "/bDeviceClass", id->device_class);
+        ok = ok && write_file_str(GADGET_DIR "/bDeviceSubClass", id->device_subclass);
+        ok = ok && write_file_str(GADGET_DIR "/bDeviceProtocol", id->device_protocol);
+    }
 
     ok = ok && make_dir(GADGET_DIR "/strings/0x409");
-    ok = ok && write_file_str(GADGET_DIR "/strings/0x409/manufacturer",
-                               is_ds4 ? "Sony Computer Entertainment\n" : "Sony Interactive Entertainment\n");
+    ok = ok && write_file_str(GADGET_DIR "/strings/0x409/manufacturer", id->manufacturer);
     {
-        // Real Sony DS4/DualSense USB descriptors use different product
-        // strings ("Wireless Controller" vs "DualSense Wireless
-        // Controller") -- caller passes a custom override (from ds4-ctl
-        // set-name) or NULL/empty to keep this default.
-        const char *default_product = is_ds4 ? "Wireless Controller" : "DualSense Wireless Controller";
-        const char *product = (product_name && product_name[0]) ? product_name : default_product;
+        // Caller passes a custom override (from ds4-ctl set-name) or
+        // NULL/empty to keep the per-type default.
+        const char *product = (id->name_overridable && product_name && product_name[0])
+                                  ? product_name : id->default_product;
         char product_line[80];
         (void)snprintf(product_line, sizeof(product_line), "%s\n", product);
         ok = ok && write_file_str(GADGET_DIR "/strings/0x409/product", product_line);
     }
-    ok = ok && write_file_str(GADGET_DIR "/strings/0x409/serialnumber", "74:e7:d6:3a:47:e8\n");
+    char serial_line[40];
+    snprintf(serial_line, sizeof(serial_line), "%s\n", virtual_mac_str);
+    ok = ok && write_file_str(GADGET_DIR "/strings/0x409/serialnumber", serial_line);
 
     ok = ok && make_dir(GADGET_DIR "/configs/c.1");
     ok = ok && make_dir(GADGET_DIR "/configs/c.1/strings/0x409");

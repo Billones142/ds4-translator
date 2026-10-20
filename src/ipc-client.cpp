@@ -199,7 +199,7 @@ const std::vector<std::string> &controller_values() {
 }
 
 const std::vector<std::string> &type_values() {
-    static const std::vector<std::string> values = {"ds4", "dualsense", "none", "hidden"};
+    static const std::vector<std::string> values = {"ds4", "dualsense", "xbox360", "xboxone", "xboxseries", "none", "hidden"};
     return values;
 }
 
@@ -209,7 +209,12 @@ const std::vector<std::string> &backend_values() {
 }
 
 const std::vector<std::string> &hide_method_values() {
-    static const std::vector<std::string> values = {"legacy", "unbind"};
+    static const std::vector<std::string> values = {"legacy", "unbind", "unlink"};
+    return values;
+}
+
+const std::vector<std::string> &toggle_values() {
+    static const std::vector<std::string> values = {"on", "off"};
     return values;
 }
 
@@ -227,6 +232,10 @@ bool is_valid_backend(const std::string &value) {
 
 bool is_valid_hide_method(const std::string &value) {
     return contains(hide_method_values(), value);
+}
+
+bool is_valid_toggle(const std::string &value) {
+    return contains(toggle_values(), value);
 }
 
 std::string join_values(const std::vector<std::string> &values) {
@@ -310,6 +319,13 @@ std::string build_set_hide_method(const std::string &method, std::string *error)
         return std::string();
     }
     return "set-hide-method " + method;
+}
+
+std::string build_set_mac_squat(const std::string &state, std::string *error) {
+    if (!check_value(state, toggle_values(), "mac squat state", error)) {
+        return std::string();
+    }
+    return "set-mac-squat " + state;
 }
 
 std::string build_led(int red, int green, int blue, int rumble_left, int rumble_right,
@@ -612,6 +628,9 @@ std::string status_value(const std::vector<StatusField> &fields, const std::stri
 std::string type_display_to_config(const std::string &display) {
     if (display == "DualShock 4") return "ds4";
     if (display == "DualSense") return "dualsense";
+    if (display == "Xbox 360") return "xbox360";
+    if (display == "Xbox One S") return "xboxone";
+    if (display == "Xbox Series X|S") return "xboxseries";
     if (display == "Hidden") return "hidden";
     return "none";
 }
@@ -619,6 +638,9 @@ std::string type_display_to_config(const std::string &display) {
 std::string type_config_to_display(const std::string &config) {
     if (config == "ds4") return "DualShock 4";
     if (config == "dualsense") return "DualSense";
+    if (config == "xbox360") return "Xbox 360";
+    if (config == "xboxone") return "Xbox One S";
+    if (config == "xboxseries") return "Xbox Series X|S";
     if (config == "hidden") return "Hidden";
     return "None";
 }

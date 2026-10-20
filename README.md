@@ -1,6 +1,6 @@
 # DualShock 4 to Virtual PlayStation Controller Translator
 
-A daemon for Linux that maps a physical DualShock 4 controller (connected via Bluetooth or USB) to a virtual DualShock 4 or DualSense controller (connected via virtual USB). It automatically hides the physical controller inputs to prevent double inputs in games, while supporting full LED and rumble passthrough.
+A daemon for Linux that maps a physical DualShock 4 controller (connected via Bluetooth or USB) to a virtual DualShock 4, DualSense, Xbox 360, Xbox One S or Xbox Series X|S controller (connected via virtual USB). It automatically hides the physical controller inputs to prevent double inputs in games, while supporting full LED and rumble passthrough.
 
 It includes an IPC runtime control program (`ds4-ctl`) that allows users to change configuration (such as the virtual controller emulation type or its reported name) at runtime without restarting the daemon.
 
@@ -14,6 +14,7 @@ It includes an IPC runtime control program (`ds4-ctl`) that allows users to chan
 - **Physical Controller Hiding**:
   - Exclusively grabs `/dev/input/event*` nodes using `EVIOCGRAB`.
   - Sets `/dev/hidraw*` permissions of the physical controller to `000` while open, restoring them on exit.
+- **Xbox Emulation**: `ds4-ctl set-type xbox360` presents a wired Xbox 360 pad (`045e:028e`), `xboxone` an Xbox One S pad (`045e:02ea`) and `xboxseries` an Xbox Series X|S pad (`045e:0b12`), all bound by the kernel's `xpad` driver, for games that only speak XInput. The Series pad's Share button is driven by the DS4 touchpad click (on the other two the touchpad click acts as Back/View). These are vendor-class USB devices, so they only exist on the `functionfs` backend (no `uhid` fallback, no `set-backend`/`set-name` for them). Buttons are mapped Cross/Circle/Square/Triangle → A/B/X/Y, Share/Options → Back/Start, PS → Guide; gyro, touchpad, lightbar and battery have no equivalent, rumble is passed through. Needs the `xpad` module (`CONFIG_JOYSTICK_XPAD`) in addition to the `functionfs` modules.
 - **Rumble & LED Passthrough**: Translates force-feedback rumble and lightbar colors from games back to the physical DualShock 4 controller.
 - **Battery Status Passthrough**: Forwards the physical controller's real charge level and cable/charging state to the virtual device (translated to DualSense's status format when emulating one), instead of always reporting fully charged.
 - **Bluetooth Support**: Parses both minimal USB and extended Bluetooth input reports from the physical DualShock 4, computing output report CRC32 checksums as required by the Sony Bluetooth HID specification.

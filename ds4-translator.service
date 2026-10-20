@@ -12,6 +12,11 @@ ExecStartPre=-/usr/bin/modprobe libcomposite
 ExecStartPre=-/usr/bin/modprobe usb_f_fs
 ExecStartPre=-/usr/local/bin/rebind-unbound-controllers.sh
 ExecStart=/usr/local/bin/ds4-translator
+# /var/lib/ds4-translator holds the remembered controller MAC used by the
+# unlink hide method's MAC squat; /run/ds4-translator publishes the MAC the
+# emulated device is currently advertising, for libudev-sony-spoof.so.
+StateDirectory=ds4-translator
+RuntimeDirectory=ds4-translator
 ExecStopPost=-/usr/local/bin/rebind-unbound-controllers.sh
 Restart=on-failure
 RestartSec=10

@@ -15,6 +15,9 @@ ScrollView {
         const type = DaemonController.emulationType;
         const label = type === "ds4" ? qsTr("Emulated DualShock 4")
             : type === "dualsense" ? qsTr("Emulated DualSense")
+            : type === "xbox360" ? qsTr("Emulated Xbox 360")
+            : type === "xboxone" ? qsTr("Emulated Xbox One S")
+            : type === "xboxseries" ? qsTr("Emulated Xbox Series X|S")
             : qsTr("Emulated controller (off)");
         return InputMonitor.virtualLive ? label : qsTr("%1 — idle").arg(label);
     }

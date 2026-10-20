@@ -84,6 +84,32 @@ const char *udev_device_get_subsystem(struct udev_device *udev_device) {
     return NULL;
 }
 
+/* The emulated device's serial is its MAC address, and that is no longer a
+ * constant: when the daemon's MAC squat is armed the emulated device takes
+ * over the physical pad's MAC so hid-playstation refuses to probe the real
+ * one. This shim runs inside the game's process, not the daemon's, so the
+ * live value is picked up from the file the daemon publishes. Falls back to
+ * the historical constant when the daemon isn't running or hasn't written it.
+ */
+#define DEFAULT_VIRTUAL_MAC "74:e7:d6:3a:47:e8"
+
+static const char *virtual_mac_serial(void) {
+    static char cached[32];
+    if (cached[0]) return cached;
+
+    FILE *f = fopen("/run/ds4-translator/virtual-mac", "r");
+    if (f) {
+        if (fgets(cached, sizeof(cached), f)) {
+            cached[strcspn(cached, "\r\n")] = '\0';
+        }
+        (void)fclose(f);
+    }
+    if (!cached[0]) {
+        (void)snprintf(cached, sizeof(cached), "%s", DEFAULT_VIRTUAL_MAC);
+    }
+    return cached;
+}
+
 const char *udev_device_get_sysattr_value(struct udev_device *udev_device, const char *sysattr) {
     init_functions();
     
@@ -101,7 +127,7 @@ const char *udev_device_get_sysattr_value(struct udev_device *udev_device, const
             return is_dualsense ? "DualSense Wireless Controller" : "Wireless Controller";
         }
         if (!strcmp(sysattr, "serial")) {
-            return "74:e7:d6:3a:47:e8";
+            return virtual_mac_serial();
         }
         if (!strcmp(sysattr, "uevent")) {
             const char *real_uevent = real_get_sysattr ? real_get_sysattr(real_dev, sysattr) : "";

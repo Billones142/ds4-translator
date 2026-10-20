@@ -36,6 +36,144 @@ To prevent games and launchers (like Steam) from receiving double-input or regis
 4. **Exclusive Grab (`EVIOCGRAB`)**: The daemon opens the event nodes and invokes `ioctl(fd, EVIOCGRAB, 1)`. This tells the kernel to route all inputs exclusively to the daemon.
 5. **Restoration on Exit**: When the physical controller disconnects or the daemon is stopped, the daemon restores the original file permission modes (usually `0660` / `0664`) of all hidraw, event, and joystick nodes so they return to normal.
 
+### 2a. Hide Methods (`ds4-ctl set-hide-method`)
+
+Which of the mechanisms above actually runs is selected by `hide_method=` in
+`/etc/ds4-translator.conf` (`ds4-ctl set-hide-method <legacy|unbind|unlink>`).
+It applies on the next physical (re)connection.
+
+| Method | USB | Bluetooth |
+| --- | --- | --- |
+| `legacy` | `chmod 0600` + `setfacl -b` + `EVIOCGRAB`; nodes exist, permission-blocked | same |
+| `unbind` (default) | kernel HID driver fully unbound, **no node ever created**; read via libusb | driver stays bound, nodes exist but are inert (HID-BPF swallows every report); siblings also chmod'd + grabbed |
+| `unlink` | identical to `unbind` — there is no node to unlink | `unbind`, plus the pad is moved onto `hid-generic`, the leftover `hidraw`/`event*`/`js*` `/dev` entries are deleted outright, and the emulated device squats the pad's MAC so `hid-playstation` refuses it to begin with |
+
+The asymmetry is forced by BlueZ: the Bluetooth `hid_device` is created by
+`bluetoothd`'s input plugin writing into `/dev/uhid`, and taking the L2CAP
+session away from `bluetoothd` requires dropping the device's ACL link
+entirely — so the driver cannot simply be unbound the way the USB side is.
+`unbind` therefore neutralizes the nodes instead of removing them; `unlink`
+removes them.
+
+**How `unlink` works.** `/dev` is `devtmpfs`, where root can `unlink()` a
+device node like any other file. The unlink drops only the *path*: the
+character device itself is untouched, already-open descriptors (the daemon's
+included) keep working, and the device stays listed in sysfs. What disappears
+is the only handle other processes have on it — `libudev` enumeration still
+reports the device, but the `DEVNAME` it hands out now `open()`s to `ENOENT`,
+which Steam/SDL/the browser Gamepad API treat as "device gone" rather than
+listing a second, frozen gamepad. The `chmod`/`EVIOCGRAB` steps still run
+first, so they remain in force as a fallback.
+
+Node identity (`st_rdev`, mode, uid, gid) is captured before the unlink and
+replayed via `mknod` on teardown, so stopping the daemon is enough to get the
+pad back — `udev` would eventually recreate the node on the device's next
+uevent, but a Bluetooth controller that stays connected across a daemon
+restart never generates one.
+
+**The `hid-generic` swap.** Unlinking `/dev` entries doesn't reach everything
+`hid-playstation` creates: it also registers a `power_supply`
+(`ps-controller-battery-<MAC>`), an LED class device and a force-feedback
+device, none of which have a `/dev` node to remove. Because Bluetooth keeps
+the driver bound, the *physical* pad's battery therefore shows up in the
+desktop's battery indicator next to the emulated device's own.
+
+Simply unbinding the driver doesn't work: HID-BPF — the only Bluetooth
+transport available here — needs a driver bound to receive reports at all,
+so a driverless device is invisible to this daemon too. That was tried and
+rejected in `9aa821c`.
+
+`unlink` instead moves the device onto a *different* driver: `hid-generic`,
+which registers none of those extras. So the battery never exists, while
+HID-BPF keeps working because a driver is still bound. On release the device
+is handed back to `hid-playstation`.
+
+`hid-generic` does not accept the device on its own, though. Its
+`hid_generic_match()` refuses anything listed in the kernel's
+`hid_have_special_driver` table — which is exactly the set of devices
+`hid-playstation` claims — so a bare write to its `bind` file returns
+`ENODEV`. The only override is hid's `ignore_special_drivers` module
+parameter, so the daemon raises
+`/sys/module/hid/parameters/ignore_special_drivers` for the duration of the
+single `bind` write and restores the previous value immediately after. That
+parameter is global, so any *other* HID device probing inside that window
+would also land on `hid-generic`; the hid bus has no per-device
+`driver_override`, so there is no narrower lever available.
+
+One consequence has to be compensated for: a Bluetooth DS4 only emits the
+short `0x01` input report (no gyro, accelerometer or touchpad) until
+something reads feature report `0x02`. `hid-playstation` does that in
+`probe()`; `hid-generic` doesn't, so the daemon issues that `HIDIOCGFEATURE`
+itself right after the swap.
+
+**The MAC squat.** The swap is still reactive: `hid-playstation` binds first
+and the daemon undoes it a few hundred milliseconds later, so the physical
+pad's battery does briefly exist (long enough to fire a `power_supply` uevent
+that desktops turn into a notification) and the driver does claim a player-slot
+LED from its global allocator on every connect.
+
+That can be prevented outright, because `hid-playstation` keeps one global list
+of the controllers it has probed, keyed by MAC address, and refuses any second
+device carrying a MAC already in it:
+
+```c
+if (!memcmp(entry->mac_address, dev->mac_address, sizeof(dev->mac_address))) {
+        hid_err(dev->hdev, "Duplicate device found for MAC address %pMR.\n", ...);
+        return -EEXIST;
+```
+
+The emulated device is probed by `hid-playstation` too, and every identity
+field it reports is the daemon's to choose. So the daemon gives the emulated
+device the *physical* pad's MAC — learned from `HID_UNIQ` in the pad's `uevent`
+on the first Bluetooth connection, and remembered in
+`/var/lib/ds4-translator/last-physical-mac` — and from then on the kernel turns
+the real pad away before it can register a battery, an LED class or a
+force-feedback device at all. `ds4-ctl set-mac-squat off` disables it.
+
+Three things follow from how the kernel implements this:
+
+- **Whoever registers second loses.** If the physical pad is already in the
+  list, the *emulated* device is the one that gets `-EEXIST`. So the squat only
+  ever arms under `unlink`, the one method that takes the pad off
+  `hid-playstation` before the emulated device is created, and
+  `select_virtual_mac()` re-checks that no real pad is bound to
+  `hid-playstation` every time the emulated device is created.
+- **It does not replace the `ignore_special_drivers` raise.**
+  `hid_generic_match()` refuses a device when another driver *matches* it, not
+  when that driver's probe succeeded — `hid-playstation` still matches the DS4
+  by ID. A turned-away pad is left driverless, and the daemon still has to bind
+  `hid-generic` by hand.
+- **The emulated device has to already exist when the pad connects.** To block
+  the first connection after a boot rather than only reconnects, the daemon
+  brings the emulated device up on its own at startup purely to hold the
+  address. The cost is that games see a controller whenever the daemon runs,
+  pad or no pad; that is the tradeoff `set-mac-squat off` buys back.
+
+A blocked connect logs `hid-playstation ...: Duplicate device found for MAC
+address ...` to the kernel ring buffer. That is the mechanism working, not an
+error.
+
+The pad is handed back to `hid-playstation` on release, which is why every
+release path destroys the emulated device *first* — the rebind would otherwise
+be refused for the same reason.
+
+The swap is best-effort throughout — any failure hands the device straight
+back to `hid-playstation`, and the connection behaves exactly like the plain
+`unbind` method. `rebind-unbound-controllers.sh` (wired into the service's
+`ExecStartPre`/`ExecStopPost`) also treats a Bluetooth controller left on
+`hid-generic` as needing repair, since a crash skips the hand-back the same
+way it skips the existing rebind-on-exit paths.
+
+Two known limits:
+- Anything that reads `major:minor` out of sysfs and `mknod`s its own node
+  still reaches the device. No real gamepad consumer does this.
+- `udev` recreates a missing node on the next `add`/`change` uevent for the
+  device, including ones the daemon causes itself (the delayed `udevadm
+  trigger` after virtual device creation, the bare `udevadm trigger` on type
+  changes). A 500 ms sweep in the main loop (`reapply_unlinked_nodes()`)
+  re-unlinks anything that came back, so the hiding is sticky rather than
+  silently lapsing.
+
 ---
 
 ## 3. Emulating the Virtual Controller

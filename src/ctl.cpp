@@ -23,7 +23,7 @@ void print_usage() {
     std::cout << "Commands:" << std::endl;
     std::cout << "  version                          Print ds4-ctl's version" << std::endl;
     std::cout << "  status                          Get current status of the translation daemon" << std::endl;
-    std::cout << "  set-type <ds4|dualsense|none|hidden>   Change the virtual controller emulation type at runtime" << std::endl;
+    std::cout << "  set-type <ds4|dualsense|xbox360|xboxone|xboxseries|none|hidden>   Change the virtual controller emulation type at runtime" << std::endl;
     std::cout << "                                   (none = fully untouched physical passthrough, hidden = physical" << std::endl;
     std::cout << "                                   hidden from other apps but not translated)" << std::endl;
     std::cout << "  set-backend <ds4|dualsense> <uhid|functionfs>   Change that controller type's backend at" << std::endl;
@@ -40,9 +40,9 @@ void print_usage() {
     std::cout << "                                   NOTE: vendor ID stays Sony's regardless -- some games/" << std::endl;
     std::cout << "                                   drivers cross-check name against vendor ID, so a custom" << std::endl;
     std::cout << "                                   name may raise compatibility suspicion in those cases." << std::endl;
-    std::cout << "  create-virtual <ds4|dualsense>   Create a standalone virtual controller, no physical pad needed" << std::endl;
+    std::cout << "  create-virtual <ds4|dualsense|xbox360|xboxone|xboxseries> Create a standalone virtual controller, no physical pad needed" << std::endl;
     std::cout << "  destroy-virtual                  Destroy the standalone virtual controller" << std::endl;
-    std::cout << "  virtual [ds4|dualsense] [--auto] Create (if needed) a standalone virtual controller and open" << std::endl;
+    std::cout << "  virtual [ds4|dualsense|xbox360|xboxone|xboxseries] [--auto] Create (if needed) a standalone virtual controller and open" << std::endl;
     std::cout << "                                   an interactive keyboard button-tester UI to drive it" << std::endl;
     std::cout << "                                   (--auto: destroy it on exit, but only if this run is the" << std::endl;
     std::cout << "                                   one that created it)" << std::endl;
@@ -66,17 +66,33 @@ void print_usage() {
     std::cout << "                                   overwrites it." << std::endl;
     std::cout << "  led --reset                      Hand the light bar and motors straight back to the" << std::endl;
     std::cout << "                                   emulated device" << std::endl;
-    std::cout << "  set-hide-method <legacy|unbind>  Change how the physical controller is hidden from other" << std::endl;
-    std::cout << "                                   apps (applies on the next physical (re)connection). unbind" << std::endl;
+    std::cout << "  set-hide-method                  Change how the physical controller is hidden from other" << std::endl;
+    std::cout << "    <legacy|unbind|unlink>         apps (applies on the next physical (re)connection). unbind" << std::endl;
     std::cout << "                                   (default) hides it before any other app can see it, with" << std::endl;
     std::cout << "                                   live translation either way: USB fully unbinds the kernel" << std::endl;
     std::cout << "                                   HID driver (no hidraw/input node exists at all) and reads" << std::endl;
     std::cout << "                                   it via libusb instead; Bluetooth keeps the driver bound" << std::endl;
     std::cout << "                                   (hidraw/input nodes still exist) but uses a HID-BPF" << std::endl;
     std::cout << "                                   program to make every report invisible to them while" << std::endl;
-    std::cout << "                                   mirroring it to this daemon. legacy is the older" << std::endl;
-    std::cout << "                                   chmod/setfacl/EVIOCGRAB method -- node exists but" << std::endl;
-    std::cout << "                                   permission-blocked, for both USB and Bluetooth." << std::endl;
+    std::cout << "                                   mirroring it to this daemon. unlink goes further on" << std::endl;
+    std::cout << "                                   Bluetooth: it moves the pad onto the hid-generic driver" << std::endl;
+    std::cout << "                                   (so no battery, LED or force-feedback device is ever" << std::endl;
+    std::cout << "                                   registered for it) and deletes the leftover hidraw/" << std::endl;
+    std::cout << "                                   input/js /dev entries outright, so other apps get" << std::endl;
+    std::cout << "                                   ENOENT instead of a permission error on a live node." << std::endl;
+    std::cout << "                                   legacy is the older chmod/setfacl/EVIOCGRAB method --" << std::endl;
+    std::cout << "                                   node exists but permission-blocked, USB and Bluetooth." << std::endl;
+    std::cout << "  set-mac-squat <on|off>           unlink method only. On (default), the emulated device" << std::endl;
+    std::cout << "                                   advertises the physical pad's own MAC address, which" << std::endl;
+    std::cout << "                                   makes the kernel's hid-playstation driver refuse the" << std::endl;
+    std::cout << "                                   real pad outright -- it never registers a battery, LED" << std::endl;
+    std::cout << "                                   or force-feedback device for it, not even briefly. The" << std::endl;
+    std::cout << "                                   MAC is learned on the first Bluetooth connection and" << std::endl;
+    std::cout << "                                   remembered, so the emulated device is brought up on its" << std::endl;
+    std::cout << "                                   own at startup to hold it: with this on, games see a" << std::endl;
+    std::cout << "                                   controller whenever the daemon runs, pad or no pad." << std::endl;
+    std::cout << "  forget-mac                       Discard the remembered controller MAC (disarms the" << std::endl;
+    std::cout << "                                   squat until a pad connects again)." << std::endl;
 }
 
 // One command/response exchange, using the shared client in ipc-client.cpp
@@ -176,19 +192,21 @@ struct CommandSpec {
 static const CommandSpec kCommands[] = {
     {"version",          nullptr},
     {"status",           nullptr},
-    {"set-type",         "ds4 dualsense none hidden"},
+    {"set-type",         "ds4 dualsense xbox360 xboxone xboxseries none hidden"},
     {"set-backend",      nullptr}, // position-aware, special-cased in --complete-args below
     {"set-name",         nullptr}, // position-aware (ds4|dualsense, then free-text name), special-cased below
-    {"create-virtual",   "ds4 dualsense"},
+    {"create-virtual",   "ds4 dualsense xbox360 xboxone xboxseries"},
     {"destroy-virtual",  nullptr},
-    {"virtual",          "ds4 dualsense --auto"},
+    {"virtual",          "ds4 dualsense xbox360 xboxone xboxseries --auto"},
     {"release-physical", nullptr},
     {"resume-physical",  nullptr},
     {"tap",              nullptr},
     {"test",             nullptr},
     {"identify",         nullptr},
     {"led",              "--reset"},
-    {"set-hide-method",  "legacy unbind"},
+    {"set-hide-method",  "legacy unbind unlink"},
+    {"set-mac-squat",    "on off"},
+    {"forget-mac",       nullptr},
 };
 
 static const CommandSpec* find_command(const std::string& name) {
@@ -825,6 +843,13 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         full_cmd = ds4ipc::build_set_hide_method(argv[2], &build_error);
+    } else if (cmd == "set-mac-squat") {
+        if (argc < 3) {
+            std::cerr << "Error: set-mac-squat requires "
+                      << ds4ipc::join_values(ds4ipc::toggle_values()) << std::endl;
+            return 1;
+        }
+        full_cmd = ds4ipc::build_set_mac_squat(argv[2], &build_error);
     } else if (cmd == "led") {
         if (argc >= 3 && std::string(argv[2]) == "--reset") {
             full_cmd = ds4ipc::kLedResetCommand;
